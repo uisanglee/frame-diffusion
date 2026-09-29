@@ -22,6 +22,11 @@ classifiers = [
 ]
 dependencies = ["torch>=2.5,<3", "numpy>=1.26", "scipy>=1.12", "pillow>=10"]
 
+[project.urls]
+Homepage = "https://github.com/uisanglee/frame-diffusion"
+Repository = "https://github.com/uisanglee/frame-diffusion"
+Issues = "https://github.com/uisanglee/frame-diffusion/issues"
+
 [project.optional-dependencies]
 browser = ["playwright>=1.48"]
 test = ["pytest>=8"]

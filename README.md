@@ -1,5 +1,9 @@
 # FrameDiff — 웹 컴포넌트 위치·크기 보정 연구 코드
 
+[![CI](https://github.com/uisanglee/frame-diffusion/actions/workflows/ci.yml/badge.svg)](https://github.com/uisanglee/frame-diffusion/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.11–3.14](https://img.shields.io/badge/python-3.11--3.14-blue.svg)](pyproject.toml)
+
 실행 가능한 레이아웃 트리에 노이즈를 넣고, 목표 frame을 조건으로 속성 편집을 반복하는 **diffusion-inspired tree mutation denoiser**입니다. 데이터 생성 → 학습 → 체크포인트 → 수정 → 비교 실험 → Chromium 검증 → 결과 집계까지 포함합니다.
 
 > Status: research prototype (`v0.1.0`). API, LayoutIR schema, checkpoint compatibility may change before `v1.0`.

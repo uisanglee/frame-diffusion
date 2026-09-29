@@ -2,6 +2,9 @@
 
 ## 최초 게시
 
+공식 공개 저장소는 <https://github.com/uisanglee/frame-diffusion>입니다. 아래 절차는 새 fork나
+이전 설치를 다시 게시할 때의 참고용입니다.
+
 현재 로컬 저장소의 기본 branch는 `main`입니다. GitHub에서 빈 저장소를 만들 때 README,
 license, `.gitignore`를 추가하지 마세요. 이미 로컬에 모두 있습니다.
 
@@ -13,11 +16,8 @@ git commit -m "feat: initialize FrameDiff research toolkit"
 gh repo create frame-diffusion --private --source=. --remote=origin --push
 ```
 
-공개 저장소로 바로 만들려면 `--private` 대신 `--public`을 사용합니다. 실제 원격 주소가 생기면
-다음 placeholder 두 곳을 교체하세요.
-
-- `CITATION.cff`: 필요하면 `repository-code`와 실제 저자/기관 추가
-- `.github/ISSUE_TEMPLATE/config.yml`: `OWNER/REPOSITORY`
+공개 저장소로 바로 만들려면 `--private` 대신 `--public`을 사용합니다. 공개 논문이나 기관
+프로젝트로 전환할 때는 `CITATION.cff`의 실제 저자·기관을 추가하세요.
 
 CLI 없이 웹에서 저장소를 만든 경우:
 
@@ -28,7 +28,7 @@ git remote add origin git@github.com:OWNER/frame-diffusion.git
 git push -u origin main
 ```
 
-이 문서의 명령은 예시입니다. 현재 작업에서는 GitHub 원격을 임의로 생성하거나 push하지 않습니다.
+이 문서의 명령은 예시이며 기존 공식 원격에 다시 적용하지 마세요.
 
 ## 권장 저장소 설정
 

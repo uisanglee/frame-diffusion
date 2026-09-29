@@ -5,6 +5,8 @@ type: software
 version: 0.1.0
 date-released: 2026-09-30
 license: MIT
+repository-code: "https://github.com/uisanglee/frame-diffusion"
+url: "https://github.com/uisanglee/frame-diffusion"
 authors:
   - name: "FrameDiff contributors"
 abstract: "A research toolkit for correcting frontend component geometry through executable tree edits."
