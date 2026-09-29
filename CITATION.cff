@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+message: "If you use this research software, please cite this repository and the original Tree Diffusion paper."
+title: "FrameDiff: Executable Tree-Edit Denoising for Frontend Layout Repair"
+type: software
+version: 0.1.0
+date-released: 2026-09-30
+license: MIT
+authors:
+  - name: "FrameDiff contributors"
+abstract: "A research toolkit for correcting frontend component geometry through executable tree edits."
+references:
+  - type: conference-paper
+    title: "Diffusion On Syntax Trees For Program Synthesis"
+    authors:
+      - family-names: Kapur
+        given-names: Shreyas
+      - family-names: Jenner
+        given-names: Erik
+      - family-names: Russell
+        given-names: Stuart
+    year: 2025
+    conference:
+      name: "International Conference on Learning Representations"
+    identifiers:
+      - type: url
+        value: "https://arxiv.org/abs/2405.20519"

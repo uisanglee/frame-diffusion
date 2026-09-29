@@ -1,0 +1,30 @@
+name: Experiment proposal or result
+description: Propose or document a reproducible research experiment
+title: "[Experiment]: "
+labels: [experiment]
+body:
+  - type: textarea
+    id: hypothesis
+    attributes:
+      label: Hypothesis
+    validations:
+      required: true
+  - type: textarea
+    id: protocol
+    attributes:
+      label: Protocol
+      description: Dataset version, split groups, model config, seeds, baselines, metric, and budget.
+    validations:
+      required: true
+  - type: textarea
+    id: hardware
+    attributes:
+      label: Hardware and software
+      description: GPU, CPU, Python, PyTorch/CUDA, commit SHA, and exact command.
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Results or success criteria
+      description: Include failed runs and uncertainty, not only the best run.

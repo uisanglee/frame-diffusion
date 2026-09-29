@@ -1,0 +1,7 @@
+# Local Python 3.12 macOS arm64 smoke-test environment; NOT a CUDA wheel lock.
+torch==2.14.0
+numpy==2.5.3
+scipy==1.18.1
+pillow==12.3.0
+playwright==1.63.0
+pytest==9.1.1

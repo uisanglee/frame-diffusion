@@ -1,0 +1,10 @@
+{
+  "out": "runs/smoke-suite",
+  "train": "data/smoke/train.jsonl",
+  "val": "data/smoke/val.jsonl",
+  "test": "data/smoke/test.jsonl",
+  "seeds": [42],
+  "train_args": ["--device", "cpu", "--hidden", "64", "--layers", "2", "--heads", "4", "--batch-size", "4", "--steps", "50", "--eval-every", "25", "--log-every", "25"],
+  "eval_args": ["--device", "cpu", "--limit", "3", "--steps", "5", "--budget", "40"],
+  "experiments": [{"name": "smoke", "eval_args": ["--methods", "none,coordinate,random,model,copy-boxes"]}]
+}

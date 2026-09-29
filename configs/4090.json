@@ -1,0 +1,14 @@
+{
+  "out": "runs/4090-suite",
+  "train": "data/synthetic/train.jsonl",
+  "val": "data/synthetic/val.jsonl",
+  "test": "data/synthetic/test.jsonl",
+  "seeds": [42, 43, 44],
+  "train_args": ["--device", "cuda", "--bf16", "--hidden", "512", "--layers", "8", "--heads", "8", "--batch-size", "8", "--accumulation", "4", "--steps", "10000"],
+  "eval_args": ["--device", "cuda", "--steps", "10", "--beam", "2", "--topk", "8", "--budget", "160", "--browser-verify"],
+  "experiments": [
+    {"name": "tree-denoiser", "eval_args": ["--methods", "none,copy-boxes,coordinate,random,model"]},
+    {"name": "no-tree-bias", "train_args": ["--no-tree-bias"], "eval_args": ["--methods", "model"]},
+    {"name": "fixed-pair-editor", "train_args": ["--fixed-pairs"], "eval_args": ["--methods", "model"]}
+  ]
+}
