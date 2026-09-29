@@ -6,6 +6,10 @@ updates:
       interval: monthly
     labels: [dependencies]
     open-pull-requests-limit: 5
+    ignore:
+      # VLM major versions can change model classes and generation APIs.
+      - dependency-name: transformers
+        update-types: [version-update:semver-major]
   - package-ecosystem: github-actions
     directory: /
     schedule:
