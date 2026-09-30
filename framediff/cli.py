@@ -4,6 +4,8 @@ from pathlib import Path
 def main(argv=None):
     p=argparse.ArgumentParser(description='FrameDiff executable layout repair toolkit')
     sub=p.add_subparsers(dest='command',required=True)
+    from .web_experiment import add_parsers
+    add_parsers(sub)
     g=sub.add_parser('generate');g.add_argument('--out',required=True);g.add_argument('--count',type=int,default=1000);g.add_argument('--seed',type=int,default=42)
     t=sub.add_parser('train')
     t.add_argument('--train',required=True);t.add_argument('--val',required=True);t.add_argument('--out',required=True)
@@ -30,17 +32,31 @@ def main(argv=None):
     v=sub.add_parser('vlm');v.add_argument('--backend',choices=['qwen','openai-compatible'],default='qwen');v.add_argument('--model',default='Qwen/Qwen3-VL-8B-Instruct');v.add_argument('--revision',default='main');v.add_argument('--endpoint',default='http://localhost:8000/v1/chat/completions');v.add_argument('--api-key-env',default='VLM_API_KEY')
     v.add_argument('--task',choices=['generate-ir','revise-ir','generate-html','revise-html','extract-frames'],required=True);v.add_argument('--image',action='append',default=[]);v.add_argument('--current');v.add_argument('--frames');v.add_argument('--out',required=True)
     v.add_argument('--four-bit',action='store_true');v.add_argument('--max-new-tokens',type=int,default=4096);v.add_argument('--max-pixels',type=int,default=1048576);v.add_argument('--seed',type=int,default=42)
+    vb=sub.add_parser('vlm-baseline',help='Batch VLM revision from identical initial IRs')
+    vb.add_argument('--data',required=True);vb.add_argument('--out',required=True)
+    vb.add_argument('--backend',choices=['qwen','openai-compatible'],default='qwen')
+    vb.add_argument('--model',default='Qwen/Qwen3-VL-8B-Instruct');vb.add_argument('--revision',default='main')
+    vb.add_argument('--endpoint',default='http://localhost:8000/v1/chat/completions');vb.add_argument('--api-key-env',default='VLM_API_KEY')
+    vb.add_argument('--input-mode',choices=['auto','screenshot','frames'],default='auto')
+    vb.add_argument('--four-bit',action='store_true');vb.add_argument('--resume',action='store_true')
+    for key,default in [('max-new-tokens',8192),('max-pixels',1048576),('seed',42),('limit',0),('rounds',1)]:
+        vb.add_argument('--'+key,type=int,default=default)
     pair=sub.add_parser('make-pair');pair.add_argument('--current',required=True);pair.add_argument('--target',required=True);pair.add_argument('--out',required=True);pair.add_argument('--id',required=True);pair.add_argument('--group',required=True);pair.add_argument('--clean');pair.add_argument('--ground-truth');pair.add_argument('--target-kind',choices=['oracle_frames','predicted_frames'],required=True)
     a=sub.add_parser('suite');a.add_argument('--config',required=True)
     export=sub.add_parser('export-example');export.add_argument('--data',required=True);export.add_argument('--out',required=True);export.add_argument('--index',type=int,default=0)
     infer=sub.add_parser('repair');infer.add_argument('--ir',required=True);infer.add_argument('--target',required=True);infer.add_argument('--checkpoint',required=True);infer.add_argument('--out',required=True);infer.add_argument('--device',default='auto')
     for name,default in [('steps',10),('beam',2),('topk',8),('budget',160)]:infer.add_argument('--'+name,type=int,default=default)
     args=p.parse_args(argv)
+    if args.command=='vlm-baseline' and (args.rounds<1 or args.max_pixels<1 or args.max_new_tokens<1 or args.limit<0):
+        p.error('rounds, max-pixels and max-new-tokens must be positive; limit must be nonnegative')
     if args.command=='compare-renderers' and (args.repeats<1 or args.warmup<0 or args.limit<0):
         p.error('repeats must be positive; warmup and limit must be nonnegative')
     for key in ('steps','batch_size','accumulation','hidden','layers','heads','max_nodes','max_noise','eval_every','log_every','val_samples','beam','topk','budget','cpu_threads'):
         if hasattr(args,key) and getattr(args,key)<1:p.error(key+' must be positive')
-    if args.command=='generate':
+    if args.command in ('web-prepare','web-repair','web-evaluate'):
+        from .web_experiment import prepare,repair_pages,evaluate_pages
+        {'web-prepare':prepare,'web-repair':repair_pages,'web-evaluate':evaluate_pages}[args.command](args)
+    elif args.command=='generate':
         from .data import generate
         print(generate(args.out,args.count,args.seed))
     elif args.command=='train':
@@ -78,6 +94,9 @@ def main(argv=None):
     elif args.command=='vlm':
         from .vlm import run
         run(args)
+    elif args.command=='vlm-baseline':
+        from .vlm_baseline import build_baseline
+        build_baseline(args)
     elif args.command=='make-pair':
         from .ir import read_json,write_jsonl,validate
         from .data import group_split,differences

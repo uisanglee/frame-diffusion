@@ -4,6 +4,25 @@
 
 ## 검증된 항목
 
+### 실제 HTML 파이프라인 추가 검증
+
+중간 피드백 추가: 실제 카드 width만 변경 → 줄바꿈/auto height 증가 → 아래 형제 이동을 Chromium에서 확인하고,
+그 좌표가 다음 신경망 입력 tensor에 전달되는 회귀 테스트를 추가했습니다. boxes/frames/raster 모드의
+실제 배치 결과 동등성, 후보 실패 보존, 실제 작은 신경망의 feedback 파이프라인 연결도 확인합니다.
+이 테스트는 기능 검증이며 학습된 모델의 실제 웹페이지 정확도 우위를 입증하지 않습니다.
+
+- 공식 지표와 중간 feedback 테스트까지 포함한 전체 결과: **33 passed**. Ruff / diff whitespace / 실행 스크립트 문법 검사 통과.
+- 실제 Chromium으로 공유 초기 HTML → Self-Revision → IR fitting → HTML geometry transfer → 최종 평가 테스트.
+- 작은 무작위 checkpoint로 실제 FrameDiff 신경망 후보 생성·탐색과 HTML 반영 경로 확인(성능 실험 아님).
+- VLM 응답은 mock으로 검증: reference HTML/GT가 수정 프롬프트로 누출되지 않고 같은 초기 HTML을 사용하는지 확인.
+- 초기 생성 실패 유지, 캐시 재개, 중첩 요소 이동·크기 수정, zero-height body, 무수정 시 geometry 유지 테스트.
+- 실제 공식 Design2Code checkout `7a575e4c33f417c4be5c64072b8f5798de0d0f99`와 실제 CLIP ViT-B/32로
+  동일 HTML의 5개 지표가 1에 가까우며 위치 이동 시 Position 지표가 감소하는지 검증.
+- 공식 metric 연동은 network-disabled, fixed-viewport 렌더링 변형입니다. 논문 수치 재현은 아닙니다.
+- RTX 4090의 실제 Qwen 추론 및 전체 Design2Code/Hard 성능 실험은 아직 실행하지 않았습니다.
+
+### 이전 검증 기록
+
 - `pytest`: **21 passed** (17 non-browser + 4 Chromium). 단위·통합·Chromium 테스트 포함.
 - 150개 합성 페이지 생성: train 121 / val 15 / test 14.
 - hidden 64, 2 layers, 4 heads, 702,584 parameters, batch 4 모델 학습.

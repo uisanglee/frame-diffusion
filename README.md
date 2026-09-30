@@ -15,10 +15,16 @@
 - [로컬 검증 기록](docs/VALIDATION.md)
 - [변경 이력](CHANGELOG.md)
 - [보안·데이터 취급](SECURITY.md)
+- [실제 HTML Self-Revision vs FrameDiff 전체 실험](docs/REAL_WEB_EXPERIMENT.md)
 
 소스와 설정만 Git으로 관리합니다. `data/`, `runs/`, checkpoint, VLM weight, Playwright cache는 의도적으로 제외됩니다. MIT 라이선스이며 실제 저자·기관 정보는 공개 전에 `CITATION.cff`에 보완하세요.
 
 중요: 원 논문 구현을 그대로 재현한 프로젝트나 임의의 React/CSS를 자동 수정하는 완성품은 아닙니다. 첫 실험의 범위는 **동일 컴포넌트 집합·부모 관계에서 위치, 크기, 배치 속성, 형제 순서 수정**입니다. DDPM의 Gaussian noise/timestep 모델도 아닙니다. 연구 가설을 검증할 수 있는 실행 가능한 출발점입니다.
+
+실제 HTML 실험의 기본값은 이제 `model-feedback`입니다. 한 CSS 속성 수정마다 실제 Chromium layout을
+다시 읽어 줄바꿈·auto height·형제 이동을 다음 입력에 반영합니다. `frames`는 실제 박스를 이름 붙은
+프레임 그림으로 저장하지만, 현재 모델은 이미지 픽셀이 아니라 측정 박스/트리 특징을 입력받습니다.
+기존 `model`은 proxy-only ablation으로 유지합니다. [실행·제약·비용 비교](docs/REAL_WEB_EXPERIMENT.md)를 참고하세요.
 
 ## 1. 바로 실행
 
@@ -252,6 +258,43 @@ python -m framediff make-pair --current initial.json --target estimated-target.j
 `evaluation_observations`는 점수 계산에만 쓰고 모델·탐색에는 전달하지 않습니다. 입력으로 제공한 추정 좌표를 그대로 복사하는 `copy-boxes`도 이때는 독립 정답과 평가합니다.
 
 ## 6. 수정과 렌더링
+
+VLM 직접 수정 baseline은 먼저 별도 프로세스에서 생성한 뒤 동일 평가기에 넣습니다.
+Qwen과 FrameDiff를 동시에 GPU에 적재할 필요가 없습니다.
+
+```bash
+python -m framediff vlm-baseline \
+  --data data/design2code-qwen/test.jsonl --out data/design2code-vlm-baseline \
+  --backend qwen --four-bit --rounds 1 --resume
+
+python -m framediff evaluate \
+  --data data/design2code-vlm-baseline/test.jsonl \
+  --checkpoint runs/main/best.pt --out runs/design2code-baselines --device cuda \
+  --methods none,vlm-revise,coordinate,model \
+  --steps 10 --beam 2 --topk 8 --budget 160 --browser-verify --screenshots
+```
+
+Hard는 경로의 `design2code`를 `design2code-hard`로 변경합니다.
+WebUI는 `--data data/webui-fit/test.jsonl --out data/webui-vlm-baseline`을 사용합니다.
+처음에는 생성 명령에 `--limit 5`를 추가해 확인하고 전체 실행 시 제거하세요.
+
+- `none`: 동일 AR 초기 IR (WebUI는 corrupted surrogate).
+- `vlm-revise`: VLM 직접 수정. 기본 1회; `--rounds 3`은 매번 현재 결과를 렌더링해 총 3회 수정.
+- `model`: 동일 초기 IR에서 FrameDiff 수정. VLM baseline의 결과로 시작하지 않습니다.
+- screenshot이 있으면 목표 screenshot + 현재 frame screenshot + 현재 IR를 입력합니다.
+  `--input-mode frames` 또는 screenshot이 없는 WebUI에서는 입력 target boxes + 현재 frame screenshot + IR를 제공합니다.
+  입력 정보가 다른 프로토콜이므로 screenshot 조건과 oracle-box 조건은 별도로 보고하세요.
+- reference HTML, clean IR, 독립 evaluation box는 VLM에 전달하지 않습니다.
+- FrameDiff와 동일하게 node ID/부모/순서는 고정합니다. 자유로운 HTML 재생성 baseline은 아닙니다.
+- `repair_seconds`에 VLM 수정 및 피드백 rendering 시간이 포함됩니다. 모델 로딩은 제외됩니다.
+- `vlm_failure_rate`와 `status.json`을 함께 보고하세요. 실패 페이지를 제외하지 않고 마지막 유효 IR를 평가합니다.
+- `--resume`은 입력/설정 hash가 같은 산출물만 재사용합니다. 실패 산출물도 재사용하므로 재시도는 새 출력 폴더를 쓰세요.
+- 새 Design2Code 생성 레코드는 initial generation/frame extraction 시간을 분리합니다.
+  이전 레코드의 `end_to_end_seconds`는 공통 upstream 비용을 포함하므로 VLM-only 시간으로 해석하지 마세요.
+  이전 데이터에서는 `repair_seconds`로 수정 비용을 비교하거나 `run-design2code --resume`으로 레코드를 재구성하세요.
+
+출력 JSON/CSV의 `browser_box_iou`가 실제 Chromium 기준 정확도입니다.
+기본 `report.md`의 IoU 열은 proxy 좌표 기준이므로 browser 검증 값과 구분하세요.
 
 ```bash
 python -m framediff export-example --data data/smoke/test.jsonl --out runs/example

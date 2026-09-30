@@ -23,7 +23,7 @@ def evaluate(args):
         overlap=set(ck.get('training_groups',[]))&{r['group'] for r in records}
         if overlap and not args.allow_train_overlap:raise ValueError(f'{len(overlap)} evaluation groups seen in training')
     methods=args.methods.split(',')
-    allowed={'none','copy-boxes','coordinate','random','model','model-browser','one-shot'}
+    allowed={'none','copy-boxes','coordinate','random','model','model-browser','one-shot','vlm-revise'}
     if set(methods)-allowed:raise ValueError(f'Unknown methods: {set(methods)-allowed}')
     if any(m in methods for m in ('model','model-browser','one-shot')) and model is None:raise ValueError('Checkpoint required')
     if 'one-shot' in methods and ck['objective']!='boxes':raise ValueError('one-shot needs a checkpoint trained with --objective boxes')
@@ -49,11 +49,18 @@ def evaluate(args):
                 before_calls=browser.executions if browser else 0
                 executor=Executor(browser if method=='model-browser' else None)
                 result=initial;frames=None
+                offline_seconds=0.;offline_calls=0
                 if method in ('coordinate','random','model','model-browser'):
                     result,stats=repair(initial,obs,'model' if method.startswith('model') else method,model,args.steps,args.beam,args.topk,args.budget,executor,args.seed)
                 elif method=='copy-boxes':
                     # Explicit oracle baseline: shows why unconstrained box prediction is trivial.
                     frames=[o['target'] for o in obs]
+                elif method=='vlm-revise':
+                    if 'vlm_baseline' not in record:raise ValueError('Run vlm-baseline first for every record')
+                    baseline=record['vlm_baseline'];result=baseline['result']
+                    from .data import differences
+                    differences(initial,result)
+                    offline_seconds=baseline['seconds'];offline_calls=baseline['browser_executions']
                 elif method=='one-shot':
                     if len(obs)!=1:raise ValueError('one-shot box baseline currently requires single-viewport records')
                     with torch.inference_mode():
@@ -61,7 +68,7 @@ def evaluate(args):
                     w,h=obs[0]['viewport']
                     frames=[{n['id']:[b[0]*w,b[1]*h,max(0,b[2]*w),max(0,b[3]*h)] for n,b in zip(initial['nodes'],out)}]
                 if device.startswith('cuda'):torch.cuda.synchronize()
-                repair_seconds=time.perf_counter()-start
+                repair_seconds=time.perf_counter()-start+offline_seconds
                 if frames is None:frames=[execute(result,o['viewport']) for o in obs]
                 if matching=='identity':
                     per_view=[box_metrics(b,o['target'],o['viewport'],(root,)) for b,o in zip(frames,truth)]
@@ -84,9 +91,15 @@ def evaluate(args):
                         else:browser_metrics.append(hungarian_box_metrics(actual,truth[index]['target'],o['viewport'],(root,),tuple(record.get('reference_root_ids',[]))))
                     row['proxy_browser_max_error_px']=max(errors)
                     row['browser_box_iou']=statistics.mean(x['box_iou'] for x in browser_metrics)
-                row['browser_executions']=(browser.executions-before_calls) if browser else 0
-                row['total_seconds']=time.perf_counter()-start
+                row['vlm_failure']=float(method=='vlm-revise' and record['vlm_baseline']['status']!='ok')
+                row['browser_executions']=((browser.executions-before_calls) if browser else 0)+offline_calls
+                row['total_seconds']=time.perf_counter()-start+offline_seconds
                 row['upstream_seconds']=record.get('upstream_seconds',0)
+                if 'initial_generation_seconds' in record:
+                    row['upstream_seconds']=record['initial_generation_seconds']
+                    needs_frames=method!='none' and not (method=='vlm-revise' and record['vlm_baseline']['input_mode']=='screenshot')
+                    if needs_frames:row['upstream_seconds']+=record.get('frame_extraction_seconds',0)
+                row['upstream_timing']='separated' if 'initial_generation_seconds' in record else 'legacy_shared_or_unavailable'
                 row['end_to_end_seconds']=row['total_seconds']+row['upstream_seconds']
                 artifact={'record_id':record['id'],'method':method,'result':result if row['executable_output'] else None,
                           'frames':frames,'trace':stats}
@@ -108,6 +121,7 @@ def report_rows(rows,out,seed=42):
     for method in sorted({r['method'] for r in rows}):
         group=[r for r in rows if r['method']==method];summary={'method':method,'n':len(group)}
         for key in metrics:summary[key]=statistics.mean(r[key] for r in group)
+        summary['vlm_failure_rate']=statistics.mean(r.get('vlm_failure',0) for r in group)
         for key in ('browser_box_iou','proxy_browser_max_error_px'):
             values=[r[key] for r in group if key in r]
             summary[key]=statistics.mean(values) if values else None

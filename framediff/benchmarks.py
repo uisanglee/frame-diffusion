@@ -137,6 +137,8 @@ def run_design2code_vlm(args):
                     'target_kind':'predicted_frames','current':validate(initial),'observations':[frames],
                     'reference_observations':item['reference_observations'],'reference_root_ids':item.get('reference_root_ids',[]),
                     'evaluation_matching':'hungarian_geometry','screenshot':item['screenshot'],'html':item['html'],
+                    'initial_generation_seconds':initial_meta.get('wall_seconds',0),
+                    'frame_extraction_seconds':frames_meta.get('wall_seconds',0),
                     'upstream_seconds':initial_meta.get('wall_seconds',0)+frames_meta.get('wall_seconds',0)}
             records.append(record);report.append({'id':sample_id,'accepted':True,'nodes':len(initial['nodes'])})
             write_jsonl(out/'test.jsonl',records)

@@ -1,0 +1,381 @@
+"""Real HTML experiments: shared initial page, visual self-revision, and IR-to-DOM repair.
+
+Separate processes/stages keep the frozen VLM, denoiser and visual evaluator off
+the GPU at the same time. Reference HTML is only used for evaluation or explicitly
+requested text augmentation, never for target box extraction or repair selection.
+"""
+import copy
+import hashlib
+import json
+import math
+import statistics
+import time
+from pathlib import Path
+
+from PIL import Image
+
+from . import vlm
+from .adapters import fit_observation
+from .benchmarks import discover_design2code
+from .html_bridge import HtmlBrowser, embed_placeholder, html_answer
+from .ir import execute, read_json, read_jsonl, write_json, write_jsonl
+from .metrics import hungarian_box_metrics
+
+
+def digest(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def signature(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+
+def guard_run(out, config, resume):
+    out.mkdir(parents=True, exist_ok=True)
+    path = out/'config.json'
+    if path.exists():
+        if not resume:
+            raise ValueError(f'{out} already contains a run; use --resume or a new directory')
+        if read_json(path) != config:
+            raise ValueError('Resume configuration/input changed; use a new output directory')
+    write_json(path, config)
+
+
+def add_parsers(sub):
+    p = sub.add_parser('web-prepare', help='Generate shared real HTML, self-revisions and predicted target frames')
+    source = p.add_mutually_exclusive_group(required=True)
+    source.add_argument('--root'); source.add_argument('--manifest')
+    p.add_argument('--out', required=True)
+    p.add_argument('--backend', choices=['qwen','openai-compatible'], default='qwen')
+    p.add_argument('--model', default='Qwen/Qwen3-VL-8B-Instruct')
+    p.add_argument('--revision', default='main')
+    p.add_argument('--endpoint', default='http://localhost:8000/v1/chat/completions')
+    p.add_argument('--api-key-env', default='VLM_API_KEY')
+    p.add_argument('--four-bit', action='store_true'); p.add_argument('--resume', action='store_true')
+    p.add_argument('--initial-mode', choices=['direct','text-augmented'], default='direct')
+    for key, default in [('rounds',1),('max-nodes',128),('max-new-tokens',16384),('max-pixels',1048576),('limit',0),('seed',42)]:
+        p.add_argument('--'+key, type=int, default=default)
+    p = sub.add_parser('web-repair', help='Closed-loop real HTML repair with measured DOM feedback; legacy proxy ablations')
+    for key in ('data','checkpoint','out'): p.add_argument('--'+key, required=True)
+    p.add_argument('--methods', default='coordinate-feedback,model-feedback')
+    p.add_argument('--feedback-render', choices=['boxes','frames','raster'], default='frames',
+                   help='Real DOM feedback: boxes only, named frame raster, or full screenshot (same model input)')
+    p.add_argument('--device', default='auto'); p.add_argument('--resume', action='store_true')
+    for key, default in [('steps',10),('beam',2),('topk',8),('budget',160),('seed',42),('cpu-threads',4)]:
+        p.add_argument('--'+key, type=int, default=default)
+    p = sub.add_parser('web-evaluate', help='Common real-HTML Chromium evaluation; optional official Design2Code metrics')
+    p.add_argument('--data', required=True); p.add_argument('--out', required=True)
+    p.add_argument('--max-nodes', type=int, default=2048)
+    p.add_argument('--official-repo', help='Local checkout of NoviScl/Design2Code; enables its five metrics')
+    p.add_argument('--resume', action='store_true')
+
+
+def prepare(args):
+    if args.rounds < 1 or not 2 <= args.max_nodes <= 256 or args.max_pixels < 1 or args.max_new_tokens < 1 or args.limit < 0:
+        raise ValueError('Invalid rounds/node/token/pixel/limit setting')
+    if args.root:
+        items = [{'id':i,'screenshot':str(p.resolve()),'html':str(h.resolve())}
+                 for i,p,h in discover_design2code(args.root)]
+    else:
+        items = list(read_jsonl(args.manifest))
+    if args.limit: items = items[:args.limit]
+    if not items or len({i['id'] for i in items}) != len(items):
+        raise ValueError('Empty dataset or duplicate IDs')
+    out = Path(args.out).resolve()
+    sources = [{**i, 'image_sha':digest(i['screenshot']), 'reference_sha':digest(i['html']),
+                'initial_sha':digest(i['initial_html']) if i.get('initial_html') else None,
+                'placeholder_sha':digest(Path(i['html']).parent/'rick.jpg')
+                    if (Path(i['html']).parent/'rick.jpg').exists() else None} for i in items]
+    settings = {k:v for k,v in vars(args).items() if k not in ('resume','out')}
+    guard_run(out, {'protocol':1,'settings':settings,'sources':sources}, args.resume)
+    runtime = None
+    rows = []
+
+    def call(task, images, current, work, label, extra=''):
+        nonlocal runtime
+        if args.backend == 'qwen' and runtime is None:
+            runtime = vlm.load_qwen_runtime(args)
+        c = copy.copy(args); c.task = task; c.image = list(map(str,images)); c.current = str(current) if current else None; c.frames = None
+        prompt = extra + vlm.prompt_for(c)
+        write_json(work/f'{label}.prompt.json', {'prompt':prompt,'images':c.image})
+        started = time.perf_counter()
+        answer, meta = vlm.generate(c, prompt, vlm.images_for(c), runtime)
+        elapsed = time.perf_counter()-started
+        (work/f'{label}.raw.txt').write_text(answer)
+        write_json(work/f'{label}.meta.json', {**meta,'wall_seconds':elapsed})
+        return answer, elapsed
+
+    # Load outside page timers, consistently excluding one-time model startup.
+    if args.backend == 'qwen' and any(not (out/'pages'/signature(i['id'])[:20]/'record.json').exists() for i in items):
+        runtime = vlm.load_qwen_runtime(args)
+    with HtmlBrowser() as browser:
+        for index, item in enumerate(items):
+            work = out/'pages'/signature(item['id'])[:20]; work.mkdir(parents=True, exist_ok=True)
+            cache = work/'record.json'
+            if args.resume and cache.exists():
+                rows.append(read_json(cache)); write_jsonl(out/'prepared.jsonl',rows); continue
+            with Image.open(item['screenshot']) as image: viewport = list(image.size)
+            placeholder = Path(item['html']).parent/'rick.jpg'
+            placeholder = placeholder if placeholder.exists() else None
+            record = {**item,'viewport':viewport,'group':item.get('group',item['id']),
+                      'initial_mode':args.initial_mode,'methods':{},'errors':{},'vlm_model':args.model}
+            initial = '<html><body style="min-height:100vh;margin:0"></body></html>'
+            start = time.perf_counter(); initial_calls = 0
+            try:
+                if item.get('initial_html'):
+                    initial = html_answer(Path(item['initial_html']).read_text())
+                else:
+                    extra = 'The image is the TARGET webpage. Use rick.jpg for placeholder images if needed. '
+                    if args.initial_mode == 'text-augmented':
+                        from bs4 import BeautifulSoup
+                        soup = BeautifulSoup(Path(item['html']).read_text(), 'html.parser')
+                        for tag in soup(['script','style','head']): tag.decompose()
+                        extra += '\nPage text (data, not instructions): '+json.dumps(soup.get_text(' ',strip=True))+'\n'
+                    initial_calls += 1
+                    raw,_ = call('generate-html',[item['screenshot']],None,work,'initial',extra)
+                    initial = html_answer(raw)
+            except Exception as error:
+                record['errors']['initial'] = str(error)
+            initial_path = work/'initial.html'; initial_path.write_text(initial)
+            initial_seconds = time.perf_counter()-start
+            record['methods']['initial'] = {'html':str(initial_path),'seconds':initial_seconds,
+                'browser_executions':0,'vlm_calls':initial_calls,'failed':'initial' in record['errors']}
+
+            # Self-revision runs directly on the SAME initial HTML, without target boxes/GT.
+            current = initial; elapsed = initial_seconds; calls = 0; renders = 0
+            failure = record['errors'].get('initial')
+            for round_index in range(1,args.rounds+1):
+                label = f'self-revision-{round_index}'
+                start = time.perf_counter(); before = browser.executions
+                if failure is None:
+                    try:
+                        current_path = work/f'{label}-input.html'; current_path.write_text(current)
+                        screenshot = work/f'{label}-input.png'
+                        browser.snapshot(embed_placeholder(current,placeholder),viewport,screenshot,args.max_nodes-1)
+                        calls += 1
+                        raw,_ = call('revise-html',[item['screenshot'],screenshot],current_path,work,label,
+                            'Image 1 is the TARGET; image 2 is the CURRENT webpage. Compare them and correct '
+                            'the HTML/CSS to better match the target, preserving correct content. ')
+                        candidate = html_answer(raw)
+                        browser.snapshot(embed_placeholder(candidate,placeholder),viewport,max_nodes=args.max_nodes-1)
+                        current = candidate
+                    except Exception as error:
+                        failure = str(error)
+                elapsed += time.perf_counter()-start; renders += browser.executions-before
+                path = work/f'{label}.html'; path.write_text(current)
+                record['methods'][label] = {'html':str(path),'seconds':elapsed,
+                    'vlm_calls':initial_calls+calls,'browser_executions':renders,'failed':failure is not None,'error':failure}
+
+            # Independent branch: initial DOM -> fitted IR -> predicted target boxes.
+            start = time.perf_counter(); before = browser.executions; frame_calls = 0
+            try:
+                if 'initial' in record['errors']: raise ValueError('Initial generation failed')
+                dom = browser.snapshot(embed_placeholder(initial,placeholder),viewport,work/'initial.png',args.max_nodes-1)
+                tagged = work/'tagged-initial.html'; tagged.write_text(dom.pop('html'))
+                tree, original, fit = fit_observation(dom)
+                ir_path = work/'initial-ir.json'; write_json(ir_path,tree)
+                frame_calls += 1
+                raw,_ = call('extract-frames',[item['screenshot']],ir_path,work,'target-frames',
+                    f'Original screenshot size is {viewport}; return coordinates in these original pixels. ')
+                target = vlm.json_answer(raw)
+                ids = {n['id'] for n in tree['nodes']}
+                if target.get('viewport') != viewport or set(target.get('target',{})) != ids:
+                    raise ValueError('Target viewport/IDs do not match current IR')
+                for box in target['target'].values():
+                    if len(box)!=4 or not all(isinstance(x,(int,float)) and math.isfinite(x) for x in box) or min(box[2:])<=0:
+                        raise ValueError('Invalid predicted box')
+                target['target'][tree['nodes'][0]['id']] = [0,0,*viewport]
+                record.update(current=tree, observations=[target], fit=fit,
+                    original_boxes=original, tagged_html=str(tagged), selected_nodes=len(dom['nodes']),
+                    total_visible_nodes=dom['total_visible_nodes'])
+            except Exception as error:
+                record['errors']['frames'] = str(error)
+            record['frame_seconds'] = time.perf_counter()-start
+            record['frame_vlm_calls'] = frame_calls
+            record['frame_browser_executions'] = browser.executions-before
+            write_json(cache,record); rows.append(record); write_jsonl(out/'prepared.jsonl',rows)
+            print(f'[{index+1}/{len(items)}] {item["id"]}: prepared, errors={record["errors"]}',flush=True)
+    return rows
+
+
+def repair_pages(args):
+    import torch
+    from .model import load_model
+    from .search import repair
+    from .train import select_device
+    rows = list(read_jsonl(args.data)); methods = args.methods.split(',')
+    if not rows or not set(methods)<= {'model','coordinate','model-feedback','coordinate-feedback'} or len(set(methods))!=len(methods):
+        raise ValueError('Need nonempty data and unique methods from model,coordinate,model-feedback,coordinate-feedback')
+    device = select_device(args.device)
+    if device == 'cpu': torch.set_num_threads(args.cpu_threads)
+    model, ck = load_model(args.checkpoint,device)
+    if ck['objective'] != 'edits': raise ValueError('An edits checkpoint is required')
+    if set(ck.get('training_groups',[])) & {r['group'] for r in rows}:
+        raise ValueError('Evaluation groups overlap checkpoint training groups')
+    out = Path(args.out).resolve()
+    config = {'protocol':2,'data_sha':digest(args.data),'checkpoint_sha':digest(args.checkpoint),
+              'html_sha':[{p:digest(p) for p in [r['methods']['initial']['html'],*([r['tagged_html']] if r.get('tagged_html') else [])]} for r in rows],
+              'settings':{k:v for k,v in vars(args).items() if k not in ('out','resume')}}
+    guard_run(out,config,args.resume)
+    results = []
+    with HtmlBrowser() as browser:
+        for index, source in enumerate(rows):
+            work = out/'pages'/signature(source['id'])[:20]; work.mkdir(parents=True,exist_ok=True)
+            cache = work/'record.json'
+            if args.resume and cache.exists():
+                results.append(read_json(cache)); write_jsonl(out/'results.jsonl',results); continue
+            record = copy.deepcopy(source)
+            for method in methods:
+                initial = record['methods']['initial']; html = Path(initial['html']).read_text()
+                start = time.perf_counter(); before = browser.executions; error = None; transfer = {}; stats = {}
+                try:
+                    if 'frames' in record['errors']: raise ValueError(record['errors']['frames'])
+                    if device.startswith('cuda'): torch.cuda.synchronize()
+                    if method.endswith('-feedback'):
+                        from .html_feedback import repair_html
+                        html,result,stats = repair_html(browser,Path(record['tagged_html']).read_text(),
+                            record['current'],record['observations'],model,method.removesuffix('-feedback'),
+                            args.steps,args.beam,args.topk,args.budget,getattr(args,'feedback_render','frames'),
+                            work/f'{method}-steps')
+                        transfer = {'feedback_mode':stats['render_mode'],
+                                    'feedback_image_seconds':stats['feedback_image_seconds'],
+                                    'feedback_images':stats['feedback_images'],
+                                    'feedback_browser_screenshots':stats['browser_screenshots'],
+                                    'candidate_failure_count':len(stats['candidate_failures'])}
+                        if stats['candidates'] and len(stats['candidate_failures'])==stats['candidates']:
+                            error = 'All candidate HTML executions failed; retained last valid HTML'
+                    else:
+                        result, stats = repair(record['current'],record['observations'],method,model,
+                            args.steps,args.beam,args.topk,args.budget,seed=args.seed)
+                        old = execute(record['current'],record['viewport']); new = execute(result,record['viewport'])
+                        # Legacy proxy-only ablation: apply all box deltas once at the end.
+                        desired = {k:[b[i]+new[k][i]-old[k][i] for i in range(4)]
+                                   for k,b in record['original_boxes'].items() if k.startswith('fd-')}
+                        for b in desired.values(): b[2]=max(1,b[2]); b[3]=max(1,b[3])
+                        html,transfer = browser.patch(Path(record['tagged_html']).read_text(),record['viewport'],desired)
+                    if device.startswith('cuda'): torch.cuda.synchronize()
+                    write_json(work/f'{method}-ir.json',result)
+                    write_json(work/f'{method}-trace.json',stats)
+                except Exception as exc:
+                    error = str(exc)
+                path = work/f'{method}.html'; path.write_text(html)
+                record['methods'][method] = {'html':str(path),'failed':error is not None,'error':error,
+                    'seconds':initial['seconds']+record['frame_seconds']+time.perf_counter()-start,
+                    'vlm_calls':initial['vlm_calls']+record['frame_vlm_calls'],
+                    'browser_executions':record['frame_browser_executions']+browser.executions-before,
+                    'proxy_executions':stats.get('executions',0),**transfer}
+            write_json(cache,record); results.append(record); write_jsonl(out/'results.jsonl',results)
+            print(f'[{index+1}/{len(rows)}] {record["id"]}: HTML repair complete',flush=True)
+    return results
+
+
+def evaluate_pages(args):
+    import numpy as np
+    records = list(read_jsonl(args.data))
+    if not records: raise ValueError('Empty evaluation data')
+    methods = list(records[0]['methods'])
+    if any(set(r['methods'])!=set(methods) for r in records): raise ValueError('All pages must contain all methods')
+    out = Path(args.out).resolve()
+    config = {'protocol':1,'data_sha':digest(args.data),'max_nodes':args.max_nodes,
+              'files':[{p:digest(p) for p in [r['html'],r['screenshot'],*[m['html'] for m in r['methods'].values()]]} for r in records],
+              'official_repo':str(Path(args.official_repo).resolve()) if args.official_repo else None}
+    official = None
+    if args.official_repo:
+        from .official_metrics import OfficialMetrics
+        official = OfficialMetrics(args.official_repo)
+        config['official_source_sha'] = official.source_sha
+    guard_run(out,config,args.resume)
+    rows = []
+    with HtmlBrowser() as browser:
+        for index, record in enumerate(records):
+            work = out/'pages'/signature(record['id'])[:20]; work.mkdir(parents=True,exist_ok=True)
+            cache = work/'metrics.json'
+            if args.resume and cache.exists():
+                rows.extend(read_json(cache)); write_jsonl(out/'metrics.jsonl',rows); continue
+            viewport = record['viewport']; placeholder = Path(record['html']).parent/'rick.jpg'
+            ref_html = embed_placeholder(Path(record['html']).read_text(),placeholder if placeholder.exists() else None)
+            # Reference HTML is opened only here, outside all repair/selection paths.
+            reference_error = None
+            try: reference = browser.snapshot(ref_html,viewport,work/'reference.png',args.max_nodes)
+            except Exception as error: reference = None; reference_error = str(error)
+            page_rows = []
+            for method in methods:
+                data = record['methods'][method]; started = time.perf_counter(); before = browser.executions
+                row = {'id':record['id'],'method':method,'failed':data['failed'],
+                       'pipeline_seconds':data['seconds'],'pipeline_browser_executions':data['browser_executions'],
+                       'vlm_calls':data['vlm_calls'],'proxy_executions':data.get('proxy_executions',0),
+                       'feedback_mode':data.get('feedback_mode','none'),
+                       'feedback_image_seconds':data.get('feedback_image_seconds',0),
+                       'feedback_images':data.get('feedback_images',0),
+                       'feedback_browser_screenshots':data.get('feedback_browser_screenshots',0),
+                       'candidate_failure_count':data.get('candidate_failure_count',0),
+                       'transfer_max_error_px':data.get('transfer_max_error_px'),
+                       'error':data.get('error'), 'evaluation_error':None, 'reference_error':reference_error}
+                try:
+                    html = embed_placeholder(Path(data['html']).read_text(),placeholder if placeholder.exists() else None)
+                    png = work/f'{method}.png'
+                    observed = browser.snapshot(html,viewport,png,args.max_nodes)
+                    with Image.open(record['screenshot']) as a, Image.open(png) as b:
+                        if a.size != b.size: raise ValueError('Screenshot dimensions differ')
+                        row['pixel_mae'] = float(np.abs(np.asarray(a.convert('RGB'),dtype=float)-np.asarray(b.convert('RGB'),dtype=float)).mean()/255)
+                    if reference is not None:
+                        try:
+                            geometry = hungarian_box_metrics({n['id']:n['box'] for n in observed['nodes']},
+                                {n['id']:n['box'] for n in reference['nodes']},viewport,
+                                tuple(n['id'] for n in observed['nodes'] if n['role']=='body'),
+                                tuple(n['id'] for n in reference['nodes'] if n['role']=='body'))
+                            row.update({'dom_'+k:v for k,v in geometry.items()})
+                        except Exception as error:
+                            row['geometry_error'] = str(error)
+                    if official:
+                        row.update(official.score(browser,html,ref_html,viewport,work/method))
+                except Exception as error:
+                    row['evaluation_error'] = str(error)
+                row['evaluation_seconds'] = time.perf_counter()-started
+                row['evaluation_browser_executions'] = browser.executions-before
+                page_rows.append(row)
+            rows.extend(page_rows); write_json(cache,page_rows); write_jsonl(out/'metrics.jsonl',rows)
+            print(f'[{index+1}/{len(records)}] {record["id"]}: evaluated',flush=True)
+    summary = []
+    for method in methods:
+        group = [r for r in rows if r['method']==method]
+        result = {'method':method,'n':len(group),'failure_rate':statistics.mean(r['failed'] for r in group),
+                  'evaluation_failures':sum(r['evaluation_error'] is not None for r in group),
+                  'reference_failures':sum(r['reference_error'] is not None for r in group)}
+        keys = {k for r in group for k,v in r.items() if isinstance(v,(int,float)) and not isinstance(v,bool)}
+        for k in keys:
+            values = [r[k] for r in group if isinstance(r.get(k),(int,float))]
+            result[k] = statistics.mean(values)
+            result[k+'_n'] = len(values)
+        summary.append(result)
+    write_json(out/'summary.json',summary)
+    # Paired comparisons use the same pages, never separate successful subsets.
+    paired = []
+    by_id = {(r['id'],r['method']):r for r in rows}
+    for method in methods:
+        if method == 'initial': continue
+        for metric in ('pixel_mae','dom_box_iou','official_block','official_position','official_clip'):
+            pairs = [(by_id[(r['id'],'initial')].get(metric),r.get(metric)) for r in rows if r['method']==method]
+            deltas = [b-a for a,b in pairs if isinstance(a,(float,int)) and isinstance(b,(float,int))]
+            if deltas:
+                paired.append({'method':method,'baseline':'initial','metric':metric,'n':len(deltas),
+                    'mean_delta':statistics.mean(deltas),
+                    'improvement_rate':statistics.mean(d<0 if metric=='pixel_mae' else d>0 for d in deltas)})
+    write_json(out/'paired-vs-initial.json',paired)
+    lines = ['# Real HTML evaluation','',
+        '| Method | n | failed | DOM IoU | pixel MAE | pipeline seconds | VLM calls |',
+        '|---|---:|---:|---:|---:|---:|---:|']
+    for s in summary:
+        lines.append(f'| {s["method"]} | {s["n"]} | {s["failure_rate"]:.3f} | {s.get("dom_box_iou",float("nan")):.4f} | '
+                     f'{s.get("pixel_mae",float("nan")):.4f} | {s["pipeline_seconds"]:.3f} | {s["vlm_calls"]:.1f} |')
+    if official:
+        lines += ['', '| Method | Block | Text | Position | Color | CLIP |', '|---|---:|---:|---:|---:|---:|']
+        for s in summary:
+            lines.append('| '+s['method']+' | '+' | '.join(f'{s.get("official_"+k,float("nan")):.4f}'
+                for k in ('block','text','position','color','clip'))+' |')
+    lines += ['', 'DOM IoU is diagnostic, not the official Design2Code metric. Failed repairs retain the last valid HTML.',
+              'Check metric-specific *_n and evaluation_failures; missing evaluations are not zero scores.',
+              'Timing excludes model loading and evaluation. FrameDiff includes target extraction, fitting and HTML transfer.',
+              'Single screenshot viewport; no claim of responsive CSS reconstruction.']
+    (out/'report.md').write_text('\n'.join(lines)+'\n')
+    return rows
