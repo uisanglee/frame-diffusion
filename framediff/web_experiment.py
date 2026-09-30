@@ -36,7 +36,8 @@ def validate_target(text, viewport, ids):
         raise ValueError('Return an object with viewport and target objects')
     actual = set(target['target'])
     if target.get('viewport') != viewport or actual != ids:
-        raise ValueError(f'Expected viewport={viewport}; missing IDs={sorted(ids-actual)}; '
+        raise ValueError(f'Expected viewport exactly {viewport}, got {target.get("viewport")!r}; '
+                         f'missing IDs={sorted(ids-actual)}; '
                          f'unexpected IDs={sorted(actual-ids)}. Return every required ID.')
     for key, box in target['target'].items():
         if (not isinstance(box,list) or len(box)!=4 or
@@ -243,7 +244,9 @@ def prepare(args):
                 ir_path = work/'initial-ir.json'; write_json(ir_path,tree)
                 ids = {n['id'] for n in tree['nodes']}
                 raw,_ = call('extract-frames',[item['screenshot']],ir_path,work,'target-frames',
-                    f'Original screenshot size is {viewport}; return coordinates in these original pixels. ',
+                    f'The required output viewport is EXACTLY {json.dumps(viewport)}. '
+                    f'The original screenshot is {viewport[0]} by {viewport[1]} pixels. Return every box '
+                    'in this original coordinate system; do not use the resized model-input dimensions. ',
                     validator=lambda text: validate_target(text,viewport,ids))
                 target = raw
                 target['target'][tree['nodes'][0]['id']] = [0,0,*viewport]

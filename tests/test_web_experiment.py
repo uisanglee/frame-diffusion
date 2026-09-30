@@ -24,6 +24,8 @@ def test_validation_retries_report_missing_ids_and_bad_json():
     assert result['target']['page']==[0,0,100,100]
     assert 'missing IDs' in feedbacks[2] and 'extra' in feedbacks[2]
     assert 'previous response failed' in feedbacks[1]
+    with pytest.raises(ValueError,match=r"got \[100, 80\]"):
+        validate_target('{"viewport":[100,80],"target":{"page":[0,0,100,80]}}',[100,100],{'page'})
 
 
 def test_truncated_html_retry_and_runtime_error():
