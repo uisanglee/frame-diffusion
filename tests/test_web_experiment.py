@@ -9,6 +9,33 @@ from PIL import Image
 from framediff.html_bridge import HtmlBrowser, html_answer
 from framediff.ir import read_json, read_jsonl
 from framediff.web_experiment import evaluate_pages, prepare, repair_pages
+from framediff.web_experiment import validated_generation, validate_target
+
+
+def test_validation_retries_report_missing_ids_and_bad_json():
+    responses = ['{"target":', '{"viewport":[100,100],"target":{"extra":[0,0,2,2]}}',
+                 '{"viewport":[100,100],"target":{"page":[0,0,100,100]}}']
+    feedbacks = []
+    def generate(attempt, feedback):
+        feedbacks.append(feedback)
+        return responses[attempt], 1
+    result,_ = validated_generation(generate,lambda s:validate_target(s,[100,100],{'page'}),2)
+    assert result['target']['page']==[0,0,100,100]
+    assert 'missing IDs' in feedbacks[2] and 'extra' in feedbacks[2]
+    assert 'previous response failed' in feedbacks[1]
+
+
+def test_truncated_html_retry_and_runtime_error():
+    seen = []
+    def generate(attempt, feedback):
+        seen.append(feedback)
+        return ('<html>' if attempt==0 else '<html><body>ok</body></html>'),1
+    result,_ = validated_generation(generate,html_answer,2)
+    assert 'ok' in result and len(seen)==2
+    def oom(attempt, feedback):
+        raise RuntimeError('CUDA out of memory')
+    with pytest.raises(RuntimeError,match='CUDA'):
+        validated_generation(oom,html_answer,2)
 
 
 HTML = '''<html><head><style>body{margin:0;min-height:200px}main{position:absolute;left:10px;top:20px;
@@ -101,6 +128,7 @@ def test_real_html_pipeline_shared_initial_no_truth_leakage(tmp_path,monkeypatch
     assert by['self-revision-1']['vlm_calls']==2
     summary=read_json(tmp_path/'eval/summary.json')
     assert all(r['n']==1 and r['dom_box_iou_n']==1 for r in summary)
+    assert all(r['n']==1 for r in read_json(tmp_path/'eval/summary-common-success.json'))
     # Exercise the actual neural proposal/search path as well, using a tiny random checkpoint.
     monkeypatch.undo()
     import torch
@@ -137,6 +165,18 @@ def test_failed_html_generation_keeps_page_for_all_methods(tmp_path,monkeypatch)
     assert rows[0]['methods']['self-revision-2']['failed']
     assert 'frames' in rows[0]['errors']
     assert len(list(read_jsonl(tmp_path/'out/prepared.jsonl')))==1
+    assert rows[0]['methods']['initial']['vlm_calls']==3
+    args.resume=True
+    assert prepare(args)==rows
+    args.retry_failed=True
+    def recovered(c,*unused):
+        if c.task.endswith('html'): return HTML,{}
+        from framediff.ir import execute
+        return json.dumps({'viewport':[100,100],'target':execute(read_json(c.current),[100,100])}),{}
+    monkeypatch.setattr('framediff.vlm.generate',recovered)
+    recovered_rows=prepare(args)
+    assert not recovered_rows[0]['errors']
+    assert list((tmp_path/'out/pages').glob('*/previous-attempts/*/record.json'))
 
 
 @pytest.mark.browser

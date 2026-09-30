@@ -258,7 +258,31 @@ done
 JS/외부 네트워크는 모든 방법에서 비활성화합니다. reference 옆의 `rick.jpg`만 명시적으로 읽어 이미지에 내장하며,
 다른 외부 자산/폰트는 차단됩니다. 원본 screenshot과 재렌더링은 viewport·폰트 때문에 차이가 날 수 있습니다.
 
-## 공식 지표 연동 범위
+## VLM 출력 오류 재시도와 실패 결과 해석
+
+`web-prepare --vlm-retries 2`는 각 HTML/목표 박스 요청에 최대 2회 추가 검증 재시도를 합니다.
+잘린 HTML은 짧고 완결된 HTML을 다시 요청하고, JSON 문법 오류나 viewport/ID 오류는 오류 내용과
+누락/추가 ID를 전달해 전체 응답을 다시 요청합니다. 박스는 임의로 채우지 않습니다.
+CUDA OOM 같은 실행 오류는 재시도하지 않습니다. 각 시도의 prompt/raw/meta를 보존하며 모든 호출과
+소요 시간을 집계합니다. Self-Revision의 검증 재시도는 새 revision round가 아닙니다.
+
+```bash
+CUDA_VISIBLE_DEVICES=0 PAGE_LIMIT=5 REVISION_ROUNDS=1 VLM_RETRIES=2 \
+bash scripts/run_real_web.sh "$D2C_ROOT" runs/web-feedback-validated runs/main/best.pt
+```
+
+스크립트에서 `MAX_NEW_TOKENS`(기본 16384), `MAX_PIXELS`(기본 1048576)도 지정할 수 있습니다.
+기존 버전 실행과 설정이 달라졌으므로 첫 실행은 새 출력 폴더를 사용하세요.
+이 버전에서 만든 prepare 실행은 동일 설정의 `--resume --retry-failed`로 실패 페이지 전체를 재생성할 수 있습니다.
+성공 페이지는 재사용하고, 실패 페이지의 이전 파일은 `previous-attempts` 아래 보관합니다.
+준비 결과가 변경되면 repair/evaluation은 **새 출력 폴더**를 사용해야 합니다(입력 해시 검증).
+
+`summary.json`은 실패 시 유지된 HTML을 포함한 전체 결과입니다.
+`summary-common-success.json`과 `paired-common-success.json`은 모든 방법이 성공한 동일 페이지 집합을
+사용하며 `page_ids`/`n` 또는 지표별 `*_n`을 확인해야 합니다. 공통 성공 집합은 성공 조건부 결과라서
+전체 데이터셋 성능을 대신하지 않습니다. `report.md`에서 두 집계를 함께 보여줍니다.
+
+## 공식 지표 연동 범위 (상세)
 
 [공식 코드](https://github.com/NoviScl/Design2Code)의 `visual_eval_v3_multi`와 OCR-free block extraction,
 matching/merging, CIEDE2000, CLIP-ViT-B/32를 직접 사용합니다. 5개 지표는

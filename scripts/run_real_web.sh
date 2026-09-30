@@ -11,6 +11,8 @@ checkpoint_path=$3
 prepare_options=(--backend "${VLM_BACKEND:-qwen}" --model "${VLM_MODEL:-Qwen/Qwen3-VL-8B-Instruct}"
   --dataset "${WEB_DATASET:-design2code}" --webui-view "${WEBUI_VIEW:-default_1280-720}"
   --endpoint "${VLM_ENDPOINT:-http://localhost:8000/v1/chat/completions}"
+  --vlm-retries "${VLM_RETRIES:-2}"
+  --max-new-tokens "${MAX_NEW_TOKENS:-16384}" --max-pixels "${MAX_PIXELS:-1048576}"
   --rounds "${REVISION_ROUNDS:-1}" --limit "${PAGE_LIMIT:-0}" --initial-mode "${INITIAL_MODE:-direct}")
 if [[ "${VLM_BACKEND:-qwen}" == qwen ]]; then prepare_options+=(--four-bit); fi
 python -m framediff web-prepare --root "$dataset_root" --out "$output_root/prepare" \
