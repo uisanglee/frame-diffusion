@@ -136,7 +136,7 @@ def prepare(args):
     # Preserve existing Design2Code cache signatures when newly added flags are defaults.
     if settings.get('dataset','design2code')=='design2code':
         settings.pop('dataset',None); settings.pop('webui_view',None)
-    guard_run(out, {'protocol':1,'settings':settings,'sources':sources}, args.resume)
+    guard_run(out, {'protocol':2,'settings':settings,'sources':sources}, args.resume)
     runtime = None
     rows = []
 
@@ -242,8 +242,16 @@ def prepare(args):
                 tagged = work/'tagged-initial.html'; tagged.write_text(dom.pop('html'))
                 tree, original, fit = fit_observation(dom)
                 ir_path = work/'initial-ir.json'; write_json(ir_path,tree)
+                from .html_feedback import frame_png
+                named_frame=work/'current-named-frame.png'
+                named_frame.write_bytes(frame_png(tree,original,viewport))
+                record['named_frame']=str(named_frame)
                 ids = {n['id'] for n in tree['nodes']}
-                raw,_ = call('extract-frames',[item['screenshot']],ir_path,work,'target-frames',
+                raw,_ = call('extract-frames',[item['screenshot'],named_frame],ir_path,work,'target-frames',
+                    'Image 1 is the TARGET webpage screenshot. Image 2 is the CURRENT HTML named-frame map, '
+                    'generated from exact browser boxes; its labels identify component IDs, roles, nesting, and '
+                    'current geometry. Match identities using image 2, but estimate every output coordinate only '
+                    'from image 1. The image-2 coordinates are current positions, not target positions. '
                     f'The required output viewport is EXACTLY {json.dumps(viewport)}. '
                     f'The original screenshot is {viewport[0]} by {viewport[1]} pixels. Return every box '
                     'in this original coordinate system; do not use the resized model-input dimensions. ',

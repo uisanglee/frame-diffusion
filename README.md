@@ -25,6 +25,8 @@
 다시 읽어 줄바꿈·auto height·형제 이동을 다음 입력에 반영합니다. `frames`는 실제 박스를 이름 붙은
 프레임 그림으로 저장하지만, 현재 모델은 이미지 픽셀이 아니라 측정 박스/트리 특징을 입력받습니다.
 기존 `model`은 proxy-only ablation으로 유지합니다. [실행·제약·비용 비교](docs/REAL_WEB_EXPERIMENT.md)를 참고하세요.
+목표 박스를 추정하는 VLM에는 목표 screenshot과 현재 DOM의 정확한 ID·박스를 표시한 named-frame
+이미지를 함께 제공하며, named frame의 현재 좌표와 목표 좌표를 프롬프트에서 명확히 구분합니다.
 같은 정답 DOM을 교란한 뒤 VLM/Oracle 목표 박스와 coordinate/FrameDiff 정책을 교차하는
 2×2 진단은 `scripts/run_oracle_ablation.sh`로 실행합니다.
 

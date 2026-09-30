@@ -70,7 +70,7 @@ def prepare_oracle(args):
     out=Path(args.out).resolve()
     sources=[{'id':i,'image_sha':digest(p),'html_sha':digest(h)} for i,p,h in pairs]
     settings={k:v for k,v in vars(args).items() if k not in ('out','resume','retry_failed')}
-    guard_run(out,{'protocol':1,'settings':settings,'sources':sources},args.resume)
+    guard_run(out,{'protocol':2,'settings':settings,'sources':sources},args.resume)
     runtime=None; rows=[]; report=[]
     with HtmlBrowser() as browser:
         for index,(sample_id,image_path,html_path) in enumerate(pairs):
@@ -119,11 +119,19 @@ def prepare_oracle(args):
                 record['methods']['initial']={'html':str(initial_path),'seconds':construction_seconds,
                     'browser_executions':browser.executions-before,'vlm_calls':0,'failed':False,'error':None}
                 record['target_stats']['oracle']={'seconds':0.,'vlm_calls':0,'browser_executions':0}
+                from .html_feedback import frame_png
+                named_started=time.perf_counter()
+                named_frame=work/'current-named-frame.png';named_frame.write_bytes(frame_png(tree,original,viewport))
+                named_seconds=time.perf_counter()-named_started
+                record['named_frame']=str(named_frame)
                 ids={n['id'] for n in tree['nodes']};base=vlm.prompt_for(SimpleArgs(args,'extract-frames',work/'initial-ir.json'))
-                extra=(f'The required output viewport is EXACTLY {json.dumps(viewport)}. The original screenshot '
+                extra=('Image 1 is the TARGET webpage screenshot. Image 2 is the CURRENT HTML named-frame map, '
+                       'generated from exact browser boxes. Use image 2 to identify IDs, roles, nesting, and current '
+                       'geometry; estimate output coordinates only from image 1. Image-2 positions are not targets. '
+                       f'The required output viewport is EXACTLY {json.dumps(viewport)}. The original screenshot '
                        f'is {viewport[0]} by {viewport[1]} pixels. Return boxes in original pixels. ')
-                images=vlm.images_for(SimpleArgs(args,'extract-frames',work/'initial-ir.json',target_png))
-                call_args=SimpleArgs(args,'extract-frames',work/'initial-ir.json',target_png)
+                images=vlm.images_for(SimpleArgs(args,'extract-frames',work/'initial-ir.json',[target_png,named_frame]))
+                call_args=SimpleArgs(args,'extract-frames',work/'initial-ir.json',[target_png,named_frame])
                 def generate(attempt,feedback):
                     nonlocal runtime
                     if args.backend=='qwen' and runtime is None: runtime=vlm.load_qwen_runtime(args)
@@ -142,7 +150,7 @@ def prepare_oracle(args):
                     write_json(work/'vlm-target.json',predicted)
                 except Exception as error:
                     record['errors']['vlm_frames']=str(error)
-                record['target_stats']['vlm']={'seconds':time.perf_counter()-target_started,
+                record['target_stats']['vlm']={'seconds':named_seconds+time.perf_counter()-target_started,
                     'vlm_calls':record['vlm_attempts'].get('vlm-target',0),'browser_executions':0}
                 write_json(cache,record)
             except Exception as error:
@@ -175,4 +183,5 @@ class SimpleArgs:
     """Small view over CLI arguments for shared VLM prompt/image helpers."""
     def __init__(self,args,task,current,image=None):
         self.__dict__.update(vars(args));self.task=task;self.current=str(current);self.frames=None
-        self.image=[str(image)] if image else []
+        if isinstance(image,(list,tuple)): self.image=[str(path) for path in image]
+        else: self.image=[str(image)] if image else []

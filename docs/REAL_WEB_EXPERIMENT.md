@@ -59,6 +59,9 @@ WebUI 결과의 `evaluation/report.md`, `summary.json`에서 확인할 항목:
 원본 WebUI HTML의 외부 CSS·폰트·이미지를 다시 불러와 정답을 바꾸지 않습니다. 수정 과정은
 **생성된 HTML**을 실제 Chromium으로 실행합니다. reference AX 정답 박스는 평가에만 쓰며,
 FrameDiff의 목표 박스는 다른 데이터셋과 동일하게 VLM이 screenshot에서 추정합니다.
+목표 screenshot은 첫 번째 이미지, 현재 HTML에서 브라우저가 측정한 박스에 ID·역할·이름을 표시한
+named frame은 두 번째 이미지로 입력합니다. named frame은 현재 위치만 표시하며 목표 위치나 Oracle
+정보를 포함하지 않습니다.
 
 WebUI에서는 `OFFICIAL_REPO`를 사용하지 않습니다(일괄 스크립트가 안내 후 무시).
 이 점수들은 Design2Code 공식 지표나 WebUI 논문 지표를 재현한 것이 아닙니다.
@@ -93,6 +96,8 @@ VLM 박스 오차와 수정 정책 오차를 분리하려면 Design2Code 정답 
 부모 관계가 같으므로 별도의 의미 기반 DOM matching 없이 박스 오차를 측정할 수 있습니다.
 VLM 입력과 pixel 평가에는 이 정답 HTML을 동일 Chromium/viewport에서 렌더링한 screenshot을 사용해
 데이터셋 원본과 로컬 렌더러의 폰트·외부 자산 차이가 박스 추정 오차에 섞이지 않게 합니다.
+두 번째 VLM 이미지인 `current-named-frame.png`는 corrupted HTML의 정확한 현재 박스와 ID를 표시해
+반복되는 텍스트와 유사한 컴포넌트의 identity 대응을 돕습니다. 목표 위치는 포함하지 않습니다.
 
 먼저 5개 smoke test:
 
@@ -106,8 +111,8 @@ bash scripts/run_oracle_ablation.sh \
 
 | Method | 목표 박스 | 후보 제안 |
 |---|---|---|
-| `coordinate-vlm` | screenshot에서 VLM이 추정 | 좌표 residual |
-| `model-vlm` | screenshot에서 VLM이 추정 | FrameDiff checkpoint |
+| `coordinate-vlm` | 목표 screenshot + 현재 named frame에서 VLM이 추정 | 좌표 residual |
+| `model-vlm` | 목표 screenshot + 현재 named frame에서 VLM이 추정 | FrameDiff checkpoint |
 | `coordinate-oracle` | 정답 HTML의 실제 DOM 박스 | 좌표 residual |
 | `model-oracle` | 정답 HTML의 실제 DOM 박스 | FrameDiff checkpoint |
 
@@ -122,6 +127,7 @@ center/size error를 기록합니다.
 - `evaluation/oracle-ablation.json`: VLM 박스 정확도와 수치 분해
 - `evaluation/paired-common-success.json`: 동일 성공 페이지의 initial 대비 변화
 - `prepare/pages/*/corruption.json`: 요청한 교란과 실제 변경 박스
+- `prepare/pages/*/current-named-frame.png`: VLM에 제공한 현재 ID 지도
 - `repair/pages/*/*-steps/`: 각 방법의 실제 브라우저 trajectory
 
 분해 표의 값은 모두 양수가 개선을 뜻하도록 방향을 통일합니다.
@@ -132,6 +138,7 @@ center/size error를 기록합니다.
 전체 실행은 `PAGE_LIMIT`을 생략하고 새 출력 폴더를 사용합니다. `CORRUPTIONS`, `MAX_NODES`, `SEED`,
 `FEEDBACK_RENDER`, `OFFICIAL_REPO`를 환경변수로 설정할 수 있습니다. 실제 논문 결과에는 여러 corruption
 seed를 각각 실행해 평균과 분산을 보고하고, 이 controlled 결과와 기존 end-to-end 결과를 함께 제시해야 합니다.
+named-frame 입력 이전 prepare 캐시는 protocol이 달라 재사용되지 않으므로 새 출력 폴더를 사용하세요.
 
 ## 설치
 

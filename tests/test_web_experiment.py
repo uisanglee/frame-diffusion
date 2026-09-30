@@ -109,6 +109,8 @@ def test_real_html_pipeline_shared_initial_no_truth_leakage(tmp_path,monkeypatch
             assert Path(args.current).read_text()==HTML
             return HTML.replace('left:10px','left:30px'),{}
         from framediff.ir import execute
+        assert len(images)==2
+        assert 'CURRENT HTML named-frame map' in prompt
         tree=read_json(args.current)
         return json.dumps({'viewport':[320,240],'target':execute(tree,[320,240])}),{}
     monkeypatch.setattr('framediff.vlm.generate',generate)
@@ -201,6 +203,8 @@ def test_controlled_oracle_two_by_two_pipeline(tmp_path,monkeypatch):
     Image.new('RGB',(320,240),'white').save(root/'page.png')
     (root/'page.html').write_text(HTML)
     def target_generate(args,prompt,images,runtime):
+        assert len(images)==2
+        assert 'CURRENT HTML named-frame map' in prompt
         tree=read_json(args.current);target={}
         for node in tree['nodes']:
             target[node['id']]={'page':[0,0,320,240],'body':[0,0,320,240],
@@ -217,6 +221,7 @@ def test_controlled_oracle_two_by_two_pipeline(tmp_path,monkeypatch):
     assert prepared[0]['target_extraction_metrics']['box_iou']==pytest.approx(1)
     assert prepared[0]['corruption_actions']
     assert prepared[0]['corruption_metrics']['box_iou']<1
+    assert Path(prepared[0]['named_frame']).exists()
 
     import torch
     from dataclasses import asdict

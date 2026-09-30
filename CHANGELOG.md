@@ -1,5 +1,8 @@
 # Changelog
 
+- 목표 박스 VLM에 목표 screenshot과 현재 DOM에서 결정적으로 만든 named-frame ID 지도를 함께 입력.
+  기존 단일 이미지 prepare 캐시와 섞이지 않도록 prepare protocol 갱신.
+
 - Design2Code 정답 DOM의 controlled CSS corruption을 이용한 VLM/Oracle target box ×
   coordinate/FrameDiff 2×2 진단 파이프라인과 분해 지표를 추가.
 
