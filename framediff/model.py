@@ -13,10 +13,12 @@ class ModelConfig:
     dropout: float=.1
     tree_bias: bool=True
     max_nodes: int=128
+    conditioning: str='boxes'
 
     def __post_init__(self):
         if self.hidden%self.heads:raise ValueError('hidden must be divisible by heads')
         if not 0<=self.dropout<1:raise ValueError('dropout must be in [0,1)')
+        if self.conditioning not in ('boxes','plan'):raise ValueError('Unknown conditioning')
 
 def encode(current,observations,max_nodes=128,current_frames=None):
     nodes=current['nodes']; n=len(nodes)
@@ -73,6 +75,11 @@ def collate(features,device='cpu'):
             elif key=='geometry':
                 v=f[key].shape[0]; out[key][b,:v,:m,:15]=f[key];out[key][b,:v,:m,15]=1
             else: out[key][b,:m]=f[key]
+    if 'plan' in features[0]:
+        if any('plan' not in f for f in features):raise ValueError('Mixed conditioning in batch')
+        out['plan']=torch.zeros(batch,n,features[0]['plan'].shape[-1])
+        for b,f in enumerate(features):out['plan'][b,:len(f['roles'])]=f['plan']
+        out['plan_loss']=torch.stack([f['plan_loss'] for f in features])
     return {k:v.to(device) for k,v in out.items()}
 
 class Block(nn.Module):
@@ -103,13 +110,19 @@ class EditDenoiser(nn.Module):
         self.prop=nn.ModuleList(nn.Embedding(257,cfg.hidden) for _ in FIELDS)
         self.role=nn.Embedding(len(ROLES),cfg.hidden);self.name=nn.Embedding(4096,cfg.hidden);self.depth=nn.Embedding(33,cfg.hidden)
         self.geometry=nn.Sequential(nn.Linear(15,cfg.hidden),nn.GELU(),nn.Linear(cfg.hidden,cfg.hidden))
+        if cfg.conditioning=='plan':
+            from .plans import PLAN_DIM
+            self.plan_encoder=nn.Sequential(nn.Linear(PLAN_DIM,cfg.hidden),nn.GELU(),nn.Linear(cfg.hidden,cfg.hidden))
         self.blocks=nn.ModuleList(Block(cfg) for _ in range(cfg.layers));self.norm=nn.LayerNorm(cfg.hidden)
         self.action=nn.Linear(cfg.hidden,len(FIELDS)*257)
         self.stop=nn.Linear(cfg.hidden,1)
         self.value=nn.Sequential(nn.Linear(cfg.hidden,1),nn.Softplus())
         self.box=nn.Linear(cfg.hidden,4)
     def forward(self,b):
+        if ('plan' in b)!=(self.cfg.conditioning=='plan'):
+            raise ValueError('Checkpoint conditioning mismatch: plan checkpoints require plan features')
         x=self.role(b['roles'])+self.name(b['names'])+self.depth(b['depth'])
+        if self.cfg.conditioning=='plan':x=x+self.plan_encoder(b['plan'])
         x=x+sum(e(b['props'][:,:,j]) for j,e in enumerate(self.prop))/len(FIELDS)
         g=b['geometry']; gmask=g[:,:,:,15:16]
         x=x+(self.geometry(g[:,:,:,:15])*gmask).sum(1)/gmask.sum(1).clamp_min(1)

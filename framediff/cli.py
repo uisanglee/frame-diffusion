@@ -8,6 +8,8 @@ def main(argv=None):
     add_parsers(sub)
     from .oracle_ablation import add_parser as add_oracle_parser
     add_oracle_parser(sub)
+    from .plan_experiment import add_parsers as add_plan_parsers
+    add_plan_parsers(sub)
     g=sub.add_parser('generate');g.add_argument('--out',required=True);g.add_argument('--count',type=int,default=1000);g.add_argument('--seed',type=int,default=42)
     t=sub.add_parser('train')
     t.add_argument('--train',required=True);t.add_argument('--val',required=True);t.add_argument('--out',required=True)
@@ -15,6 +17,8 @@ def main(argv=None):
     t.add_argument('--lr',type=float,default=3e-4);t.add_argument('--dropout',type=float,default=.1)
     t.add_argument('--device',default='auto');t.add_argument('--bf16',action='store_true');t.add_argument('--no-tree-bias',action='store_true')
     t.add_argument('--fixed-pairs',action='store_true');t.add_argument('--resume');t.add_argument('--objective',choices=['edits','boxes'],default='edits')
+    t.add_argument('--conditioning',choices=['boxes','plan'],default='boxes')
+    t.add_argument('--init-checkpoint',help='Initialize same-config weights for fine-tuning; reset optimizer, retain training group history')
     e=sub.add_parser('evaluate');e.add_argument('--data',required=True);e.add_argument('--out',required=True);e.add_argument('--checkpoint')
     e.add_argument('--methods',default='none,coordinate,copy-boxes');e.add_argument('--device',default='auto')
     for name,default in [('steps',10),('beam',2),('topk',8),('budget',500),('limit',0),('seed',42),('cpu-threads',4)]:e.add_argument('--'+name,type=int,default=default)
@@ -55,7 +59,13 @@ def main(argv=None):
         p.error('repeats must be positive; warmup and limit must be nonnegative')
     for key in ('steps','batch_size','accumulation','hidden','layers','heads','max_nodes','max_noise','eval_every','log_every','val_samples','beam','topk','budget','cpu_threads'):
         if hasattr(args,key) and getattr(args,key)<1:p.error(key+' must be positive')
-    if args.command in ('web-prepare','web-repair','web-evaluate'):
+    if args.command=='plan-build-html-data':
+        from .plan_experiment import build_html_data
+        build_html_data(args)
+    elif args.command=='plan-evaluate':
+        from .plan_experiment import evaluate
+        evaluate(args)
+    elif args.command in ('web-prepare','web-repair','web-evaluate'):
         from .web_experiment import prepare,repair_pages,evaluate_pages
         {'web-prepare':prepare,'web-repair':repair_pages,'web-evaluate':evaluate_pages}[args.command](args)
     elif args.command=='web-oracle-prepare':

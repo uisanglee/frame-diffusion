@@ -21,6 +21,15 @@ def seed_all(seed):
     if torch.cuda.is_available():torch.cuda.manual_seed_all(seed)
 
 def sample(record,rng,cfg,max_noise,clean_probability=.15,objective='edits',online=True):
+    if 'teacher_edits' in record:
+        from .plans import encode_plan
+        from .ir import FIELDS
+        if cfg.conditioning!='plan':raise ValueError('Browser trajectory data requires plan conditioning')
+        feature=encode_plan(record['current'],record['plan'],cfg.max_nodes,record['current_boxes'])
+        for j,field in enumerate(FIELDS):
+            if field not in ('width','height','dx','dy'):feature['legal'][:,j,:]=False
+        feature['legal'][0]=False
+        return feature,record['teacher_edits'],record
     clean=record.get('clean')
     if clean is None:raise ValueError("Supervised training requires clean executable IR; raw frame observations alone are not edit labels")
     if rng.random()<clean_probability:
@@ -29,7 +38,19 @@ def sample(record,rng,cfg,max_noise,clean_probability=.15,objective='edits',onli
         current=corrupt(clean,rng,rng.randint(1,max_noise),mode=record.get('noise_mode','mixed'))
     else:current=record['current']
     diff=differences(current,clean)
-    feature=encode(current,record['observations'],cfg.max_nodes)
+    if cfg.conditioning=='plan':
+        from .plans import oracle_plan,encode_plan,plan_metrics
+        from .ir import execute,apply_edit
+        # Fixed clean plan across the trajectory; real VLM plans may be supplied explicitly.
+        obs=record['observations'][0]
+        plan=record.get('plan') or oracle_plan(clean,obs['target'],obs['viewport'])
+        feature=encode_plan(current,plan,cfg.max_nodes)
+        score=float(feature['plan_loss'])
+        if score<1e-6:diff=[]
+        else:
+            improving=[e for e in diff if plan_metrics(plan,execute(apply_edit(current,e),plan['viewport']))['plan_loss']<score-1e-9]
+            if improving:diff=improving
+    else:feature=encode(current,record['observations'],cfg.max_nodes)
     return feature,diff,record
 
 def loss_for(model,samples,device,objective):
@@ -50,6 +71,7 @@ def loss_for(model,samples,device,objective):
     # Train value on current observable geometric error, not privileged tree distance.
     g=batch['geometry'];vmask=g[:,:,:,12]*g[:,:,:,15]*batch['mask'][:,None,:]
     target=(g[:,:,:,8:12].abs().mean(-1)*vmask).sum((1,2))/vmask.sum((1,2)).clamp_min(1)
+    if model.cfg.conditioning=='plan':target=batch['plan_loss']
     value=torch.nn.functional.smooth_l1_loss(out['value'],target)
     loss=policy+.1*value
     return loss,{'loss':float(loss.detach()),'policy':float(policy.detach()),'value':float(value.detach())}
@@ -60,16 +82,25 @@ def train(args):
     records=list(read_jsonl(args.train));val=list(read_jsonl(args.val))
     if not records or not val:raise ValueError("Both train and validation sets must be nonempty")
     assert_disjoint(records,val)
-    cfg=ModelConfig(args.hidden,args.layers,args.heads,args.dropout,not args.no_tree_bias,args.max_nodes)
+    cfg=ModelConfig(args.hidden,args.layers,args.heads,args.dropout,not args.no_tree_bias,args.max_nodes,getattr(args,'conditioning','boxes'))
+    if cfg.conditioning=='plan' and args.objective!='edits':raise ValueError('Plan conditioning requires edits objective')
     model=EditDenoiser(cfg).to(device)
+    training_groups={r['group'] for r in records}
+    if getattr(args,'init_checkpoint',None):
+        if args.resume:raise ValueError('Choose init-checkpoint OR resume')
+        ck=torch.load(args.init_checkpoint,map_location=device,weights_only=True)
+        if asdict(ModelConfig(**ck['config']))!=asdict(cfg):raise ValueError('Initialization configuration mismatch')
+        model.load_state_dict(ck['model']);training_groups.update(ck.get('training_groups',[]))
     opt=torch.optim.AdamW(model.parameters(),lr=args.lr,weight_decay=.01)
     start=0;best=float('inf');rng=random.Random(args.seed)
     if args.resume:
         ck=torch.load(args.resume,map_location=device,weights_only=True)
-        if ck['config']!=asdict(cfg) or ck['objective']!=args.objective:raise ValueError("Resume configuration mismatch")
+        if asdict(ModelConfig(**ck['config']))!=asdict(cfg) or ck['objective']!=args.objective:raise ValueError("Resume configuration mismatch")
+        training_groups.update(ck.get('training_groups',[]))
         model.load_state_dict(ck['model']);opt.load_state_dict(ck['optimizer'])
         start=ck['step'];best=ck['best'];rng.setstate(ck['rng']);torch.set_rng_state(ck['torch_rng'].cpu())
         if device.startswith('cuda') and ck.get('cuda_rng'):torch.cuda.set_rng_state_all(ck['cuda_rng'])
+    if training_groups & {r['group'] for r in val}:raise ValueError('Validation overlaps historical checkpoint training groups')
     output=Path(args.out);output.mkdir(parents=True,exist_ok=True)
     fixed_rng=random.Random(90210)
     val_samples=[sample(r,fixed_rng,cfg,args.max_noise,online=False) for r in val[:args.val_samples]]
@@ -103,7 +134,7 @@ def train(args):
             improved=validation<best;best=min(best,validation)
             ck={'model':model.state_dict(),'optimizer':opt.state_dict(),'config':asdict(cfg),'step':step,'best':best,
                 'rng':rng.getstate(),'torch_rng':torch.get_rng_state(),'cuda_rng':torch.cuda.get_rng_state_all() if device.startswith('cuda') else [],
-                'objective':args.objective,'training_groups':sorted({r['group'] for r in records})}
+                'objective':args.objective,'training_groups':sorted(training_groups)}
             torch.save(ck,output/'last.pt')
             if improved:torch.save(ck,output/'best.pt')
             print(json.dumps({'step':step,'validation_loss':validation,'best':best}),flush=True)

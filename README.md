@@ -8,6 +8,12 @@
 
 > Status: research prototype (`v0.1.0`). API, LayoutIR schema, checkpoint compatibility may change before `v1.0`.
 
+새 **계획 기반 복구** 경로: 목표 screenshot + initial HTML 전체 화면 + named-frame을
+최초 한 번 비교해 고정된 위치·크기·정렬·관계 계획을 만들고, 매 수정 후에는 DOM 측정과
+추상화 frame으로 계획 충족도를 계산합니다. 중간 full screenshot은 캡처하지 않습니다.
+기존 box-conditioned 모델과 구분하여 `--conditioning plan`으로 다시 학습합니다.
+[학습·실제 CSS 데이터 생성·Synthetic/D2C/Hard/WebUI 실험 가이드](docs/plan-repair.md)를 참고하세요.
+
 ## 저장소 안내
 
 - [GitHub 운영·최초 게시 가이드](docs/GITHUB.md)

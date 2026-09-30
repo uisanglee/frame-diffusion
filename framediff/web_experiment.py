@@ -90,6 +90,8 @@ def add_parsers(sub):
     p.add_argument('--retry-failed', action='store_true', help='With resume, regenerate failed preparation pages; use new downstream output directories')
     p.add_argument('--vlm-retries', type=int, default=2, help='Additional validation retries per VLM operation')
     p.add_argument('--initial-mode', choices=['direct','text-augmented'], default='direct')
+    p.add_argument('--repair-conditioning', choices=['boxes','plan'], default='boxes',
+                   help='plan: one visual comparison of target/full initial/named frame; no target-box extraction')
     for key, default in [('rounds',1),('max-nodes',128),('max-new-tokens',16384),('max-pixels',1048576),('limit',0),('seed',42)]:
         p.add_argument('--'+key, type=int, default=default)
     p = sub.add_parser('web-repair', help='Closed-loop real HTML repair with measured DOM feedback; legacy proxy ablations')
@@ -110,7 +112,7 @@ def add_parsers(sub):
 def prepare(args):
     retries = getattr(args,'vlm_retries',2)
     if retries < 0: raise ValueError('vlm-retries must be nonnegative')
-    if args.rounds < 1 or not 2 <= args.max_nodes <= 256 or args.max_pixels < 1 or args.max_new_tokens < 1 or args.limit < 0:
+    if args.rounds < 0 or not 2 <= args.max_nodes <= 256 or args.max_pixels < 1 or args.max_new_tokens < 1 or args.limit < 0:
         raise ValueError('Invalid rounds/node/token/pixel/limit setting')
     if args.root:
         if getattr(args,'dataset','design2code')=='webui':
@@ -145,7 +147,7 @@ def prepare(args):
         if args.backend == 'qwen' and runtime is None:
             runtime = vlm.load_qwen_runtime(args)
         c = copy.copy(args); c.task = task; c.image = list(map(str,images)); c.current = str(current) if current else None; c.frames = None
-        base_prompt = extra + vlm.prompt_for(c)
+        base_prompt = extra if task=='repair-plan' else extra + vlm.prompt_for(c)
         def generate(attempt, feedback):
             name = label if attempt==0 else f'{label}.retry-{attempt}'
             prompt = base_prompt + feedback
@@ -240,14 +242,33 @@ def prepare(args):
                 if 'initial' in record['errors']: raise ValueError('Initial generation failed')
                 dom = browser.snapshot(embed_placeholder(initial,placeholder),viewport,work/'initial.png',args.max_nodes-1)
                 tagged = work/'tagged-initial.html'; tagged.write_text(dom.pop('html'))
-                tree, original, fit = fit_observation(dom)
+                if getattr(args,'repair_conditioning','boxes')=='plan':
+                    from .plans import dom_tree
+                    tree,original,fit=dom_tree(dom)
+                else:tree, original, fit = fit_observation(dom)
                 ir_path = work/'initial-ir.json'; write_json(ir_path,tree)
                 from .html_feedback import frame_png
                 named_frame=work/'current-named-frame.png'
                 named_frame.write_bytes(frame_png(tree,original,viewport))
                 record['named_frame']=str(named_frame)
                 ids = {n['id'] for n in tree['nodes']}
-                raw,_ = call('extract-frames',[item['screenshot'],named_frame],ir_path,work,'target-frames',
+                record.update(current=tree, fit=fit,
+                    original_boxes=original, tagged_html=str(tagged), selected_nodes=len(dom['nodes']),
+                    total_visible_nodes=dom['total_visible_nodes'])
+                if getattr(args,'repair_conditioning','boxes')=='plan':
+                    from .plans import planner_prompt,validate_plan
+                    raw,_=call('repair-plan',[item['screenshot'],work/'initial.png',named_frame],ir_path,work,'repair-plan',
+                        planner_prompt(tree,viewport),
+                        validator=lambda text:validate_plan(vlm.json_answer(text),tree,viewport))
+                    raw['source']='vlm_one_shot'
+                    record['plan']=raw
+                    from .plans import plan_metrics
+                    record['methods']['initial'].update(plan_metrics(raw,original))
+                    record['plan_vlm_calls']=record['vlm_attempts'].get('repair-plan',0)
+                    record['plan_initial_screenshots']=1
+                    write_json(work/'plan.json',raw)
+                else:
+                    raw,_ = call('extract-frames',[item['screenshot'],named_frame],ir_path,work,'target-frames',
                     'Image 1 is the TARGET webpage screenshot. Image 2 is the CURRENT HTML named-frame map, '
                     'generated from exact browser boxes; its labels identify component IDs, roles, nesting, and '
                     'current geometry. Match identities using image 2, but estimate every output coordinate only '
@@ -255,16 +276,14 @@ def prepare(args):
                     f'The required output viewport is EXACTLY {json.dumps(viewport)}. '
                     f'The original screenshot is {viewport[0]} by {viewport[1]} pixels. Return every box '
                     'in this original coordinate system; do not use the resized model-input dimensions. ',
-                    validator=lambda text: validate_target(text,viewport,ids))
-                target = raw
-                target['target'][tree['nodes'][0]['id']] = [0,0,*viewport]
-                record.update(current=tree, observations=[target], fit=fit,
-                    original_boxes=original, tagged_html=str(tagged), selected_nodes=len(dom['nodes']),
-                    total_visible_nodes=dom['total_visible_nodes'])
+                        validator=lambda text: validate_target(text,viewport,ids))
+                    target = raw
+                    target['target'][tree['nodes'][0]['id']] = [0,0,*viewport]
+                    record['observations']=[target]
             except Exception as error:
                 record['errors']['frames'] = str(error)
             record['frame_seconds'] = time.perf_counter()-start
-            record['frame_vlm_calls'] = record['vlm_attempts'].get('target-frames',0)
+            record['frame_vlm_calls'] = record['vlm_attempts'].get('target-frames',0)+record['vlm_attempts'].get('repair-plan',0)
             record['frame_browser_executions'] = browser.executions-before
             write_json(cache,record); rows.append(record); write_jsonl(out/'prepared.jsonl',rows)
             print(f'[{index+1}/{len(items)}] {item["id"]}: prepared, errors={record["errors"]}',flush=True)
@@ -279,13 +298,17 @@ def repair_pages(args):
     rows = list(read_jsonl(args.data)); methods = args.methods.split(',')
     controlled={'coordinate-vlm':('coordinate','vlm'),'model-vlm':('model','vlm'),
                 'coordinate-oracle':('coordinate','oracle'),'model-oracle':('model','oracle')}
-    allowed={'model','coordinate','model-feedback','coordinate-feedback',*controlled}
+    allowed={'model','coordinate','model-feedback','coordinate-feedback','model-plan','coordinate-plan',*controlled}
     if not rows or not set(methods)<=allowed or len(set(methods))!=len(methods):
         raise ValueError('Need nonempty data and unique supported web repair methods')
     device = select_device(args.device)
     if device == 'cpu': torch.set_num_threads(args.cpu_threads)
     model, ck = load_model(args.checkpoint,device)
     if ck['objective'] != 'edits': raise ValueError('An edits checkpoint is required')
+    if any(m.endswith('-plan') for m in methods):
+        if not all(m.endswith('-plan') for m in methods) or model.cfg.conditioning!='plan':
+            raise ValueError('Plan methods require a plan checkpoint and cannot mix box-conditioned methods')
+    elif model is not None and model.cfg.conditioning!='boxes':raise ValueError('Box methods require a box checkpoint')
     if set(ck.get('training_groups',[])) & {r['group'] for r in rows}:
         raise ValueError('Evaluation groups overlap checkpoint training groups')
     out = Path(args.out).resolve()
@@ -304,7 +327,7 @@ def repair_pages(args):
             for method in methods:
                 initial = record['methods']['initial']; html = Path(initial['html']).read_text()
                 start = time.perf_counter(); before = browser.executions; error = None; transfer = {}; stats = {}
-                proposal,target_source=controlled.get(method,(method.removesuffix('-feedback'),None))
+                proposal,target_source=controlled.get(method,(method.removesuffix('-feedback').removesuffix('-plan'),None))
                 target_stats=(record.get('target_stats',{}).get(target_source,{}) if target_source else
                               {'seconds':record.get('frame_seconds',0),'vlm_calls':record.get('frame_vlm_calls',0),
                                'browser_executions':record.get('frame_browser_executions',0)})
@@ -312,11 +335,26 @@ def repair_pages(args):
                     observations=(record.get('observations_by_source',{}).get(target_source)
                                   if target_source else record.get('observations'))
                     target_error='vlm_frames' if target_source=='vlm' else 'frames'
-                    if not observations:
+                    if not observations and not method.endswith('-plan'):
                         raise ValueError(record.get('errors',{}).get(target_error) or
                                          f'Missing {target_source or "default"} target observations')
                     if device.startswith('cuda'): torch.cuda.synchronize()
-                    if method.endswith('-feedback') or method in controlled:
+                    if method.endswith('-plan'):
+                        from .plan_search import repair_html as repair_plan_html
+                        if 'plan' not in record:raise ValueError(record.get('errors',{}).get('frames','Missing repair plan'))
+                        state,stats=repair_plan_html(browser,Path(record['tagged_html']).read_text(),record['current'],
+                            record['plan'],model=model,method=proposal,steps=args.steps,beam=args.beam,
+                            topk=args.topk,budget=args.budget,trace_dir=work/f'{method}-steps')
+                        html,result=state['html'],state['tree']
+                        transfer={'feedback_mode':'plan_frames','feedback_images':stats['feedback_images'],
+                            'feedback_browser_screenshots':stats['browser_screenshots'],
+                            'plan_loss':stats['plan_loss'],'plan_satisfaction':stats['plan_satisfaction'],
+                            'plan_node_coverage':stats['plan_node_coverage'],
+                            'candidate_failure_count':len(stats['candidate_failures']),
+                            'planning_screenshots':record.get('plan_initial_screenshots',0)}
+                        if stats['candidates'] and len(stats['candidate_failures'])==stats['candidates']:
+                            error='All candidate HTML executions failed; retained last valid HTML'
+                    elif method.endswith('-feedback') or method in controlled:
                         from .html_feedback import repair_html
                         html,result,stats = repair_html(browser,Path(record['tagged_html']).read_text(),
                             record['current'],observations,model,proposal,
@@ -348,7 +386,8 @@ def repair_pages(args):
                     'seconds':initial['seconds']+target_stats.get('seconds',0)+time.perf_counter()-start,
                     'vlm_calls':initial['vlm_calls']+target_stats.get('vlm_calls',0),
                     'browser_executions':target_stats.get('browser_executions',0)+browser.executions-before,
-                    'proxy_executions':stats.get('executions',0),'target_source':target_source or 'default',**transfer}
+                    'proxy_executions':0 if method.endswith('-plan') else stats.get('executions',0),
+                    'target_source':'fixed_plan' if method.endswith('-plan') else target_source or 'default',**transfer}
             write_json(cache,record); results.append(record); write_jsonl(out/'results.jsonl',results)
             status = {m:record['methods'][m].get('error') or 'ok' for m in methods}
             print(f'[{index+1}/{len(rows)}] {record["id"]}: HTML repair {status}',flush=True)
@@ -408,6 +447,9 @@ def evaluate_pages(args):
                        'feedback_images':data.get('feedback_images',0),
                        'feedback_browser_screenshots':data.get('feedback_browser_screenshots',0),
                        'candidate_failure_count':data.get('candidate_failure_count',0),
+                       'plan_loss':data.get('plan_loss'),'plan_satisfaction':data.get('plan_satisfaction'),
+                       'plan_node_coverage':data.get('plan_node_coverage'),
+                       'planning_screenshots':data.get('planning_screenshots',0),
                        'transfer_max_error_px':data.get('transfer_max_error_px'),
                        'error':data.get('error'), 'evaluation_error':None, 'reference_error':reference_error}
                 try:

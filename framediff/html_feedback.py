@@ -72,10 +72,12 @@ def propose_edits(model, tree, observations, boxes, k, method):
     return result
 
 
-def frame_png(tree, boxes, viewport):
-    image = Image.new('RGB',tuple(viewport),'white'); draw = ImageDraw.Draw(image)
+def frame_png(tree, boxes, viewport, max_pixels=None):
+    scale=min(1.,(max_pixels/(viewport[0]*viewport[1]))**.5) if max_pixels else 1.
+    size=tuple(max(1,round(v*scale)) for v in viewport)
+    image = Image.new('RGB',size,'white'); draw = ImageDraw.Draw(image)
     for n in tree['nodes'][1:]:
-        x,y,w,h = boxes[n['id']]
+        x,y,w,h = [v*scale for v in boxes[n['id']]]
         if w<=0 or h<=0: continue
         color = '#'+hashlib.sha256(n['id'].encode()).hexdigest()[:6]
         draw.rectangle((x,y,x+w,y+h),outline=color,width=2)
