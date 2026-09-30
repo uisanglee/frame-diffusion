@@ -7,9 +7,10 @@ import pytest
 from PIL import Image
 
 from framediff.html_bridge import HtmlBrowser, html_answer
-from framediff.ir import read_json, read_jsonl
+from framediff.ir import DEFAULTS, read_json, read_jsonl
 from framediff.web_experiment import evaluate_pages, prepare, repair_pages
 from framediff.web_experiment import validated_generation, validate_target
+from framediff import vlm
 
 
 def test_validation_retries_report_missing_ids_and_bad_json():
@@ -36,6 +37,18 @@ def test_truncated_html_retry_and_runtime_error():
         raise RuntimeError('CUDA out of memory')
     with pytest.raises(RuntimeError,match='CUDA'):
         validated_generation(oom,html_answer,2)
+
+
+def test_extract_frames_prompt_uses_concrete_ids(tmp_path):
+    current=tmp_path/'ir.json'
+    current.write_text(json.dumps({'version':1,'nodes':[
+        {'id':'**viewport**','parent':None,'role':'page','name':'page','props':dict(DEFAULTS)},
+        {'id':'fd-0','parent':'**viewport**','role':'text','name':'title','props':dict(DEFAULTS)}]}))
+    args=SimpleNamespace(task='extract-frames',current=str(current),frames=None)
+    prompt=vlm.prompt_for(args)
+    assert '"**viewport**": ["x", "y", "width", "height"]' in prompt
+    assert '"fd-0": ["x", "y", "width", "height"]' in prompt
+    assert 'Do not use the literal key "id"' in prompt
 
 
 HTML = '''<html><head><style>body{margin:0;min-height:200px}main{position:absolute;left:10px;top:20px;

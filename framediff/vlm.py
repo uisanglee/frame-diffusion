@@ -27,8 +27,13 @@ def prompt_for(args):
         if not args.current:raise ValueError('extract-frames requires --current IR for stable identity matching')
         tree=validate(read_json(args.current))
         identities=[{k:n[k] for k in ('id','parent','role','name')} for n in tree['nodes']]
+        keys=[n['id'] for n in tree['nodes']]
+        target_template={key:['x','y','width','height'] for key in keys}
         prompt+='From the reference screenshot estimate bounding boxes for exactly these component IDs: '+json.dumps(identities,ensure_ascii=False)
-        prompt+=' Return ONLY JSON {"viewport":[image_width,image_height],"target":{"id":[x,y,width,height]}} in original screenshot pixels. Do not invent or omit IDs. Root box is viewport.'
+        prompt+=' The target object keys must equal this exact JSON array: '+json.dumps(keys,ensure_ascii=False)+'.'
+        prompt+=' Return ONLY strict JSON shaped exactly like this template, replacing every string coordinate with a number: '
+        prompt+=json.dumps({'viewport':['image_width','image_height'],'target':target_template},ensure_ascii=False)
+        prompt+=' Do not use the literal key "id". Do not invent, rename, or omit IDs. Root box is the viewport.'
     else:
         prompt+='Return ONLY executable LayoutIR JSON {"version":1,"nodes":[{"id":"page","parent":null,"role":"page","name":"page","props":{...}},...]}. '
         prompt+='All nodes need all integer properties. Defaults: '+json.dumps(DEFAULTS)+'. Limits: '+json.dumps(LIMITS)+'. '
