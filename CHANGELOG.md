@@ -1,5 +1,8 @@
 # Changelog
 
+- WebUI 원본 screenshot/AX/box 파일의 실제 HTML 평가 adapter 추가. `web-prepare --dataset webui`,
+  뷰포트 선택, HTML 없는 입력, 독립 recorded-box 평가, 누락 metadata 기록을 지원.
+
 - 실제 HTML 중간 피드백 `model-feedback` / `coordinate-feedback` 추가 및 기본 실행 경로 변경.
   단일 CSS 속성 변경 후 실제 DOM 전체 박스를 다시 읽어 후보 선택/다음 모델 입력에 사용.
   auto height/줄바꿈/형제 이동을 유지하며 boxes/이름 붙은 frames/전체 raster 비용 모드와 단계별 trace 지원.

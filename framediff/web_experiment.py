@@ -45,6 +45,8 @@ def add_parsers(sub):
     p = sub.add_parser('web-prepare', help='Generate shared real HTML, self-revisions and predicted target frames')
     source = p.add_mutually_exclusive_group(required=True)
     source.add_argument('--root'); source.add_argument('--manifest')
+    p.add_argument('--dataset', choices=['design2code','webui'], default='design2code')
+    p.add_argument('--webui-view', default='default_1280-720', help='Exact WebUI viewport prefix, or all')
     p.add_argument('--out', required=True)
     p.add_argument('--backend', choices=['qwen','openai-compatible'], default='qwen')
     p.add_argument('--model', default='Qwen/Qwen3-VL-8B-Instruct')
@@ -74,19 +76,29 @@ def prepare(args):
     if args.rounds < 1 or not 2 <= args.max_nodes <= 256 or args.max_pixels < 1 or args.max_new_tokens < 1 or args.limit < 0:
         raise ValueError('Invalid rounds/node/token/pixel/limit setting')
     if args.root:
-        items = [{'id':i,'screenshot':str(p.resolve()),'html':str(h.resolve())}
-                 for i,p,h in discover_design2code(args.root)]
+        if getattr(args,'dataset','design2code')=='webui':
+            from .webui_pages import discover_webui
+            items = discover_webui(args.root,getattr(args,'webui_view','default_1280-720'),args.limit)
+        else:
+            items = [{'id':i,'screenshot':str(p.resolve()),'html':str(h.resolve())}
+                     for i,p,h in discover_design2code(args.root)]
     else:
         items = list(read_jsonl(args.manifest))
     if args.limit: items = items[:args.limit]
     if not items or len({i['id'] for i in items}) != len(items):
         raise ValueError('Empty dataset or duplicate IDs')
+    if args.initial_mode=='text-augmented' and any(not i.get('html') for i in items):
+        raise ValueError('text-augmented requires reference HTML for every page; use --initial-mode direct')
     out = Path(args.out).resolve()
-    sources = [{**i, 'image_sha':digest(i['screenshot']), 'reference_sha':digest(i['html']),
+    sources = [{**i, 'image_sha':digest(i['screenshot']), 'reference_sha':digest(i['html']) if i.get('html') else None,
+                **({'source_sha':{p:digest(p) for p in i['source_files']}} if 'source_files' in i else {}),
                 'initial_sha':digest(i['initial_html']) if i.get('initial_html') else None,
                 'placeholder_sha':digest(Path(i['html']).parent/'rick.jpg')
-                    if (Path(i['html']).parent/'rick.jpg').exists() else None} for i in items]
+                    if i.get('html') and (Path(i['html']).parent/'rick.jpg').exists() else None} for i in items]
     settings = {k:v for k,v in vars(args).items() if k not in ('resume','out')}
+    # Preserve existing Design2Code cache signatures when newly added flags are defaults.
+    if settings.get('dataset','design2code')=='design2code':
+        settings.pop('dataset',None); settings.pop('webui_view',None)
     guard_run(out, {'protocol':1,'settings':settings,'sources':sources}, args.resume)
     runtime = None
     rows = []
@@ -115,8 +127,8 @@ def prepare(args):
             if args.resume and cache.exists():
                 rows.append(read_json(cache)); write_jsonl(out/'prepared.jsonl',rows); continue
             with Image.open(item['screenshot']) as image: viewport = list(image.size)
-            placeholder = Path(item['html']).parent/'rick.jpg'
-            placeholder = placeholder if placeholder.exists() else None
+            placeholder = Path(item['html']).parent/'rick.jpg' if item.get('html') else None
+            placeholder = placeholder if placeholder and placeholder.exists() else None
             record = {**item,'viewport':viewport,'group':item.get('group',item['id']),
                       'initial_mode':args.initial_mode,'methods':{},'errors':{},'vlm_model':args.model}
             initial = '<html><body style="min-height:100vh;margin:0"></body></html>'
@@ -277,10 +289,12 @@ def evaluate_pages(args):
     if any(set(r['methods'])!=set(methods) for r in records): raise ValueError('All pages must contain all methods')
     out = Path(args.out).resolve()
     config = {'protocol':1,'data_sha':digest(args.data),'max_nodes':args.max_nodes,
-              'files':[{p:digest(p) for p in [r['html'],r['screenshot'],*[m['html'] for m in r['methods'].values()]]} for r in records],
+              'files':[{p:digest(p) for p in [r.get('html'),r['screenshot'],*[m['html'] for m in r['methods'].values()]] if p} for r in records],
               'official_repo':str(Path(args.official_repo).resolve()) if args.official_repo else None}
     official = None
     if args.official_repo:
+        if any(r.get('reference_kind')=='webui_recorded_boxes' for r in records):
+            raise ValueError('WebUI uses recorded screenshot/AX boxes, not Design2Code reference rerendering. Omit --official-repo.')
         from .official_metrics import OfficialMetrics
         official = OfficialMetrics(args.official_repo)
         config['official_source_sha'] = official.source_sha
@@ -292,16 +306,26 @@ def evaluate_pages(args):
             cache = work/'metrics.json'
             if args.resume and cache.exists():
                 rows.extend(read_json(cache)); write_jsonl(out/'metrics.jsonl',rows); continue
-            viewport = record['viewport']; placeholder = Path(record['html']).parent/'rick.jpg'
-            ref_html = embed_placeholder(Path(record['html']).read_text(),placeholder if placeholder.exists() else None)
+            viewport = record['viewport']
+            placeholder = Path(record['html']).parent/'rick.jpg' if record.get('html') else None
+            placeholder = placeholder if placeholder and placeholder.exists() else None
+            is_webui = record.get('reference_kind')=='webui_recorded_boxes'
+            ref_html = None
             # Reference HTML is opened only here, outside all repair/selection paths.
             reference_error = None
-            try: reference = browser.snapshot(ref_html,viewport,work/'reference.png',args.max_nodes)
-            except Exception as error: reference = None; reference_error = str(error)
+            reference = None
+            if is_webui:
+                reference_error = record.get('reference_box_error')
+            else:
+                try:
+                    ref_html = embed_placeholder(Path(record['html']).read_text(),placeholder)
+                    reference = browser.snapshot(ref_html,viewport,work/'reference.png',args.max_nodes)
+                except Exception as error: reference_error = str(error)
             page_rows = []
             for method in methods:
                 data = record['methods'][method]; started = time.perf_counter(); before = browser.executions
                 row = {'id':record['id'],'method':method,'failed':data['failed'],
+                       'reference_kind':record.get('reference_kind','rendered_html'),
                        'pipeline_seconds':data['seconds'],'pipeline_browser_executions':data['browser_executions'],
                        'vlm_calls':data['vlm_calls'],'proxy_executions':data.get('proxy_executions',0),
                        'feedback_mode':data.get('feedback_mode','none'),
@@ -312,12 +336,18 @@ def evaluate_pages(args):
                        'transfer_max_error_px':data.get('transfer_max_error_px'),
                        'error':data.get('error'), 'evaluation_error':None, 'reference_error':reference_error}
                 try:
-                    html = embed_placeholder(Path(data['html']).read_text(),placeholder if placeholder.exists() else None)
+                    html = embed_placeholder(Path(data['html']).read_text(),placeholder)
                     png = work/f'{method}.png'
                     observed = browser.snapshot(html,viewport,png,args.max_nodes)
                     with Image.open(record['screenshot']) as a, Image.open(png) as b:
                         if a.size != b.size: raise ValueError('Screenshot dimensions differ')
                         row['pixel_mae'] = float(np.abs(np.asarray(a.convert('RGB'),dtype=float)-np.asarray(b.convert('RGB'),dtype=float)).mean()/255)
+                    if is_webui and record.get('reference_boxes') and not reference_error:
+                        from .webui_pages import clipped_boxes
+                        boxes = clipped_boxes({n['id']:n['box'] for n in observed['nodes']},viewport,
+                            tuple(n['id'] for n in observed['nodes'] if n['role']=='body'))
+                        geometry = hungarian_box_metrics(boxes,record['reference_boxes'],viewport)
+                        row.update({'webui_'+k:v for k,v in geometry.items()})
                     if reference is not None:
                         try:
                             geometry = hungarian_box_metrics({n['id']:n['box'] for n in observed['nodes']},
@@ -354,7 +384,7 @@ def evaluate_pages(args):
     by_id = {(r['id'],r['method']):r for r in rows}
     for method in methods:
         if method == 'initial': continue
-        for metric in ('pixel_mae','dom_box_iou','official_block','official_position','official_clip'):
+        for metric in ('pixel_mae','dom_box_iou','webui_box_iou','official_block','official_position','official_clip'):
             pairs = [(by_id[(r['id'],'initial')].get(metric),r.get(metric)) for r in rows if r['method']==method]
             deltas = [b-a for a,b in pairs if isinstance(a,(float,int)) and isinstance(b,(float,int))]
             if deltas:
@@ -363,11 +393,16 @@ def evaluate_pages(args):
                     'improvement_rate':statistics.mean(d<0 if metric=='pixel_mae' else d>0 for d in deltas)})
     write_json(out/'paired-vs-initial.json',paired)
     lines = ['# Real HTML evaluation','',
-        '| Method | n | failed | DOM IoU | pixel MAE | pipeline seconds | VLM calls |',
+        '| Method | n | failed | geometry IoU | pixel MAE | pipeline seconds | VLM calls |',
         '|---|---:|---:|---:|---:|---:|---:|']
     for s in summary:
-        lines.append(f'| {s["method"]} | {s["n"]} | {s["failure_rate"]:.3f} | {s.get("dom_box_iou",float("nan")):.4f} | '
+        lines.append(f'| {s["method"]} | {s["n"]} | {s["failure_rate"]:.3f} | {s.get("dom_box_iou",s.get("webui_box_iou",float("nan"))):.4f} | '
                      f'{s.get("pixel_mae",float("nan")):.4f} | {s["pipeline_seconds"]:.3f} | {s["vlm_calls"]:.1f} |')
+    if any(r.get('reference_kind')=='webui_recorded_boxes' for r in records):
+        lines += ['', '| Method | WebUI recorded-box IoU | evaluated n |', '|---|---:|---:|']
+        for s in summary: lines.append(f'| {s["method"]} | {s.get("webui_box_iou",float("nan")):.4f} | {s.get("webui_box_iou_n",0)} |')
+        lines += ['', 'WebUI geometry uses viewport-clipped recorded AX boxes vs generated DOM boxes with Hungarian matching.',
+                  'AX and DOM granularity differ: this is a diagnostic geometry metric, not an official WebUI/Design2Code score.']
     if official:
         lines += ['', '| Method | Block | Text | Position | Color | CLIP |', '|---|---:|---:|---:|---:|---:|']
         for s in summary:

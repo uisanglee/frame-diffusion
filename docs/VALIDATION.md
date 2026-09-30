@@ -11,7 +11,10 @@
 실제 배치 결과 동등성, 후보 실패 보존, 실제 작은 신경망의 feedback 파이프라인 연결도 확인합니다.
 이 테스트는 기능 검증이며 학습된 모델의 실제 웹페이지 정확도 우위를 입증하지 않습니다.
 
-- 공식 지표와 중간 feedback 테스트까지 포함한 전체 결과: **33 passed**. Ruff / diff whitespace / 실행 스크립트 문법 검사 통과.
+- 공식 지표와 중간 feedback 및 WebUI 원본 연결 테스트까지 포함한 전체 결과: **35 passed**. Ruff / diff whitespace / 실행 스크립트 문법 검사 통과.
+- WebUI screenshot/AX/box fixture → mock VLM 초기 실제 HTML → 실제 작은 신경망/Chromium feedback →
+  원본 screenshot·기록 박스 평가를 검증했습니다. HTML 없는 입력, metadata 누락 페이지 유지, 뷰포트 선택,
+  full-page screenshot 제외, 정답 비누출, 캐시 재개를 포함합니다. 서버의 전체 WebUI 아카이브 실험은 미실행입니다.
 - 실제 Chromium으로 공유 초기 HTML → Self-Revision → IR fitting → HTML geometry transfer → 최종 평가 테스트.
 - 작은 무작위 checkpoint로 실제 FrameDiff 신경망 후보 생성·탐색과 HTML 반영 경로 확인(성능 실험 아님).
 - VLM 응답은 mock으로 검증: reference HTML/GT가 수정 프롬프트로 누출되지 않고 같은 초기 HTML을 사용하는지 확인.

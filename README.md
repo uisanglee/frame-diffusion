@@ -26,6 +26,10 @@
 프레임 그림으로 저장하지만, 현재 모델은 이미지 픽셀이 아니라 측정 박스/트리 특징을 입력받습니다.
 기존 `model`은 proxy-only ablation으로 유지합니다. [실행·제약·비용 비교](docs/REAL_WEB_EXPERIMENT.md)를 참고하세요.
 
+WebUI 원본 test 아카이브도 `WEB_DATASET=webui`로 같은 실제 HTML 파이프라인에 연결할 수 있습니다.
+저장 screenshot에서 초기 HTML을 생성하며, 평가는 원본 screenshot/AX 박스를 사용합니다.
+자세한 명령과 지표 정의는 [WebUI 실행 가이드](docs/REAL_WEB_EXPERIMENT.md#webui-원본-다운로드로-실행)에 있습니다.
+
 ## 1. 바로 실행
 
 Python 3.11–3.14 사용. 이 작업 폴더에는 Python 3.12의 `.venv`가 준비되어 있습니다.

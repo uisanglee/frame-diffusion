@@ -3,6 +3,67 @@
 이 파이프라인은 프레임 그림이 아닌 **실제 HTML/CSS 페이지**를 생성·수정·렌더링합니다.
 기존 `run-design2code` / `vlm-baseline`의 LayoutIR 전용 실험과 출력 형식이 다릅니다.
 
+## WebUI 원본 다운로드로 실행
+
+`webui-fit/test.jsonl` 대신 **압축 해제한 WebUI test 원본 폴더**를 사용합니다.
+`*-screenshot.webp`(또는 png), 대응하는 `*-axtree.json.gz`, `*-bb.json.gz`, `*-url.txt`를
+자동으로 연결합니다. 저장 HTML은 선택 사항입니다. 초기 HTML은 screenshot에서 VLM이 새로 생성하며,
+그 동일한 초기 HTML을 Self-Revision / FrameDiff가 각각 수정합니다.
+
+기존 설치 환경(`.[web,vlm]`, Chromium)에서 먼저 5개:
+
+```bash
+# 실제 압축 해제된 test 폴더로 설정. train/val까지 포함한 상위 폴더를 지정하지 마세요.
+export WEBUI_TEST_ROOT=/datasets/webui/test
+
+WEB_DATASET=webui WEBUI_VIEW=default_1280-720 \
+PAGE_LIMIT=5 REVISION_ROUNDS=1 \
+bash scripts/run_real_web.sh \
+  "$WEBUI_TEST_ROOT" runs/webui-feedback-smoke runs/main/best.pt
+```
+
+전체 실행은 별도 출력 폴더에서:
+
+```bash
+WEB_DATASET=webui WEBUI_VIEW=default_1280-720 \
+REVISION_ROUNDS=3 \
+bash scripts/run_real_web.sh \
+  "$WEBUI_TEST_ROOT" runs/webui-feedback-full runs/main/best.pt
+```
+
+`WEBUI_VIEW`는 정확한 접두사입니다. 다른 뷰포트는 `default_1920-1080`처럼 지정하거나 `all`을 사용합니다.
+기본은 페이지당 `default_1280-720` 하나로 평가합니다. `all`은 같은 사이트의 여러 화면을 각각 별도 사례로
+처리하는 것이며, 하나의 HTML을 모든 viewport에 공동 최적화하는 실험이 아닙니다.
+`*-screenshot-full.webp`는 사용하지 않습니다. WebUI의 viewport JSON은 visibility metadata이므로
+화면 크기로 오해하지 않고 screenshot 크기/파일명과 비교합니다. 좌표 배율을 확인할 수 없는 화면은
+박스 평가 오류를 기록하되 screenshot 평가와 페이지 자체는 유지합니다.
+
+단계별 prepare 명령은 다음과 같습니다. 이후 repair/evaluate 명령은 아래 Design2Code 예의 경로만 바꾸면 됩니다.
+
+```bash
+python -m framediff web-prepare --dataset webui \
+  --root "$WEBUI_TEST_ROOT" --webui-view default_1280-720 \
+  --out runs/webui-feedback-smoke/prepare --backend qwen --four-bit \
+  --rounds 1 --limit 5 --resume
+```
+
+WebUI 결과의 `evaluation/report.md`, `summary.json`에서 확인할 항목:
+
+- `pixel_mae`: 생성 HTML의 최종 screenshot과 **저장된 원본 screenshot**의 차이.
+- `webui_box_iou`, `webui_center_error`, `webui_size_error`: 기록된 AX 박스와 생성 DOM 박스를 viewport로
+  잘라 Hungarian matching으로 비교한 **보조 기하 지표**. AX/DOM의 요소 구분이 달라 완전한 정답 대응은 아닙니다.
+- `pipeline_seconds`, `pipeline_browser_executions`, `vlm_calls`: 초기 생성·목표 박스 추출·중간 실제 렌더링을 포함한 비용.
+- `failure_rate`, `reference_failures`, `webui_box_iou_n`: 수정 실패와 참조 박스 누락을 구분합니다.
+  AX/박스 파일이 없거나 깨져도 screenshot이 있으면 해당 페이지를 유지하고 이미지 평가를 수행합니다.
+
+원본 WebUI HTML의 외부 CSS·폰트·이미지를 다시 불러와 정답을 바꾸지 않습니다. 수정 과정은
+**생성된 HTML**을 실제 Chromium으로 실행합니다. reference AX 정답 박스는 평가에만 쓰며,
+FrameDiff의 목표 박스는 다른 데이터셋과 동일하게 VLM이 screenshot에서 추정합니다.
+
+WebUI에서는 `OFFICIAL_REPO`를 사용하지 않습니다(일괄 스크립트가 안내 후 무시).
+이 점수들은 Design2Code 공식 지표나 WebUI 논문 지표를 재현한 것이 아닙니다.
+`--initial-mode text-augmented`는 원본 HTML이 모든 사례에 있을 때만 지원하며 기본 direct를 권장합니다.
+
 ## 비교 조건
 
 | Method | 공유 초기 HTML 이후 처리 |
