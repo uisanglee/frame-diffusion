@@ -1,0 +1,14 @@
+# Linux + NVIDIA training environment. PyTorch is installed from its Python
+# package so the project keeps one dependency definition in pyproject.toml.
+# Confirm that the installed wheel matches the host driver before a long run.
+name: framediff-4090
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip>=24
+  - setuptools>=77
+  - wheel
+  - git
+  - pip:
+      - -e .[browser,test]

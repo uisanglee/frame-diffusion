@@ -5,6 +5,16 @@ baselines explicit and reproducible.
 
 ## Development setup
 
+Conda:
+
+```bash
+conda env create -f environment.yml
+conda activate framediff
+make test
+```
+
+또는 venv:
+
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate

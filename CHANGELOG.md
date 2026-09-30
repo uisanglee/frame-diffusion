@@ -8,6 +8,7 @@ after the first public release.
 ### Added
 
 - GitHub Actions CI, contribution templates, dependency updates, and repository documentation.
+- Conda bootstrap environments for local development and RTX 4090 training.
 
 ## [0.1.0] - 2026-09-30
 

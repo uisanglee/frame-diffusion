@@ -24,6 +24,26 @@
 
 Python 3.11–3.14 사용. 이 작업 폴더에는 Python 3.12의 `.venv`가 준비되어 있습니다.
 
+### Conda
+
+저장소 root에서 다음을 실행합니다. `environment.yml`은 정확한 lock file이 아니라 Python과
+프로젝트 의존성을 설치하는 재현 가능한 진입점입니다.
+
+```bash
+conda env create -f environment.yml
+conda activate framediff
+python -m playwright install chromium
+python -m pytest -q
+```
+
+의존성을 변경한 뒤 기존 환경을 맞추려면:
+
+```bash
+conda env update -f environment.yml --prune
+```
+
+### venv
+
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
@@ -46,6 +66,20 @@ export PLAYWRIGHT_BROWSERS_PATH="$PWD/.cache/ms-playwright"
 ## 2. RTX 4090 학습·실험
 
 Linux에서 GPU/드라이버와 호환되는 CUDA PyTorch를 먼저 설치하고 `torch.cuda.is_available()`을 확인하세요. 아래 설정의 메모리 사용량은 이 Mac에서 검증하지 않았습니다.
+
+Conda를 사용한다면:
+
+```bash
+conda env create -f environment-4090.yml
+conda activate framediff-4090
+python -m playwright install --with-deps chromium
+python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
+```
+
+마지막 값이 `True`가 아니면 학습을 시작하지 말고, 해당 서버의 NVIDIA driver에 맞는 PyTorch
+wheel을 [PyTorch 공식 설치 선택기](https://pytorch.org/get-started/locally/)로 다시 설치하세요.
+Conda 환경 자체가 CUDA driver를 설치하지는 않습니다. VLM까지 같은 환경에서 실행하려면
+`python -m pip install -e '.[vlm]'`을 추가하되 24GB VRAM에서 학습 모델과 동시에 적재하지 않습니다.
 
 ```bash
 python -m pip install -e '.[browser,test]'
@@ -237,5 +271,6 @@ LayoutDM, LayoutFormer++, 원 논문의 공개 결과를 이 내부 baseline 이
 - `search.py`, `evaluate.py`, `suite.py`: 탐색, 비교, seed 집계.
 - `browser.py`, `vlm.py`: Chromium 검증, frozen VLM adapter.
 - `tests/`: mutation·loss·누수 방지·adapter·proxy/browser parity.
+- `environment.yml`, `environment-4090.yml`: CPU/개발 및 4090 학습용 Conda bootstrap 환경.
 
 배경 논문: [Diffusion On Syntax Trees For Program Synthesis, ICLR 2025](https://proceedings.iclr.cc/paper_files/paper/2025/hash/666dd0d92a64396e753c691db93493d4-Abstract-Conference.html). 이 구현의 차이와 실측 검증은 `docs/VALIDATION.md`에 기록합니다.

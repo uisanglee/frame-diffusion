@@ -1,0 +1,11 @@
+name: framediff
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip>=24
+  - setuptools>=77
+  - wheel
+  - git
+  - pip:
+      - -e .[browser,test]

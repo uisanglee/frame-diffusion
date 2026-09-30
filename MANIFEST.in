@@ -4,5 +4,7 @@ include CHANGELOG.md
 include CONTRIBUTING.md
 include SECURITY.md
 include Makefile
+include environment.yml
+include environment-4090.yml
 recursive-include configs *.json
 recursive-include docs *.md
