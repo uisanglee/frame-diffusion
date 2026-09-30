@@ -85,6 +85,54 @@ VLM 호출 수에는 실패한 요청도 포함됩니다. 중간 후보 생성 �
 
 이는 **시스템 수준의 품질/추론 비용 비교**입니다. 모델 크기·학습 데이터가 통제된 diffusion 학습법 비교는 아닙니다.
 
+## Oracle target-box 2×2 진단
+
+VLM 박스 오차와 수정 정책 오차를 분리하려면 Design2Code 정답 HTML의 동일 DOM을 사용합니다.
+`web-oracle-prepare`는 정답 HTML을 한 번 렌더링해 stable ID와 Oracle 박스를 저장하고, 그 HTML에
+`width`, `height`, `margin-left`, `margin-top` 교란을 순차 적용합니다. 정답과 교란 HTML은 요소 ID와
+부모 관계가 같으므로 별도의 의미 기반 DOM matching 없이 박스 오차를 측정할 수 있습니다.
+VLM 입력과 pixel 평가에는 이 정답 HTML을 동일 Chromium/viewport에서 렌더링한 screenshot을 사용해
+데이터셋 원본과 로컬 렌더러의 폰트·외부 자산 차이가 박스 추정 오차에 섞이지 않게 합니다.
+
+먼저 5개 smoke test:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 PAGE_LIMIT=5 CORRUPTIONS=4 VLM_RETRIES=2 \
+bash scripts/run_oracle_ablation.sh \
+  "$D2C_ROOT" runs/oracle-ablation-smoke runs/main/best.pt
+```
+
+실행되는 네 방법은 다음과 같습니다.
+
+| Method | 목표 박스 | 후보 제안 |
+|---|---|---|
+| `coordinate-vlm` | screenshot에서 VLM이 추정 | 좌표 residual |
+| `model-vlm` | screenshot에서 VLM이 추정 | FrameDiff checkpoint |
+| `coordinate-oracle` | 정답 HTML의 실제 DOM 박스 | 좌표 residual |
+| `model-oracle` | 정답 HTML의 실제 DOM 박스 | FrameDiff checkpoint |
+
+모든 방법은 같은 corrupted HTML에서 시작하며 후보마다 Chromium으로 전체 DOM layout을 다시 계산합니다.
+Oracle 정보는 `*-oracle` 진단에만 들어가며 end-to-end 성능 주장이 아닙니다. VLM 방법은 정답 HTML이나
+Oracle 박스를 보지 않습니다. `prepare/prepare-report.json`은 VLM target box의 identity-aligned IoU,
+center/size error를 기록합니다.
+
+최종 파일:
+
+- `evaluation/report.md`: 전체/공통 성공 집계와 2×2 분해 표
+- `evaluation/oracle-ablation.json`: VLM 박스 정확도와 수치 분해
+- `evaluation/paired-common-success.json`: 동일 성공 페이지의 initial 대비 변화
+- `prepare/pages/*/corruption.json`: 요청한 교란과 실제 변경 박스
+- `repair/pages/*/*-steps/`: 각 방법의 실제 브라우저 trajectory
+
+분해 표의 값은 모두 양수가 개선을 뜻하도록 방향을 통일합니다.
+`Oracle target gain`은 같은 수정 정책에서 VLM 박스를 Oracle로 바꾼 효과이고,
+`Model policy gain`은 같은 목표 박스에서 coordinate를 FrameDiff로 바꾼 효과입니다.
+실패 페이지를 방법별로 다르게 제외하지 않도록 네 방법이 모두 성공한 공통 페이지에서 계산합니다.
+
+전체 실행은 `PAGE_LIMIT`을 생략하고 새 출력 폴더를 사용합니다. `CORRUPTIONS`, `MAX_NODES`, `SEED`,
+`FEEDBACK_RENDER`, `OFFICIAL_REPO`를 환경변수로 설정할 수 있습니다. 실제 논문 결과에는 여러 corruption
+seed를 각각 실행해 평균과 분산을 보고하고, 이 controlled 결과와 기존 end-to-end 결과를 함께 제시해야 합니다.
+
 ## 설치
 
 ```bash

@@ -269,8 +269,11 @@ def repair_pages(args):
     from .search import repair
     from .train import select_device
     rows = list(read_jsonl(args.data)); methods = args.methods.split(',')
-    if not rows or not set(methods)<= {'model','coordinate','model-feedback','coordinate-feedback'} or len(set(methods))!=len(methods):
-        raise ValueError('Need nonempty data and unique methods from model,coordinate,model-feedback,coordinate-feedback')
+    controlled={'coordinate-vlm':('coordinate','vlm'),'model-vlm':('model','vlm'),
+                'coordinate-oracle':('coordinate','oracle'),'model-oracle':('model','oracle')}
+    allowed={'model','coordinate','model-feedback','coordinate-feedback',*controlled}
+    if not rows or not set(methods)<=allowed or len(set(methods))!=len(methods):
+        raise ValueError('Need nonempty data and unique supported web repair methods')
     device = select_device(args.device)
     if device == 'cpu': torch.set_num_threads(args.cpu_threads)
     model, ck = load_model(args.checkpoint,device)
@@ -293,13 +296,22 @@ def repair_pages(args):
             for method in methods:
                 initial = record['methods']['initial']; html = Path(initial['html']).read_text()
                 start = time.perf_counter(); before = browser.executions; error = None; transfer = {}; stats = {}
+                proposal,target_source=controlled.get(method,(method.removesuffix('-feedback'),None))
+                target_stats=(record.get('target_stats',{}).get(target_source,{}) if target_source else
+                              {'seconds':record.get('frame_seconds',0),'vlm_calls':record.get('frame_vlm_calls',0),
+                               'browser_executions':record.get('frame_browser_executions',0)})
                 try:
-                    if 'frames' in record['errors']: raise ValueError(record['errors']['frames'])
+                    observations=(record.get('observations_by_source',{}).get(target_source)
+                                  if target_source else record.get('observations'))
+                    target_error='vlm_frames' if target_source=='vlm' else 'frames'
+                    if not observations:
+                        raise ValueError(record.get('errors',{}).get(target_error) or
+                                         f'Missing {target_source or "default"} target observations')
                     if device.startswith('cuda'): torch.cuda.synchronize()
-                    if method.endswith('-feedback'):
+                    if method.endswith('-feedback') or method in controlled:
                         from .html_feedback import repair_html
                         html,result,stats = repair_html(browser,Path(record['tagged_html']).read_text(),
-                            record['current'],record['observations'],model,method.removesuffix('-feedback'),
+                            record['current'],observations,model,proposal,
                             args.steps,args.beam,args.topk,args.budget,getattr(args,'feedback_render','frames'),
                             work/f'{method}-steps')
                         transfer = {'feedback_mode':stats['render_mode'],
@@ -325,10 +337,10 @@ def repair_pages(args):
                     error = str(exc)
                 path = work/f'{method}.html'; path.write_text(html)
                 record['methods'][method] = {'html':str(path),'failed':error is not None,'error':error,
-                    'seconds':initial['seconds']+record['frame_seconds']+time.perf_counter()-start,
-                    'vlm_calls':initial['vlm_calls']+record['frame_vlm_calls'],
-                    'browser_executions':record['frame_browser_executions']+browser.executions-before,
-                    'proxy_executions':stats.get('executions',0),**transfer}
+                    'seconds':initial['seconds']+target_stats.get('seconds',0)+time.perf_counter()-start,
+                    'vlm_calls':initial['vlm_calls']+target_stats.get('vlm_calls',0),
+                    'browser_executions':target_stats.get('browser_executions',0)+browser.executions-before,
+                    'proxy_executions':stats.get('executions',0),'target_source':target_source or 'default',**transfer}
             write_json(cache,record); results.append(record); write_jsonl(out/'results.jsonl',results)
             status = {m:record['methods'][m].get('error') or 'ok' for m in methods}
             print(f'[{index+1}/{len(rows)}] {record["id"]}: HTML repair {status}',flush=True)
@@ -383,6 +395,7 @@ def evaluate_pages(args):
                        'pipeline_seconds':data['seconds'],'pipeline_browser_executions':data['browser_executions'],
                        'vlm_calls':data['vlm_calls'],'proxy_executions':data.get('proxy_executions',0),
                        'feedback_mode':data.get('feedback_mode','none'),
+                       'target_source':data.get('target_source','none'),
                        'feedback_image_seconds':data.get('feedback_image_seconds',0),
                        'feedback_images':data.get('feedback_images',0),
                        'feedback_browser_screenshots':data.get('feedback_browser_screenshots',0),
@@ -470,6 +483,28 @@ def evaluate_pages(args):
             if deltas:
                 success_paired.append({'method':method,'metric':metric,'n':len(deltas),'mean_delta':statistics.mean(deltas)})
     write_json(out/'paired-common-success.json',success_paired)
+    ablation_methods={'coordinate-vlm','model-vlm','coordinate-oracle','model-oracle'}
+    ablation = None
+    if ablation_methods <= set(methods):
+        common={s['method']:s for s in successful}
+        decomposition=[]
+        for metric,direction in (('pixel_mae',-1),('dom_box_iou',1),('webui_box_iou',1)):
+            if all(isinstance(common[m].get(metric),(int,float)) for m in ablation_methods):
+                def value(method): return common[method][metric]
+                decomposition.append({'metric':metric,'n':min(common[m].get(metric+'_n',0) for m in ablation_methods),
+                    'positive_is_better':True,
+                    'oracle_target_gain_coordinate':direction*(value('coordinate-oracle')-value('coordinate-vlm')),
+                    'oracle_target_gain_model':direction*(value('model-oracle')-value('model-vlm')),
+                    'model_policy_gain_vlm':direction*(value('model-vlm')-value('coordinate-vlm')),
+                    'model_policy_gain_oracle':direction*(value('model-oracle')-value('coordinate-oracle'))})
+        extraction=[r.get('target_extraction_metrics') for r in records if r.get('target_extraction_metrics')]
+        extraction_summary={}
+        for key in {k for item in extraction for k,v in item.items() if isinstance(v,(int,float))}:
+            extraction_summary[key]=statistics.mean(item[key] for item in extraction if isinstance(item.get(key),(int,float)))
+            extraction_summary[key+'_n']=sum(isinstance(item.get(key),(int,float)) for item in extraction)
+        ablation={'common_successful_page_ids':sorted(common_ids),'target_extraction':extraction_summary,
+                  'decomposition':decomposition}
+        write_json(out/'oracle-ablation.json',ablation)
     lines = ['# Real HTML evaluation','',
         'All pages, including failed pipelines and their retained fallback HTML. failed is a rate.','',
         '| Method | n | failed | geometry IoU | pixel MAE | pipeline seconds | VLM calls |',
@@ -481,6 +516,14 @@ def evaluate_pages(args):
               '| Method | n | geometry IoU | pixel MAE |', '|---|---:|---:|---:|']
     for s in successful:
         lines.append(f'| {s["method"]} | {s["n"]} | {s.get("dom_box_iou",s.get("webui_box_iou",float("nan"))):.4f} | {s.get("pixel_mae",float("nan")):.4f} |')
+    if ablation:
+        lines += ['', 'Controlled oracle decomposition. Every value below is oriented so positive means better.', '',
+                  '| Metric | n | Oracle target gain (coordinate) | Oracle target gain (model) | Model policy gain (VLM) | Model policy gain (oracle) |',
+                  '|---|---:|---:|---:|---:|---:|']
+        for item in ablation['decomposition']:
+            lines.append(f'| {item["metric"]} | {item["n"]} | {item["oracle_target_gain_coordinate"]:.4f} | '
+                         f'{item["oracle_target_gain_model"]:.4f} | {item["model_policy_gain_vlm"]:.4f} | '
+                         f'{item["model_policy_gain_oracle"]:.4f} |')
     if any(r.get('reference_kind')=='webui_recorded_boxes' for r in records):
         lines += ['', '| Method | WebUI recorded-box IoU | evaluated n |', '|---|---:|---:|']
         for s in summary: lines.append(f'| {s["method"]} | {s.get("webui_box_iou",float("nan")):.4f} | {s.get("webui_box_iou_n",0)} |')

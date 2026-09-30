@@ -1,5 +1,8 @@
 # Changelog
 
+- Design2Code 정답 DOM의 controlled CSS corruption을 이용한 VLM/Oracle target box ×
+  coordinate/FrameDiff 2×2 진단 파이프라인과 분해 지표를 추가.
+
 - 실제 HTML VLM 출력 검증 재시도, 누락 ID 피드백, 시도별 로그/비용 집계 및 실패 준비 캐시 재처리 추가.
   전체 평균과 모든 방법의 공통 성공 페이지 평균을 별도 보고하고 HTML repair 로그에 오류를 표시.
 

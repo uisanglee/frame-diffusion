@@ -10,6 +10,7 @@ from framediff.html_bridge import HtmlBrowser, html_answer
 from framediff.ir import DEFAULTS, read_json, read_jsonl
 from framediff.web_experiment import evaluate_pages, prepare, repair_pages
 from framediff.web_experiment import validated_generation, validate_target
+from framediff.oracle_ablation import prepare_oracle
 from framediff import vlm
 
 
@@ -192,6 +193,51 @@ def test_failed_html_generation_keeps_page_for_all_methods(tmp_path,monkeypatch)
     recovered_rows=prepare(args)
     assert not recovered_rows[0]['errors']
     assert list((tmp_path/'out/pages').glob('*/previous-attempts/*/record.json'))
+
+
+@pytest.mark.browser
+def test_controlled_oracle_two_by_two_pipeline(tmp_path,monkeypatch):
+    root=tmp_path/'dataset';root.mkdir()
+    Image.new('RGB',(320,240),'white').save(root/'page.png')
+    (root/'page.html').write_text(HTML)
+    def target_generate(args,prompt,images,runtime):
+        tree=read_json(args.current);target={}
+        for node in tree['nodes']:
+            target[node['id']]={'page':[0,0,320,240],'body':[0,0,320,240],
+                'main':[10,20,200,140],'button':[30,50,80,30]}[node['role']]
+        return json.dumps({'viewport':[320,240],'target':target}),{}
+    monkeypatch.setattr('framediff.vlm.generate',target_generate)
+    args=SimpleNamespace(root=str(root),out=str(tmp_path/'prepared'),backend='openai-compatible',model='fake',
+        revision='main',endpoint='http://unused',api_key_env='TEST_KEY',four_bit=False,resume=False,
+        retry_failed=False,max_nodes=16,max_new_tokens=100,max_pixels=1048576,limit=0,seed=42,
+        corruptions=4,vlm_retries=1)
+    prepared=prepare_oracle(args)
+    assert len(prepared)==1 and not prepared[0]['errors']
+    assert set(prepared[0]['observations_by_source'])=={'vlm','oracle'}
+    assert prepared[0]['target_extraction_metrics']['box_iou']==pytest.approx(1)
+    assert prepared[0]['corruption_actions']
+    assert prepared[0]['corruption_metrics']['box_iou']<1
+
+    import torch
+    from dataclasses import asdict
+    from framediff.model import EditDenoiser,ModelConfig
+    cfg=ModelConfig(hidden=16,layers=1,heads=2,max_nodes=16)
+    network=EditDenoiser(cfg);checkpoint=tmp_path/'model.pt'
+    torch.save({'config':asdict(cfg),'model':network.state_dict(),'objective':'edits','training_groups':[]},checkpoint)
+    methods='coordinate-vlm,model-vlm,coordinate-oracle,model-oracle'
+    repair_args=SimpleNamespace(data=str(tmp_path/'prepared/prepared.jsonl'),out=str(tmp_path/'repair'),
+        checkpoint=str(checkpoint),device='cpu',cpu_threads=1,methods=methods,steps=1,beam=1,topk=2,
+        budget=2,seed=42,resume=False,feedback_render='boxes')
+    repaired=repair_pages(repair_args)
+    assert all(not repaired[0]['methods'][m]['failed'] for m in methods.split(','))
+    assert repaired[0]['methods']['coordinate-oracle']['vlm_calls']==0
+    assert repaired[0]['methods']['coordinate-vlm']['vlm_calls']==1
+    eval_args=SimpleNamespace(data=str(tmp_path/'repair/results.jsonl'),out=str(tmp_path/'evaluation'),
+        max_nodes=128,official_repo=None,resume=False)
+    evaluate_pages(eval_args)
+    decomposition=read_json(tmp_path/'evaluation/oracle-ablation.json')
+    assert decomposition['common_successful_page_ids']==['page']
+    assert decomposition['target_extraction']['box_iou']==pytest.approx(1)
 
 
 @pytest.mark.browser

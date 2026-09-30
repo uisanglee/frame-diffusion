@@ -6,6 +6,8 @@ def main(argv=None):
     sub=p.add_subparsers(dest='command',required=True)
     from .web_experiment import add_parsers
     add_parsers(sub)
+    from .oracle_ablation import add_parser as add_oracle_parser
+    add_oracle_parser(sub)
     g=sub.add_parser('generate');g.add_argument('--out',required=True);g.add_argument('--count',type=int,default=1000);g.add_argument('--seed',type=int,default=42)
     t=sub.add_parser('train')
     t.add_argument('--train',required=True);t.add_argument('--val',required=True);t.add_argument('--out',required=True)
@@ -56,6 +58,9 @@ def main(argv=None):
     if args.command in ('web-prepare','web-repair','web-evaluate'):
         from .web_experiment import prepare,repair_pages,evaluate_pages
         {'web-prepare':prepare,'web-repair':repair_pages,'web-evaluate':evaluate_pages}[args.command](args)
+    elif args.command=='web-oracle-prepare':
+        from .oracle_ablation import prepare_oracle
+        prepare_oracle(args)
     elif args.command=='generate':
         from .data import generate
         print(generate(args.out,args.count,args.seed))
