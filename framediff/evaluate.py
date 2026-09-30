@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from .ir import read_jsonl,write_json,write_jsonl,execute
 from .model import load_model,encode,collate
-from .metrics import box_metrics
+from .metrics import box_metrics,hungarian_box_metrics
 from .search import repair,Executor
 from .train import select_device
 
@@ -39,10 +39,12 @@ def evaluate(args):
             for method in methods:
                 if device.startswith('cuda'):torch.cuda.synchronize()
                 start=time.perf_counter();initial=record['current'];obs=record['observations']
-                truth=record.get('evaluation_observations',obs)
-                if record.get('target_kind')=='predicted_frames' and 'evaluation_observations' not in record:
-                    raise ValueError('Predicted-frame evaluation requires independent evaluation_observations')
+                truth=record.get('evaluation_observations',record.get('reference_observations',obs))
+                if record.get('target_kind')=='predicted_frames' and not ({'evaluation_observations','reference_observations'}&record.keys()):
+                    raise ValueError('Predicted-frame evaluation requires independent evaluation/reference observations')
                 if [o['viewport'] for o in obs]!=[o['viewport'] for o in truth]:raise ValueError('Evaluation and input viewports must match in order')
+                matching=record.get('evaluation_matching','identity')
+                if matching not in ('identity','hungarian_geometry'):raise ValueError(f'Unknown evaluation matching: {matching}')
                 root=initial['nodes'][0]['id'];stats={'executions':0,'candidates':0,'edits':[]}
                 before_calls=browser.executions if browser else 0
                 executor=Executor(browser if method=='model-browser' else None)
@@ -61,8 +63,12 @@ def evaluate(args):
                 if device.startswith('cuda'):torch.cuda.synchronize()
                 repair_seconds=time.perf_counter()-start
                 if frames is None:frames=[execute(result,o['viewport']) for o in obs]
-                per_view=[box_metrics(b,o['target'],o['viewport'],(root,)) for b,o in zip(frames,truth)]
+                if matching=='identity':
+                    per_view=[box_metrics(b,o['target'],o['viewport'],(root,)) for b,o in zip(frames,truth)]
+                else:
+                    per_view=[hungarian_box_metrics(b,o['target'],o['viewport'],(root,),tuple(record.get('reference_root_ids',[]))) for b,o in zip(frames,truth)]
                 row={'id':record['id'],'group':record['group'],'method':method,'target_kind':record.get('target_kind','unknown'),
+                     'evaluation_matching':matching,
                      **{k:statistics.mean(m[k] for m in per_view) for k in per_view[0]},
                      'worst_view_iou':min(m['box_iou'] for m in per_view), 'repair_seconds':repair_seconds,
                      'proxy_executions':stats['executions'] if method!='model-browser' else 0,
@@ -74,11 +80,14 @@ def evaluate(args):
                         screenshot=output/'screenshots'/f'{len(rows)}-{index}.png' if args.screenshots else None
                         actual=browser.render(result,o['viewport'],screenshot)
                         errors.extend(abs(actual[k][j]-frames[index][k][j]) for k in actual for j in range(4))
-                        browser_metrics.append(box_metrics(actual,truth[index]['target'],o['viewport'],(root,)))
+                        if matching=='identity':browser_metrics.append(box_metrics(actual,truth[index]['target'],o['viewport'],(root,)))
+                        else:browser_metrics.append(hungarian_box_metrics(actual,truth[index]['target'],o['viewport'],(root,),tuple(record.get('reference_root_ids',[]))))
                     row['proxy_browser_max_error_px']=max(errors)
                     row['browser_box_iou']=statistics.mean(x['box_iou'] for x in browser_metrics)
                 row['browser_executions']=(browser.executions-before_calls) if browser else 0
                 row['total_seconds']=time.perf_counter()-start
+                row['upstream_seconds']=record.get('upstream_seconds',0)
+                row['end_to_end_seconds']=row['total_seconds']+row['upstream_seconds']
                 artifact={'record_id':record['id'],'method':method,'result':result if row['executable_output'] else None,
                           'frames':frames,'trace':stats}
                 write_json(output/'predictions'/f'{len(rows)}.json',artifact)
@@ -94,7 +103,7 @@ def evaluate(args):
 
 def report_rows(rows,out,seed=42):
     out=Path(out);out.mkdir(parents=True,exist_ok=True)
-    metrics=['box_iou','center_error','size_error','relation_accuracy','element_success_09','page_success_09','overflow_rate','worst_view_iou','repair_seconds','total_seconds','browser_executions','proxy_executions']
+    metrics=['box_iou','center_error','size_error','relation_accuracy','element_success_09','page_success_09','overflow_rate','worst_view_iou','repair_seconds','total_seconds','upstream_seconds','end_to_end_seconds','browser_executions','proxy_executions']
     summaries=[];rng=np.random.default_rng(seed)
     for method in sorted({r['method'] for r in rows}):
         group=[r for r in rows if r['method']==method];summary={'method':method,'n':len(group)}

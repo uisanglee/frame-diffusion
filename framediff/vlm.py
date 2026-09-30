@@ -60,7 +60,7 @@ def api_generate(args,prompt,images):
     with urllib.request.urlopen(request,timeout=600) as response:result=json.load(response)
     return result['choices'][0]['message']['content'],{'usage':result.get('usage'),'backend_model':result.get('model')}
 
-def qwen_generate(args,prompt,images):
+def load_qwen_runtime(args):
     import torch
     from transformers import AutoProcessor, Qwen3VLForConditionalGeneration, BitsAndBytesConfig
     if not torch.cuda.is_available():raise RuntimeError('Local Qwen backend requires CUDA; use an API backend on this host')
@@ -69,6 +69,11 @@ def qwen_generate(args,prompt,images):
     if args.four_bit:kwargs['quantization_config']=BitsAndBytesConfig(load_in_4bit=True,bnb_4bit_quant_type='nf4',bnb_4bit_compute_dtype=torch.bfloat16,bnb_4bit_use_double_quant=True)
     model=Qwen3VLForConditionalGeneration.from_pretrained(args.model,**kwargs).eval()
     processor=AutoProcessor.from_pretrained(args.model,revision=args.revision,max_pixels=args.max_pixels)
+    return model,processor
+
+def qwen_generate(args,prompt,images,runtime=None):
+    import torch
+    model,processor=runtime or load_qwen_runtime(args)
     messages=[{'role':'user','content':[{'type':'image','image':im} for im in images]+[{'type':'text','text':prompt}]}]
     inputs=processor.apply_chat_template(messages,tokenize=True,add_generation_prompt=True,return_dict=True,return_tensors='pt').to(model.device)
     torch.cuda.reset_peak_memory_stats();torch.cuda.synchronize();start=time.perf_counter()
@@ -78,6 +83,9 @@ def qwen_generate(args,prompt,images):
     return answer,{'generation_seconds':time.perf_counter()-start,'peak_cuda_bytes':torch.cuda.max_memory_allocated(),
                    'resolved_revision':getattr(model.config,'_commit_hash',None),'input_tokens':inputs['input_ids'].shape[1],
                    'output_tokens':outputs.shape[1]-inputs['input_ids'].shape[1]}
+
+def generate(args,prompt,images,runtime=None):
+    return qwen_generate(args,prompt,images,runtime) if args.backend=='qwen' else api_generate(args,prompt,images)
 
 def run(args):
     if args.max_pixels<1:raise ValueError('max-pixels must be positive')
@@ -89,7 +97,7 @@ def run(args):
         with Image.open(args.image[0]) as im:original_size=list(im.size)
         prompt+=f' Original screenshot dimensions are {original_size}; scale coordinates back to these dimensions.'
     start=time.perf_counter()
-    answer,meta=(qwen_generate if args.backend=='qwen' else api_generate)(args,prompt,images)
+    answer,meta=generate(args,prompt,images)
     output=Path(args.out);output.parent.mkdir(parents=True,exist_ok=True)
     output.with_suffix(output.suffix+'.raw.txt').write_text(answer)
     write_json(output.with_suffix(output.suffix+'.meta.json'),{**vars(args),**meta,'wall_seconds':time.perf_counter()-start,'prompt':prompt})

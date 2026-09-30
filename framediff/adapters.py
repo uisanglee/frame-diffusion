@@ -95,12 +95,17 @@ def fit_frames(args):
         rid=obs.get('id',f'frames-{i}');group=obs.get('group',rid)
         try:
             tree,original,fidelity=fit_observation(obs)
+            if len(tree['nodes'])>getattr(args,'max_nodes',128):
+                raise ValueError(f'{len(tree["nodes"])} fitted nodes exceeds max_nodes={getattr(args,"max_nodes",128)}')
             accepted=1-fidelity['metrics']['box_iou']<=args.max_error
             report.append({'id':rid,'accepted':accepted,**fidelity})
             if not accepted:continue
             record=make_record(tree,rid,group,args.seed+i,viewports=[obs['viewport']],mode='geometry')
+            actual_observation={'viewport':obs['viewport'],'target':original}
             record.update(source='fitted_frame_surrogate',split=obs.get('split',group_split(group)),
-                          noise_mode='geometry',original_target=original,fit=fidelity)
+                          noise_mode='geometry',original_target=original,fit=fidelity,
+                          observations=[actual_observation],evaluation_observations=[actual_observation],
+                          evaluation_matching='identity')
             records.append(record)
         except (ValueError,KeyError,ZeroDivisionError) as error:
             report.append({'id':rid,'accepted':False,'reason':str(error)})

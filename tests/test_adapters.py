@@ -36,6 +36,8 @@ def test_webui_actual_schema(tmp_path):
     fit_frames(SimpleNamespace(input=args.out/'observations.jsonl',out=tmp_path/'fit',max_error=.15,seed=42))
     fitted=list(read_jsonl(tmp_path/'fit/train.jsonl'))
     assert len(fitted)==1 and fitted[0]['source']=='fitted_frame_surrogate'
+    assert fitted[0]['observations']==fitted[0]['evaluation_observations']
+    assert fitted[0]['observations'][0]['target']['3']==[100.0,100.0,100.0,40.0]
 
 @pytest.mark.browser
 def test_absolute_parity():

@@ -4,7 +4,7 @@
 
 ## 검증된 항목
 
-- `pytest`: **13 passed**. 단위·통합·Chromium 테스트 포함.
+- `pytest`: **21 passed** (17 non-browser + 4 Chromium). 단위·통합·Chromium 테스트 포함.
 - 150개 합성 페이지 생성: train 121 / val 15 / test 14.
 - hidden 64, 2 layers, 4 heads, 702,584 parameters, batch 4 모델 학습.
 - 50-step 학습 후 `last.pt`에서 2,000-step까지 재개.
@@ -14,6 +14,8 @@
 - WebUI 실제 파일 schema를 모사한 fixture의 import/fit 테스트.
 - predicted-frame 입력과 독립 평가 정답이 분리되는지 테스트.
 - VLM API adapter의 prompt/JSON 입출력은 **mock**으로 테스트.
+- Design2Code 파일 발견, reference DOM box 추출, surrogate 생성은 소형 Chromium fixture로 테스트.
+- batched Design2Code VLM record 생성은 mock으로, Hungarian geometry matching은 단위 테스트로 검증.
 - 패키지 editable install 및 CLI 실행.
 - smoke suite 학습→평가→seed 집계 실행.
 
@@ -59,8 +61,16 @@ python -m framediff evaluate --data data/smoke/test.jsonl \
 
 ## 아직 검증하지 않은 항목
 
+추가 paired smoke 실험은 `runs/render-cost/smoke-paired/report.md`에 저장했습니다.
+기존 CPU checkpoint, 무작위 synthetic 3개, 2회 반복, warmup 1, steps 5, budget 40 기준:
+proxy 0.020초, Chromium geometry 0.205초, Chromium+PNG 2.352초/페이지.
+최종 Chromium IoU는 세 경로 모두 0.9979였습니다. 탐색 중 browser 호출은 proxy 0,
+두 Chromium 경로 평균 68회이며 최종 검증 3회는 각 경로에 공통입니다.
+이는 Mac 소규모 연결 검증이며 4090 또는 실제 benchmark의 성능 결과가 아닙니다.
+
 - RTX 4090에서 BF16/4-bit 실행, VRAM, 처리량, 장시간 학습.
 - 실제 Qwen weight 다운로드 및 추론. 외부 API 서버 실제 호출.
+- 공식 Design2Code/Hard 전체 데이터 준비 수율과 전체 end-to-end 평가.
 - 대규모 WebUI 아카이브 import와 fitting의 수율·실제 일반화.
 - 실제 AR 오류 train/test 분리와 end-to-end 성능.
 - 템플릿/사이트 holdout, 색상·텍스트·이미지·기능의 보존.

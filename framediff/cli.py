@@ -15,10 +15,18 @@ def main(argv=None):
     e.add_argument('--methods',default='none,coordinate,copy-boxes');e.add_argument('--device',default='auto')
     for name,default in [('steps',10),('beam',2),('topk',8),('budget',500),('limit',0),('seed',42),('cpu-threads',4)]:e.add_argument('--'+name,type=int,default=default)
     e.add_argument('--browser-verify',action='store_true');e.add_argument('--screenshots',action='store_true');e.add_argument('--allow-train-overlap',action='store_true')
+    rc=sub.add_parser('compare-renderers',help='Paired proxy/Chromium latency and accuracy experiment')
+    for key in ('data','checkpoint','out'):rc.add_argument('--'+key,required=True)
+    rc.add_argument('--device',default='auto');rc.add_argument('--raster',action='store_true')
+    for key,default in [('steps',10),('beam',2),('topk',8),('budget',160),('limit',20),('seed',42),('cpu-threads',4),('repeats',3),('warmup',1)]:
+        rc.add_argument('--'+key,type=int,default=default)
     r=sub.add_parser('render');r.add_argument('--ir',required=True);r.add_argument('--out',required=True);r.add_argument('--width',type=int,default=1024);r.add_argument('--height',type=int,default=768);r.add_argument('--screenshot',action='store_true')
     x=sub.add_parser('extract-html');x.add_argument('--html',required=True);x.add_argument('--out',required=True);x.add_argument('--width',type=int,default=1024);x.add_argument('--height',type=int,default=768);x.add_argument('--max-nodes',type=int,default=128)
-    w=sub.add_parser('import-webui');w.add_argument('--root',required=True);w.add_argument('--out',required=True);w.add_argument('--max-nodes',type=int,default=128);w.add_argument('--limit',type=int,default=0);w.add_argument('--split',choices=['train','val','test']);w.add_argument('--seed',type=int,default=42)
-    f=sub.add_parser('fit-frames');f.add_argument('--input',required=True);f.add_argument('--out',required=True);f.add_argument('--max-error',type=float,default=.15);f.add_argument('--seed',type=int,default=42)
+    w=sub.add_parser('import-webui');w.add_argument('--root',required=True);w.add_argument('--out',required=True);w.add_argument('--max-nodes',type=int,default=127);w.add_argument('--limit',type=int,default=0);w.add_argument('--split',choices=['train','val','test']);w.add_argument('--seed',type=int,default=42)
+    f=sub.add_parser('fit-frames');f.add_argument('--input',required=True);f.add_argument('--out',required=True);f.add_argument('--max-error',type=float,default=.15);f.add_argument('--max-nodes',type=int,default=128);f.add_argument('--seed',type=int,default=42)
+    d=sub.add_parser('prepare-design2code');d.add_argument('--root',required=True);d.add_argument('--out',required=True);d.add_argument('--dataset',choices=['design2code','design2code-hard'],default='design2code');d.add_argument('--max-nodes',type=int,default=127);d.add_argument('--max-fit-error',type=float,default=.15);d.add_argument('--limit',type=int,default=0);d.add_argument('--seed',type=int,default=42);d.add_argument('--fail-fast',action='store_true')
+    dv=sub.add_parser('run-design2code');dv.add_argument('--manifest',required=True);dv.add_argument('--out',required=True);dv.add_argument('--backend',choices=['qwen','openai-compatible'],default='qwen');dv.add_argument('--model',default='Qwen/Qwen3-VL-8B-Instruct');dv.add_argument('--revision',default='main');dv.add_argument('--endpoint',default='http://localhost:8000/v1/chat/completions');dv.add_argument('--api-key-env',default='VLM_API_KEY');dv.add_argument('--four-bit',action='store_true');dv.add_argument('--max-new-tokens',type=int,default=8192);dv.add_argument('--max-pixels',type=int,default=1048576);dv.add_argument('--max-nodes',type=int,default=128);dv.add_argument('--limit',type=int,default=0);dv.add_argument('--seed',type=int,default=42);dv.add_argument('--resume',action='store_true');dv.add_argument('--fail-fast',action='store_true')
+    c=sub.add_parser('combine-data');c.add_argument('--input',action='append',required=True);c.add_argument('--out',required=True);c.add_argument('--split',choices=['train','val','test'])
     v=sub.add_parser('vlm');v.add_argument('--backend',choices=['qwen','openai-compatible'],default='qwen');v.add_argument('--model',default='Qwen/Qwen3-VL-8B-Instruct');v.add_argument('--revision',default='main');v.add_argument('--endpoint',default='http://localhost:8000/v1/chat/completions');v.add_argument('--api-key-env',default='VLM_API_KEY')
     v.add_argument('--task',choices=['generate-ir','revise-ir','generate-html','revise-html','extract-frames'],required=True);v.add_argument('--image',action='append',default=[]);v.add_argument('--current');v.add_argument('--frames');v.add_argument('--out',required=True)
     v.add_argument('--four-bit',action='store_true');v.add_argument('--max-new-tokens',type=int,default=4096);v.add_argument('--max-pixels',type=int,default=1048576);v.add_argument('--seed',type=int,default=42)
@@ -28,6 +36,8 @@ def main(argv=None):
     infer=sub.add_parser('repair');infer.add_argument('--ir',required=True);infer.add_argument('--target',required=True);infer.add_argument('--checkpoint',required=True);infer.add_argument('--out',required=True);infer.add_argument('--device',default='auto')
     for name,default in [('steps',10),('beam',2),('topk',8),('budget',160)]:infer.add_argument('--'+name,type=int,default=default)
     args=p.parse_args(argv)
+    if args.command=='compare-renderers' and (args.repeats<1 or args.warmup<0 or args.limit<0):
+        p.error('repeats must be positive; warmup and limit must be nonnegative')
     for key in ('steps','batch_size','accumulation','hidden','layers','heads','max_nodes','max_noise','eval_every','log_every','val_samples','beam','topk','budget','cpu_threads'):
         if hasattr(args,key) and getattr(args,key)<1:p.error(key+' must be positive')
     if args.command=='generate':
@@ -39,6 +49,9 @@ def main(argv=None):
     elif args.command=='evaluate':
         from .evaluate import evaluate
         evaluate(args)
+    elif args.command=='compare-renderers':
+        from .render_compare import compare_renderers
+        compare_renderers(args)
     elif args.command=='render':
         from .ir import read_json,compile_html,write_json,execute
         tree=read_json(args.ir);out=Path(args.out);out.mkdir(parents=True,exist_ok=True);v=(args.width,args.height)
@@ -53,6 +66,15 @@ def main(argv=None):
     elif args.command in ('import-webui','fit-frames'):
         from .adapters import import_webui,fit_frames
         (import_webui if args.command=='import-webui' else fit_frames)(args)
+    elif args.command=='prepare-design2code':
+        from .benchmarks import prepare_design2code
+        prepare_design2code(args)
+    elif args.command=='run-design2code':
+        from .benchmarks import run_design2code_vlm
+        run_design2code_vlm(args)
+    elif args.command=='combine-data':
+        from .benchmarks import combine_data
+        combine_data(args)
     elif args.command=='vlm':
         from .vlm import run
         run(args)

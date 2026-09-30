@@ -29,6 +29,7 @@ initial LayoutIR ──> proxy executor ──> current frames
 |---|---|---|
 | `ir.py` | Schema validation, legal edits, proxy execution, HTML compilation | Load model weights or datasets |
 | `data.py` | Synthetic trees, corruption, split and leakage rules | Evaluate on training groups |
+| `benchmarks.py` | Design2Code preparation, batched VLM inference, dataset combination | Confuse Hungarian geometry with official visual metrics |
 | `adapters.py` | WebUI import and surrogate fitting with fidelity metadata | Call fitted boxes original CSS |
 | `model.py` | Feature encoding and edit-denoiser network | Access privileged clean trees |
 | `train.py` | Sampling, losses, checkpoint and resume | Select checkpoints on test results |
@@ -44,7 +45,8 @@ initial LayoutIR ──> proxy executor ──> current frames
 - Supervised pairs require identical node ID order and parent topology.
 - Checkpoint resume requires identical model config and training objective.
 - Evaluation rejects training-group overlap unless explicitly overridden.
-- Predicted target frames require separate `evaluation_observations`.
+- Predicted target frames require separate identity-aligned `evaluation_observations` or
+  identity-free `reference_observations`; input targets are never reused as truth.
 - Proxy/browser parity is a tested invariant of the supported DSL.
 
 ## Extension sequence

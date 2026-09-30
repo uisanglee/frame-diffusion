@@ -7,8 +7,13 @@ after the first public release.
 
 ### Added
 
+- `compare-renderers`: paired proxy/Chromium/PNG latency and final-browser accuracy experiment,
+  warmup, randomized order, repeated measurements and paired cluster-bootstrap confidence intervals.
 - GitHub Actions CI, contribution templates, dependency updates, and repository documentation.
 - Conda bootstrap environments for local development and RTX 4090 training.
+- Design2Code/Hard HTML-box preparation and batched screenshot-to-LayoutIR/frame inference.
+- Identity-free Hungarian geometry evaluation against independent reference DOM boxes.
+- Actual-box WebUI evaluation, combined-dataset construction, and end-to-end latency accounting.
 
 ## [0.1.0] - 2026-09-30
 

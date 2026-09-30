@@ -1,4 +1,6 @@
 import statistics
+import numpy as np
+from scipy.optimize import linear_sum_assignment
 
 def iou(a,b):
     x = max(0,min(a[0]+a[2],b[0]+b[2])-max(a[0],b[0]))
@@ -34,6 +36,29 @@ def box_metrics(pred, target, viewport, exclude=()):
             "relation_accuracy":statistics.mean(relation_hits) if relation_hits else 1.,
             "recall":sum(k in pred for k in ids)/len(ids),
             "overflow_rate":sum(k not in pred or pred[k][0]<-.1 or pred[k][1]<-.1 or pred[k][0]+pred[k][2]>w+.1 or pred[k][1]+pred[k][3]>h+.1 for k in ids)/len(ids)}
+
+def hungarian_box_metrics(pred,target,viewport,pred_exclude=(),target_exclude=()):
+    """Identity-free geometry metric for generated trees vs reference DOM blocks.
+
+    Matching maximizes IoU with a small normalized center-distance tie breaker. This
+    is intentionally named differently from the official Design2Code block metric.
+    """
+    pred_items=[(k,v) for k,v in pred.items() if k not in pred_exclude]
+    target_items=[(k,v) for k,v in target.items() if k not in target_exclude]
+    if not target_items:raise ValueError('No target elements to evaluate')
+    if not pred_items:
+        return box_metrics({},dict(target_items),viewport)
+    w,h=viewport;cost=np.zeros((len(pred_items),len(target_items)),dtype=np.float64)
+    for i,(_,a) in enumerate(pred_items):
+        for j,(_,b) in enumerate(target_items):
+            center=(abs(a[0]+a[2]/2-b[0]-b[2]/2)/w+abs(a[1]+a[3]/2-b[1]-b[3]/2)/h)/2
+            cost[i,j]=1-iou(a,b)+1e-3*center
+    rows,cols=linear_sum_assignment(cost)
+    # Rename predictions to their assigned reference IDs, then reuse all metrics.
+    aligned={target_items[j][0]:pred_items[i][1] for i,j in zip(rows,cols)}
+    result=box_metrics(aligned,dict(target_items),viewport)
+    result['matched_pairs']=len(rows)
+    return result
 
 def objective(pred,target,viewport,root=None):
     m=box_metrics(pred,target,viewport,exclude=(root,))

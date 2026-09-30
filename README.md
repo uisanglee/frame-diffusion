@@ -130,14 +130,14 @@ python -m framediff train \
 
 ```bash
 python -m framediff import-webui --root /path/to/webui-extracted \
-  --out data/webui-raw --max-nodes 128 --limit 1000
+  --out data/webui-raw --max-nodes 127 --limit 1000
 python -m framediff fit-frames --input data/webui-raw/observations.jsonl \
   --out data/webui-fit --max-error 0.15
 python -m framediff train --train data/webui-fit/train.jsonl \
   --val data/webui-fit/val.jsonl --out runs/webui --device cuda --bf16
 ```
 
-AX tree와 좌표는 원본 CSS 정답이 아닙니다. `fit-frames`는 absolute-layout surrogate를 만들고 양자화/재부모화 오차를 `fit-report.json`에 기록합니다. 기본적으로 평균 IoU가 0.85 미만인 샘플을 제외합니다. 모델의 학습 목표는 **투영된 surrogate frame**이며 원래 관측값은 `original_target`으로 별도 보존합니다. 이 데이터는 geometry 사전학습용이지 원본 웹 CSS 복원 benchmark가 아닙니다.
+AX tree와 좌표는 원본 CSS 정답이 아닙니다. `fit-frames`는 absolute-layout surrogate를 만들고 양자화/재부모화 오차를 `fit-report.json`에 기록합니다. 기본적으로 평균 IoU가 0.85 미만인 샘플을 제외합니다. 입력·평가 target은 실제 관측 box이고, 편집 label은 이를 가장 가깝게 재현한 surrogate IR입니다. 이 데이터는 실제 box geometry 사전학습·held-out 평가용이지 원본 웹 CSS 복원 benchmark가 아닙니다.
 
 도메인 hostname 기준 split, 학습/검증 및 평가 시 group 중복 검사를 제공합니다. 공식 split을 보존하려면 import에 `--split train|val|test`를 지정하고 각각 따로 처리하세요. 공식 split 간에도 같은 hostname이 있으면 의도적으로 실패하므로 정리해야 합니다. 노드 초과는 조용히 자르지 않고 거절합니다.
 
@@ -152,6 +152,65 @@ python -m framediff make-pair --current initial.json --target target.json \
 ```
 
 여러 JSONL을 도메인별로 묶어 train/val/test를 구성합니다. `--fixed-pairs` 학습은 저장된 AR 오류를 사용하고, 기본 학습은 clean에 온라인 corruption을 적용합니다. 부모 관계나 노드 집합이 다르면 명시적으로 거절합니다. 이름만으로 객체 대응을 자동으로 추측하지 않습니다.
+
+### D. Design2Code / Design2Code-Hard — 실제 페이지 최종 평가
+
+[공식 Design2Code 저장소](https://github.com/SALT-NLP/Design2Code)의 데이터는 각각 같은 이름의
+`xx.png`와 `xx.html` 쌍입니다. 이 프로젝트가 데이터를 자동 재배포하지 않으므로 공식 배포처에서
+Design2Code(484개)와 Hard(80개)를 내려받아 압축을 풉니다.
+
+먼저 JavaScript와 네트워크를 차단한 Chromium에서 reference HTML의 visible DOM box를 추출합니다.
+동시에 reference box를 근사하는 oracle surrogate test도 만듭니다.
+
+```bash
+python -m framediff prepare-design2code \
+  --root /datasets/Design2Code/testset_final \
+  --out data/design2code --dataset design2code --max-nodes 127
+
+python -m framediff prepare-design2code \
+  --root /datasets/Design2Code-Hard \
+  --out data/design2code-hard --dataset design2code-hard --max-nodes 127
+```
+
+`prepare-report.json`에서 거절 사유, visible node 수, surrogate fit IoU를 확인하세요. `manifest.jsonl`은
+실제 DOM box 정답이고 `oracle-test.jsonl`은 동일 ID의 actual-box oracle 평가입니다.
+
+```bash
+python -m framediff evaluate --data data/design2code/oracle-test.jsonl \
+  --checkpoint runs/main/best.pt --out runs/design2code-oracle --device cuda \
+  --methods none,coordinate,random,model,copy-boxes --browser-verify
+```
+
+실제 screenshot-to-repair 평가는 Qwen을 한 번 적재한 뒤 각 페이지에서 initial LayoutIR와 그 IR ID에
+대응한 predicted target frame을 생성합니다. `--resume`은 이미 저장된 두 VLM 산출물을 재사용합니다.
+
+```bash
+python -m framediff run-design2code \
+  --manifest data/design2code/manifest.jsonl \
+  --out data/design2code-qwen --backend qwen --four-bit --resume
+
+python -m framediff evaluate --data data/design2code-qwen/test.jsonl \
+  --checkpoint runs/main/best.pt --out runs/design2code-e2e --device cuda \
+  --methods none,copy-boxes,coordinate,model --browser-verify --screenshots
+```
+
+`none`은 AR initial IR, `copy-boxes`는 VLM이 예측한 frame 자체, `model`은 FrameDiff 수정 결과입니다.
+생성 IR의 ID와 reference DOM ID가 다르므로 평가는 IoU 최대 Hungarian geometry matching을 사용합니다.
+이 값은 이 연구의 component geometry 지표이며 Design2Code 공식 CLIP/text/color/block-match 점수를
+사칭하지 않습니다. `upstream_seconds`는 두 VLM 호출, `end_to_end_seconds`는 VLM과 수정을 합친 시간입니다.
+
+WebUI와 synthetic을 함께 학습하려면 split별로 명시적으로 합칩니다.
+
+```bash
+python -m framediff combine-data --split train \
+  --input data/synthetic/train.jsonl --input data/webui-fit/train.jsonl \
+  --out data/combined/train.jsonl
+python -m framediff combine-data --split val \
+  --input data/synthetic/val.jsonl --input data/webui-fit/val.jsonl \
+  --out data/combined/val.jsonl
+```
+
+WebSight는 이 프로토콜의 필수 평가 데이터가 아니며 포함하지 않습니다.
 
 ## 5. VLM 연결 (선택)
 
@@ -246,6 +305,44 @@ LayoutDM, LayoutFormer++, 원 논문의 공개 결과를 이 내부 baseline 이
 
 ## 8. IR 명세와 한계
 
+경량 executor의 속도 이득과 정확도 손실은 `compare-renderers`로 paired 평가합니다.
+같은 페이지·checkpoint·candidate budget에서 proxy, Chromium DOM layout, 선택적으로 PNG 렌더링을
+비교하며 **모든 최종 IoU는 Chromium 결과로 계산**합니다. Predicted-frame 실험의 독립 reference 정답은
+탐색에 전달되지 않습니다. Oracle 실험은 명시적으로 실제 target box를 탐색 입력으로 사용합니다.
+
+```bash
+python -m framediff compare-renderers \
+  --data data/synthetic/test.jsonl --checkpoint runs/main/best.pt \
+  --out runs/render-cost/synthetic --device cuda \
+  --limit 20 --repeats 3 --warmup 1 --steps 10 --beam 2 --topk 8 --budget 160 --raster
+```
+
+동일 명령의 `--data`와 `--out`을 변경하여 각 데이터셋을 별도로 평가합니다.
+
+| Dataset | `--data` | `--out` |
+|---|---|---|
+| WebUI held-out | `data/webui-fit/test.jsonl` | `runs/render-cost/webui` |
+| Design2Code screenshot 입력 | `data/design2code-qwen/test.jsonl` | `runs/render-cost/design2code` |
+| Design2Code-Hard screenshot 입력 | `data/design2code-hard-qwen/test.jsonl` | `runs/render-cost/design2code-hard` |
+| Design2Code oracle 진단 | `data/design2code/oracle-test.jsonl` | `runs/render-cost/design2code-oracle` |
+
+`--limit 0`은 전체 데이터입니다. 20개는 앞부분이 아니라 seed로 무작위 선택하며 sample ID를 저장합니다.
+Warm-up 후 각 페이지의 backend 실행 순서를 무작위화하고 각 반복에 새 탐색 캐시를 사용합니다.
+`report.md`, `summary.json`, `paired.jsonl`, `results.jsonl` 및 모든 최종 IR/trace를 저장합니다.
+
+- `repair_speedup`: Chromium 탐색 시간 / proxy 탐색 시간.
+- `pipeline_speedup`: 저장된 VLM 호출 시간과 최종 Chromium 검증까지 포함한 비율.
+- `iou_loss_pp`: 100 × (Chromium 탐색 최종 IoU − proxy 탐색 최종 IoU). 양수면 proxy 손실.
+- `iou_loss_pp_ci95`: 반복을 페이지별 평균한 뒤 도메인/페이지 cluster bootstrap 95% 구간.
+- `search_browser_calls`, `verification_browser_calls`: 탐색과 최종 검증 호출을 분리.
+- `parity_max_error_px`: 같은 최종 IR에 대한 proxy/Chromium 좌표 차이.
+- `search_screenshots`: raster 옵션에서 실제 생성한 PNG 수. PNG 인코딩 포함, 디스크 저장/VLM 호출 제외.
+
+두 방법 모두 같은 LayoutIR가 컴파일된 frame HTML을 실행합니다. 원본 웹페이지의 전체 CSS·텍스트·asset
+렌더링과의 비용 비교는 아닙니다. Design2Code 입력/reference의 재현 품질과 DOM 선택에 따른 오차도 별도입니다.
+`--budget`은 상한이므로 early stop과 후보 차이에 따라 실제 후보/호출 수는 달라질 수 있습니다.
+모델/브라우저 시작 비용은 제외하며 VLM 실행 시간이 저장되지 않은 데이터의 pipeline 시간은 수정+검증만입니다.
+
 모든 노드는 `id,parent,role,name,props`, 트리는 `version:1,nodes:[...]`입니다. root는 첫 노드이고 viewport 크기로 고정됩니다.
 
 | 속성 | 인코딩 |
@@ -266,7 +363,7 @@ LayoutDM, LayoutFormer++, 원 논문의 공개 결과를 이 내부 baseline 이
 ## 9. 코드 위치
 
 - `framediff/ir.py`: IR 검증, 경량 executor, HTML compiler.
-- `data.py`, `adapters.py`: corruption, split, WebUI import/fit.
+- `data.py`, `adapters.py`, `benchmarks.py`: corruption, split, WebUI import/fit, Design2Code batch pipeline.
 - `model.py`, `train.py`: Transformer 편집 모델, 학습/resume.
 - `search.py`, `evaluate.py`, `suite.py`: 탐색, 비교, seed 집계.
 - `browser.py`, `vlm.py`: Chromium 검증, frozen VLM adapter.
