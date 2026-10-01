@@ -28,7 +28,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - name: Install
-        run: python -m pip install -e '.[dev]'
+        run: python -m pip install -e '.[dev,visual]'
       - name: Lint
         run: python -m ruff check framediff tests
       - name: Unit and integration tests
@@ -44,7 +44,7 @@ jobs:
           python-version: "3.12"
           cache: pip
       - name: Install
-        run: python -m pip install -e '.[browser,test]'
+        run: python -m pip install -e '.[visual,test]'
       - name: Install Chromium
         run: python -m playwright install --with-deps chromium
       - name: Browser tests

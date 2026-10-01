@@ -1,5 +1,11 @@
 # Changelog
 
+- 이미지 조건 반복 복구 추가: 사전학습 ResNet-FPN 요소 검출기, ID-free 추상화 raster,
+  실제 target/current image features를 사용하는 edit policy. 고정 VLM 계획/목표-box scoring 없음.
+  browser-verified 학습 데이터, 검출기 학습/평가, 예측 추상화 fine-tuning, 학습 재개,
+  actual screenshot vs one-shot abstraction의 반복별 HTML 정확도/비용 비교와 실행 스크립트 제공.
+  기존 checkpoint와 구분되며 재학습 필요. 기존 box/plan 실험은 보존.
+
 - 목표 박스 VLM에 목표 screenshot과 현재 DOM에서 결정적으로 만든 named-frame ID 지도를 함께 입력.
   기존 단일 이미지 prepare 캐시와 섞이지 않도록 prepare protocol 갱신.
 

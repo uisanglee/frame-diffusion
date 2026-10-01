@@ -10,6 +10,8 @@ def main(argv=None):
     add_oracle_parser(sub)
     from .plan_experiment import add_parsers as add_plan_parsers
     add_plan_parsers(sub)
+    from .visual_cli import add_parsers as add_visual_parsers
+    add_visual_parsers(sub)
     g=sub.add_parser('generate');g.add_argument('--out',required=True);g.add_argument('--count',type=int,default=1000);g.add_argument('--seed',type=int,default=42)
     t=sub.add_parser('train')
     t.add_argument('--train',required=True);t.add_argument('--val',required=True);t.add_argument('--out',required=True)
@@ -59,7 +61,10 @@ def main(argv=None):
         p.error('repeats must be positive; warmup and limit must be nonnegative')
     for key in ('steps','batch_size','accumulation','hidden','layers','heads','max_nodes','max_noise','eval_every','log_every','val_samples','beam','topk','budget','cpu_threads'):
         if hasattr(args,key) and getattr(args,key)<1:p.error(key+' must be positive')
-    if args.command=='plan-build-html-data':
+    if args.command.startswith('visual-'):
+        from .visual_cli import run
+        run(args)
+    elif args.command=='plan-build-html-data':
         from .plan_experiment import build_html_data
         build_html_data(args)
     elif args.command=='plan-evaluate':

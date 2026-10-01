@@ -8,7 +8,15 @@
 
 > Status: research prototype (`v0.1.0`). API, LayoutIR schema, checkpoint compatibility may change before `v1.0`.
 
-새 **계획 기반 복구** 경로: 목표 screenshot + initial HTML 전체 화면 + named-frame을
+## 최신: 이미지 조건 반복 복구
+
+**목표 screenshot → 전용 검출기로 한 번 추상화 → 현재 DOM 추상화 이미지와 비교해 매 스텝 CSS action 예측**을 지원합니다.
+고정 VLM 계획이나 목표 box residual을 사용하지 않습니다. 매번 실제 screenshot을 사용하는 별도 정책과
+동일 action 예산으로 비교하고 최종 실제 화면 accuracy/시간을 평가합니다.
+[설치·전체 학습·D2C/Hard/WebUI 실행 가이드](docs/visual-policy.md)를 먼저 참고하세요.
+새 이미지 모델은 재학습이 필요하며 기존 체크포인트와 호환되지 않습니다.
+
+아래는 보존된 **기존 계획 기반 복구** 경로: 목표 screenshot + initial HTML 전체 화면 + named-frame을
 최초 한 번 비교해 고정된 위치·크기·정렬·관계 계획을 만들고, 매 수정 후에는 DOM 측정과
 추상화 frame으로 계획 충족도를 계산합니다. 중간 full screenshot은 캡처하지 않습니다.
 기존 box-conditioned 모델과 구분하여 `--conditioning plan`으로 다시 학습합니다.
@@ -27,7 +35,7 @@
 
 중요: 원 논문 구현을 그대로 재현한 프로젝트나 임의의 React/CSS를 자동 수정하는 완성품은 아닙니다. 첫 실험의 범위는 **동일 컴포넌트 집합·부모 관계에서 위치, 크기, 배치 속성, 형제 순서 수정**입니다. DDPM의 Gaussian noise/timestep 모델도 아닙니다. 연구 가설을 검증할 수 있는 실행 가능한 출발점입니다.
 
-실제 HTML 실험의 기본값은 이제 `model-feedback`입니다. 한 CSS 속성 수정마다 실제 Chromium layout을
+기존 `run_real_web.sh`의 기본값은 `model-feedback`입니다. 한 CSS 속성 수정마다 실제 Chromium layout을
 다시 읽어 줄바꿈·auto height·형제 이동을 다음 입력에 반영합니다. `frames`는 실제 박스를 이름 붙은
 프레임 그림으로 저장하지만, 현재 모델은 이미지 픽셀이 아니라 측정 박스/트리 특징을 입력받습니다.
 기존 `model`은 proxy-only ablation으로 유지합니다. [실행·제약·비용 비교](docs/REAL_WEB_EXPERIMENT.md)를 참고하세요.

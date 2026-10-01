@@ -11,4 +11,4 @@ dependencies:
   - wheel
   - git
   - pip:
-      - -e .[browser,test]
+      - -e .[visual,test]

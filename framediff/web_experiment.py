@@ -90,8 +90,8 @@ def add_parsers(sub):
     p.add_argument('--retry-failed', action='store_true', help='With resume, regenerate failed preparation pages; use new downstream output directories')
     p.add_argument('--vlm-retries', type=int, default=2, help='Additional validation retries per VLM operation')
     p.add_argument('--initial-mode', choices=['direct','text-augmented'], default='direct')
-    p.add_argument('--repair-conditioning', choices=['boxes','plan'], default='boxes',
-                   help='plan: one visual comparison of target/full initial/named frame; no target-box extraction')
+    p.add_argument('--repair-conditioning', choices=['boxes','plan','visual'], default='boxes',
+                   help='plan: fixed VLM plan; visual: DOM preparation only, no target-box extraction or VLM planning')
     for key, default in [('rounds',1),('max-nodes',128),('max-new-tokens',16384),('max-pixels',1048576),('limit',0),('seed',42)]:
         p.add_argument('--'+key, type=int, default=default)
     p = sub.add_parser('web-repair', help='Closed-loop real HTML repair with measured DOM feedback; legacy proxy ablations')
@@ -166,7 +166,8 @@ def prepare(args):
         return validated_generation(generate,validator,retries)
 
     # Load outside page timers, consistently excluding one-time model startup.
-    if args.backend == 'qwen' and any(not (out/'pages'/signature(i['id'])[:20]/'record.json').exists() for i in items):
+    needs_vlm = any(not i.get('initial_html') for i in items) or args.rounds > 0 or getattr(args,'repair_conditioning','boxes') != 'visual'
+    if needs_vlm and args.backend == 'qwen' and any(not (out/'pages'/signature(i['id'])[:20]/'record.json').exists() for i in items):
         runtime = vlm.load_qwen_runtime(args)
     with HtmlBrowser() as browser:
         for index, item in enumerate(items):
@@ -242,7 +243,7 @@ def prepare(args):
                 if 'initial' in record['errors']: raise ValueError('Initial generation failed')
                 dom = browser.snapshot(embed_placeholder(initial,placeholder),viewport,work/'initial.png',args.max_nodes-1)
                 tagged = work/'tagged-initial.html'; tagged.write_text(dom.pop('html'))
-                if getattr(args,'repair_conditioning','boxes')=='plan':
+                if getattr(args,'repair_conditioning','boxes') in ('plan','visual'):
                     from .plans import dom_tree
                     tree,original,fit=dom_tree(dom)
                 else:tree, original, fit = fit_observation(dom)
@@ -267,6 +268,12 @@ def prepare(args):
                     record['plan_vlm_calls']=record['vlm_attempts'].get('repair-plan',0)
                     record['plan_initial_screenshots']=1
                     write_json(work/'plan.json',raw)
+                elif getattr(args,'repair_conditioning','boxes')=='visual':
+                    from .visual import annotate,CONTRACT
+                    annotate(browser,tree)
+                    record['visual_contract']=CONTRACT
+                    record['initial_screenshot']=str(work/'initial.png')
+                    write_json(ir_path,tree)
                 else:
                     raw,_ = call('extract-frames',[item['screenshot'],named_frame],ir_path,work,'target-frames',
                     'Image 1 is the TARGET webpage screenshot. Image 2 is the CURRENT HTML named-frame map, '
@@ -452,6 +459,10 @@ def evaluate_pages(args):
                        'planning_screenshots':data.get('planning_screenshots',0),
                        'transfer_max_error_px':data.get('transfer_max_error_px'),
                        'error':data.get('error'), 'evaluation_error':None, 'reference_error':reference_error}
+                if 'visual_timing' in data:
+                    row['visual_timing'] = data['visual_timing']
+                    row['page_id'] = record.get('page_id',record['id'])
+                    row['repeat'] = record.get('repeat',1)
                 try:
                     html = embed_placeholder(Path(data['html']).read_text(),placeholder)
                     png = work/f'{method}.png'
@@ -584,9 +595,14 @@ def evaluate_pages(args):
         for s in summary:
             lines.append('| '+s['method']+' | '+' | '.join(f'{s.get("official_"+k,float("nan")):.4f}'
                 for k in ('block','text','position','color','clip'))+' |')
+    if any('visual_timing' in m for r in records for m in r['methods'].values()):
+        lines += ['', 'Visual-policy comparison: n counts page × repeat trials, not independent pages.',
+                  'Target abstraction/encoding is included in repair timing; model startup and final evaluation are excluded.',
+                  'Pipeline timing also includes shared initial generation and DOM preparation. See repair/timing-summary.json.',
+                  'Visual policies use image feedback without target-box scoring or fixed plans; failed rollouts retain initial HTML.']
     lines += ['', 'DOM IoU is diagnostic, not the official Design2Code metric. Failed repairs retain the last valid HTML.',
               'Check metric-specific *_n and evaluation_failures; missing evaluations are not zero scores.',
-              'Timing excludes model loading and evaluation. FrameDiff includes target extraction, fitting and HTML transfer.',
+              'Timing excludes model loading and evaluation; conditioning/preparation costs follow the selected pipeline.',
               'Single screenshot viewport; no claim of responsive CSS reconstruction.']
     (out/'report.md').write_text('\n'.join(lines)+'\n')
     return rows

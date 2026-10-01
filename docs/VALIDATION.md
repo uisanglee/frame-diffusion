@@ -1,5 +1,17 @@
 # 로컬 검증 기록
 
+## 2026-10-01: 이미지 조건 정책 / 전용 추상화 모델
+
+- CPU 및 실제 Chromium: 전체 **50 passed, 1 optional test skipped**.
+- ResNet-FPN 검출 loss/backward, checkpoint 저장/복원/추론 확인.
+- 실제 이미지 픽셀이 action logits에 영향을 주고 target/current encoder 양쪽에 gradient가 흐름을 확인.
+- 실제 browser corruption 생성 → 정책 학습/재개 → 검출기 학습 → 예측 target 캐시 → 정책 fine-tuning →
+  screenshot/abstract/oracle 반복 수정 → 독립 실제 화면 평가까지 소규모 통합 실행.
+- 매 rollout 목표 검출 한 번, abstract 방식 중간 full screenshot 0회, CSS width 수정으로 인한
+  줄바꿈/형제 위치 변화가 다음 입력 이미지에 반영됨을 검증.
+- smoke는 사전학습 다운로드 없이 작은 CPU 모델로 실행. 전체 GPU 학습, RTX 4090 메모리/속도,
+  실제 D2C/Hard/WebUI 성능 향상은 아직 검증하지 않음. 사용자는 새 모델을 학습해야 함.
+
 실행일: 2026-09-30, macOS arm64, Python 3.12, PyTorch 2.14.0 CPU.
 
 ## 검증된 항목
