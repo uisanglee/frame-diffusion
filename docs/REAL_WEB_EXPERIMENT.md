@@ -233,6 +233,18 @@ python -m framediff web-evaluate \
 이때만 reference HTML에서 추출한 **텍스트**가 공통 초기 생성에 제공됩니다(박스·CSS는 제공하지 않음).
 기본값 direct는 screenshot만 사용하는 변형이며 논문의 정확한 재현으로 표시하면 안 됩니다.
 
+공식 prompt와 입력 구성을 포함한 1회 Self-Revision은 아래처럼 명시합니다.
+
+```bash
+python -m framediff web-prepare --root "$D2C_ROOT" --out runs/d2c-paper/prepare \
+  --repair-conditioning visual --initial-mode text-augmented --rounds 1 \
+  --revision-protocol design2code --seed 2024 --max-new-tokens 4096 --vlm-retries 0
+```
+
+이때 `initial_html`을 받지 않고 text-augmented initial부터 새로 생성하며 결과 method 이름은
+`design2code-self-revision`입니다. 정답 HTML의 텍스트만 사용한다는 사실은
+`uses_reference_text=true`로 기록됩니다. 목표 layout box나 정답 CSS는 입력하지 않습니다.
+
 ## 결과 읽기
 
 - `evaluation/report.md`: 방법별 결과 및 공식 지표 표.

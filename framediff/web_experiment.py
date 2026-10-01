@@ -90,6 +90,8 @@ def add_parsers(sub):
     p.add_argument('--retry-failed', action='store_true', help='With resume, regenerate failed preparation pages; use new downstream output directories')
     p.add_argument('--vlm-retries', type=int, default=2, help='Additional validation retries per VLM operation')
     p.add_argument('--initial-mode', choices=['direct','text-augmented'], default='direct')
+    p.add_argument('--revision-protocol', choices=['shared','design2code'], default='shared',
+                   help='design2code: paper text-augmented initial + one visual Self-Revision pass')
     p.add_argument('--repair-conditioning', choices=['boxes','plan','visual'], default='boxes',
                    help='plan: fixed VLM plan; visual: DOM preparation only, no target-box extraction or VLM planning')
     for key, default in [('rounds',1),('max-nodes',128),('max-new-tokens',16384),('max-pixels',1048576),('limit',0),('seed',42)]:
@@ -111,6 +113,7 @@ def add_parsers(sub):
 
 def prepare(args):
     retries = getattr(args,'vlm_retries',2)
+    revision_protocol = getattr(args,'revision_protocol','shared')
     if retries < 0: raise ValueError('vlm-retries must be nonnegative')
     if args.rounds < 0 or not 2 <= args.max_nodes <= 256 or args.max_pixels < 1 or args.max_new_tokens < 1 or args.limit < 0:
         raise ValueError('Invalid rounds/node/token/pixel/limit setting')
@@ -126,6 +129,11 @@ def prepare(args):
     if args.limit: items = items[:args.limit]
     if not items or len({i['id'] for i in items}) != len(items):
         raise ValueError('Empty dataset or duplicate IDs')
+    if revision_protocol == 'design2code':
+        if args.rounds != 1 or args.initial_mode != 'text-augmented':
+            raise ValueError('design2code revision requires --rounds 1 --initial-mode text-augmented')
+        if any(i.get('initial_html') for i in items):
+            raise ValueError('design2code revision must generate its text-augmented initial HTML; remove initial_html')
     if args.initial_mode=='text-augmented' and any(not i.get('html') for i in items):
         raise ValueError('text-augmented requires reference HTML for every page; use --initial-mode direct')
     out = Path(args.out).resolve()
@@ -138,20 +146,24 @@ def prepare(args):
     # Preserve existing Design2Code cache signatures when newly added flags are defaults.
     if settings.get('dataset','design2code')=='design2code':
         settings.pop('dataset',None); settings.pop('webui_view',None)
+    if settings.get('revision_protocol')=='shared': settings.pop('revision_protocol')
     guard_run(out, {'protocol':2,'settings':settings,'sources':sources}, args.resume)
     runtime = None
     rows = []
 
-    def call(task, images, current, work, label, extra='', validator=html_answer):
+    def call(task, images, current, work, label, extra='', validator=html_answer,
+             literal_prompt=False, image_labels=None, prompt_first=False):
         nonlocal runtime
         if args.backend == 'qwen' and runtime is None:
             runtime = vlm.load_qwen_runtime(args)
         c = copy.copy(args); c.task = task; c.image = list(map(str,images)); c.current = str(current) if current else None; c.frames = None
-        base_prompt = extra if task=='repair-plan' else extra + vlm.prompt_for(c)
+        c.image_labels=image_labels; c.prompt_first=prompt_first
+        base_prompt = extra if literal_prompt or task=='repair-plan' else extra + vlm.prompt_for(c)
         def generate(attempt, feedback):
             name = label if attempt==0 else f'{label}.retry-{attempt}'
             prompt = base_prompt + feedback
-            write_json(work/f'{name}.prompt.json', {'prompt':prompt,'images':c.image})
+            write_json(work/f'{name}.prompt.json', {'prompt':prompt,'images':c.image,
+                'image_labels':image_labels,'prompt_first':prompt_first})
             record['vlm_attempts'][label] = record['vlm_attempts'].get(label,0)+1
             started = time.perf_counter()
             try:
@@ -188,12 +200,25 @@ def prepare(args):
             placeholder = Path(item['html']).parent/'rick.jpg' if item.get('html') else None
             placeholder = placeholder if placeholder and placeholder.exists() else None
             record = {**item,'viewport':viewport,'group':item.get('group',item['id']),
-                      'initial_mode':args.initial_mode,'methods':{},'errors':{},'vlm_model':args.model,'vlm_attempts':{}}
+                      'initial_mode':args.initial_mode,'revision_protocol':revision_protocol,
+                      'uses_reference_text':revision_protocol=='design2code',
+                      'methods':{},'errors':{},'vlm_model':args.model,'vlm_attempts':{}}
+            paper_texts = None
+            if revision_protocol == 'design2code':
+                from .design2code_self_revision import SOURCE_URL,extract_text_elements
+                paper_texts = extract_text_elements(Path(item['html']).read_text())
+                record['revision_protocol_source']=SOURCE_URL
+                record['reference_text_elements']=len(paper_texts)
             initial = '<html><body style="min-height:100vh;margin:0"></body></html>'
             start = time.perf_counter(); initial_calls = 0
             try:
                 if item.get('initial_html'):
                     initial = html_answer(Path(item['initial_html']).read_text())
+                elif revision_protocol == 'design2code':
+                    from .design2code_self_revision import text_augmented_prompt
+                    raw,_ = call('generate-html',[item['screenshot']],None,work,'initial',
+                        text_augmented_prompt(paper_texts),literal_prompt=True,prompt_first=True)
+                    initial = raw
                 else:
                     extra = 'The image is the TARGET webpage. Use rick.jpg for placeholder images if needed. '
                     if args.initial_mode == 'text-augmented':
@@ -210,32 +235,42 @@ def prepare(args):
             initial_seconds = time.perf_counter()-start
             record['methods']['initial'] = {'html':str(initial_path),'seconds':initial_seconds,
                 'browser_executions':0,'vlm_calls':initial_calls,'failed':'initial' in record['errors'],
-                'error':record['errors'].get('initial')}
+                'error':record['errors'].get('initial'),'revision_protocol':revision_protocol,
+                'uses_reference_text':revision_protocol=='design2code'}
 
-            # Self-revision runs directly on the SAME initial HTML, without target boxes/GT.
+            # Self-revision runs on the SAME initial HTML without target geometry/CSS.
             current = initial; elapsed = initial_seconds; calls = 0; renders = 0
             failure = record['errors'].get('initial')
             for round_index in range(1,args.rounds+1):
-                label = f'self-revision-{round_index}'
+                label = ('design2code-self-revision' if revision_protocol=='design2code'
+                         else f'self-revision-{round_index}')
                 start = time.perf_counter(); before = browser.executions
                 if failure is None:
                     try:
                         current_path = work/f'{label}-input.html'; current_path.write_text(current)
                         screenshot = work/f'{label}-input.png'
                         browser.snapshot(embed_placeholder(current,placeholder),viewport,screenshot,args.max_nodes-1)
-                        raw,_ = call('revise-html',[item['screenshot'],screenshot],current_path,work,label,
-                            'Image 1 is the TARGET; image 2 is the CURRENT webpage. Compare them and correct '
-                            'the HTML/CSS to better match the target, preserving correct content. ')
+                        if revision_protocol == 'design2code':
+                            from .design2code_self_revision import revision_prompt
+                            raw,_ = call('revise-html',[item['screenshot'],screenshot],current_path,work,label,
+                                revision_prompt(current,paper_texts),literal_prompt=True,
+                                image_labels=['Reference Webpage:','Current Webpage:'],prompt_first=True)
+                        else:
+                            raw,_ = call('revise-html',[item['screenshot'],screenshot],current_path,work,label,
+                                'Image 1 is the TARGET; image 2 is the CURRENT webpage. Compare them and correct '
+                                'the HTML/CSS to better match the target, preserving correct content. ')
                         candidate = raw
                         browser.snapshot(embed_placeholder(candidate,placeholder),viewport,max_nodes=args.max_nodes-1)
                         current = candidate
                     except Exception as error:
                         failure = str(error)
                 elapsed += time.perf_counter()-start; renders += browser.executions-before
-                calls = sum(v for k,v in record['vlm_attempts'].items() if k.startswith('self-revision-'))
+                revision_prefix = 'design2code-self-revision' if revision_protocol=='design2code' else 'self-revision-'
+                calls = sum(v for k,v in record['vlm_attempts'].items() if k.startswith(revision_prefix))
                 path = work/f'{label}.html'; path.write_text(current)
                 record['methods'][label] = {'html':str(path),'seconds':elapsed,
-                    'vlm_calls':initial_calls+calls,'browser_executions':renders,'failed':failure is not None,'error':failure}
+                    'vlm_calls':initial_calls+calls,'browser_executions':renders,'failed':failure is not None,'error':failure,
+                    'revision_protocol':revision_protocol,'uses_reference_text':revision_protocol=='design2code'}
 
             # Independent branch: initial DOM -> fitted IR -> predicted target boxes.
             start = time.perf_counter(); before = browser.executions
@@ -450,6 +485,8 @@ def evaluate_pages(args):
                        'vlm_calls':data['vlm_calls'],'proxy_executions':data.get('proxy_executions',0),
                        'feedback_mode':data.get('feedback_mode','none'),
                        'target_source':data.get('target_source','none'),
+                       'revision_protocol':data.get('revision_protocol',record.get('revision_protocol','shared')),
+                       'uses_reference_text':data.get('uses_reference_text',record.get('uses_reference_text',False)),
                        'feedback_image_seconds':data.get('feedback_image_seconds',0),
                        'feedback_images':data.get('feedback_images',0),
                        'feedback_browser_screenshots':data.get('feedback_browser_screenshots',0),
@@ -600,6 +637,9 @@ def evaluate_pages(args):
                   'Target abstraction/encoding is included in repair timing; model startup and final evaluation are excluded.',
                   'Pipeline timing also includes shared initial generation and DOM preparation. See repair/timing-summary.json.',
                   'Visual policies use image feedback without target-box scoring or fixed plans; failed rollouts retain initial HTML.']
+    if any(r.get('uses_reference_text') for r in records):
+        lines += ['', 'Design2Code Self-Revision condition: `initial` and `design2code-self-revision` use text extracted from reference HTML.',
+                  'This oracle-text input is recorded as `uses_reference_text=true`; target boxes and reference CSS are not provided.']
     lines += ['', 'DOM IoU is diagnostic, not the official Design2Code metric. Failed repairs retain the last valid HTML.',
               'Check metric-specific *_n and evaluation_failures; missing evaluations are not zero scores.',
               'Timing excludes model loading and evaluation; conditioning/preparation costs follow the selected pipeline.',

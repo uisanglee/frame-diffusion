@@ -130,6 +130,29 @@ id/screenshot/html(reference)/initial_html/viewport로 지정한다.
 WebUI는 기록된 screenshot/AX를 reference로 사용한다. 공식 D2C metric과 같지 않다.
 Design2Code에서만 기존 공식 evaluator clone을 OFFICIAL_REPO로 연결할 수 있다.
 
+### Design2Code Self-Revision baseline
+
+논문의 `Text-Augmented prompting -> Visual Self-Revision 1회`를 같은 initial 비교에 추가하려면
+새 output 디렉터리에서 다음처럼 실행한다.
+
+```bash
+CUDA_VISIBLE_DEVICES=0 SELF_REVISION_PROTOCOL=design2code PAGE_LIMIT=20 REPEATS=3 \
+bash scripts/run_visual_web.sh "$D2C_ROOT" runs/visual-d2c-self-revision runs/visual
+```
+
+이 옵션은 공식 코드와 같이 (1) reference HTML에서 추출한 줄 단위 텍스트와 목표 screenshot으로
+initial HTML을 생성하고, (2) 목표 screenshot, initial 렌더링, initial HTML, 같은 텍스트를 입력해
+전체 HTML을 한 번 수정한다. 결과 method는 `initial`과 `design2code-self-revision`이다.
+기본 생성값도 논문의 `seed=2024`, `max_new_tokens=4096`, validation retry 0으로 바뀐다.
+`SEED`, `MAX_NEW_TOKENS`, `VLM_RETRIES`로 명시적으로 덮어쓸 수 있다.
+
+이 baseline은 **reference HTML의 oracle text를 사용**하므로 screenshot-only 결과와 입력 조건이
+같지 않다. `uses_reference_text=true`가 prepared record와 evaluation metric row에 기록된다.
+프롬프트·두 이미지 순서는 공식
+[`gpt4v.py`](https://github.com/NoviScl/Design2Code/blob/main/Design2Code/prompting/gpt4v.py)를 따른다.
+다만 기본 Qwen 실행은 방법의 재현이지 논문의 폐기된 `gpt-4-vision-preview` 모델 자체 재현은 아니다.
+WebUI처럼 reference HTML이 없는 데이터에는 이 옵션을 사용할 수 없다.
+
 ## 결과와 해석
 
 - `prepare/prepared.jsonl`: 공유 initial HTML/DOM, 생성 오류.

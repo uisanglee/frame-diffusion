@@ -9,10 +9,23 @@ if [[ -n "${PAGE_MANIFEST:-}" ]]; then source_options=(--manifest "$PAGE_MANIFES
 vlm_options=(--backend "${VLM_BACKEND:-qwen}" --model "${VLM_MODEL:-Qwen/Qwen3-VL-8B-Instruct}"
   --endpoint "${VLM_ENDPOINT:-http://localhost:8000/v1/chat/completions}")
 if [[ "${VLM_BACKEND:-qwen}" == qwen ]]; then vlm_options+=(--four-bit); fi
+revision_options=()
+case "${SELF_REVISION_PROTOCOL:-none}" in
+  none)
+    revision_options=(--rounds 0 --initial-mode direct --revision-protocol shared)
+    seed=${SEED:-42}; max_new_tokens=${MAX_NEW_TOKENS:-16384}; vlm_retries=${VLM_RETRIES:-2} ;;
+  shared)
+    revision_options=(--rounds "${REVISION_ROUNDS:-1}" --initial-mode "${INITIAL_MODE:-direct}" --revision-protocol shared)
+    seed=${SEED:-42}; max_new_tokens=${MAX_NEW_TOKENS:-16384}; vlm_retries=${VLM_RETRIES:-2} ;;
+  design2code)
+    revision_options=(--rounds 1 --initial-mode text-augmented --revision-protocol design2code)
+    seed=${SEED:-2024}; max_new_tokens=${MAX_NEW_TOKENS:-4096}; vlm_retries=${VLM_RETRIES:-0} ;;
+  *) echo 'SELF_REVISION_PROTOCOL must be none, shared, or design2code' >&2; exit 2 ;;
+esac
 python -m framediff web-prepare "${source_options[@]}" "${vlm_options[@]}" \
-  --out "$output_root/prepare" --repair-conditioning visual --rounds 0 \
-  --limit "${PAGE_LIMIT:-0}" --max-nodes 127 --vlm-retries 2 \
-  --max-new-tokens "${MAX_NEW_TOKENS:-16384}" --max-pixels "${MAX_PIXELS:-1048576}" --resume
+  --out "$output_root/prepare" --repair-conditioning visual "${revision_options[@]}" \
+  --limit "${PAGE_LIMIT:-0}" --max-nodes 127 --vlm-retries "$vlm_retries" --seed "$seed" \
+  --max-new-tokens "$max_new_tokens" --max-pixels "${MAX_PIXELS:-1048576}" --resume
 extra=()
 if [[ "${ORACLE_ABLATION:-0}" == 1 ]]; then extra+=(--oracle-ablation); fi
 python -m framediff visual-evaluate --data "$output_root/prepare/prepared.jsonl" \

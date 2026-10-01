@@ -12,6 +12,7 @@ from framediff.web_experiment import evaluate_pages, prepare, repair_pages
 from framediff.web_experiment import validated_generation, validate_target
 from framediff.oracle_ablation import prepare_oracle
 from framediff import vlm
+from framediff.design2code_self_revision import extract_text_elements, revision_prompt, text_augmented_prompt
 
 
 def test_validation_retries_report_missing_ids_and_bad_json():
@@ -52,6 +53,19 @@ def test_extract_frames_prompt_uses_concrete_ids(tmp_path):
     assert '"**viewport**": ["x", "y", "width", "height"]' in prompt
     assert '"fd-0": ["x", "y", "width", "height"]' in prompt
     assert 'Do not use the literal key "id"' in prompt
+
+
+def test_design2code_prompts_and_text_extraction():
+    source='''<!-- hidden --><html><head><style>.x{content:"CSS"}</style></head>
+    <body><h1> Hello\n world </h1><script>ignore()</script><button>Go</button></body></html>'''
+    texts=extract_text_elements(source)
+    assert texts==['Hello world','Go']
+    initial=text_augmented_prompt(texts)
+    assert 'The text elements are:\nHello world\nGo\n' in initial
+    revised=revision_prompt('<html>CURRENT</html>',texts)
+    assert '<html>CURRENT</html>' in revised
+    assert 'Hello world\nGo' in revised
+    assert 'H\ne\nl\nl\no' not in revised
 
 
 HTML = '''<html><head><style>body{margin:0;min-height:200px}main{position:absolute;left:10px;top:20px;
@@ -167,6 +181,42 @@ def test_real_html_pipeline_shared_initial_no_truth_leakage(tmp_path,monkeypatch
         assert feedback[0]['methods'][method]['proxy_executions']==0
         assert feedback[0]['methods'][method]['browser_executions']>=1
         assert feedback[0]['methods'][method]['feedback_mode']=='frames'
+
+
+@pytest.mark.browser
+def test_design2code_self_revision_protocol(tmp_path,monkeypatch):
+    root=tmp_path/'dataset';root.mkdir()
+    Image.new('RGB',(320,240),'white').save(root/'page.png')
+    (root/'page.html').write_text(HTML.replace('Hello','ORACLE PAGE TEXT'))
+    seen=[]
+    def generate(args,prompt,images,runtime):
+        seen.append((args.task,prompt,list(args.image_labels or []),args.prompt_first,len(images)))
+        if len(seen)==1:
+            assert 'The text elements are:\nORACLE PAGE TEXT\n' in prompt
+            return HTML,{}
+        assert args.task=='revise-html'
+        assert prompt.startswith('You are an expert web developer')
+        assert HTML in prompt and 'ORACLE PAGE TEXT' in prompt
+        assert args.image_labels==['Reference Webpage:','Current Webpage:']
+        return HTML.replace('left:10px','left:25px'),{}
+    monkeypatch.setattr('framediff.vlm.generate',generate)
+    args=SimpleNamespace(root=str(root),manifest=None,out=str(tmp_path/'prepared'),rounds=1,
+        max_nodes=16,max_pixels=1048576,max_new_tokens=4096,limit=0,seed=2024,resume=False,
+        backend='openai-compatible',model='fake',revision='main',endpoint='http://unused',
+        api_key_env='TEST_KEY',four_bit=False,initial_mode='text-augmented',
+        revision_protocol='design2code',repair_conditioning='visual',vlm_retries=0,
+        retry_failed=False,dataset='design2code',webui_view='default_1280-720')
+    rows=prepare(args)
+    assert [item[0] for item in seen]==['generate-html','revise-html']
+    assert all(item[3] for item in seen)
+    method=rows[0]['methods']['design2code-self-revision']
+    assert not method['failed'] and method['vlm_calls']==2
+    assert method['uses_reference_text'] is True
+    assert rows[0]['revision_protocol']=='design2code'
+    assert 'left:25px' in Path(method['html']).read_text()
+    prompt_json=read_json(next((tmp_path/'prepared/pages').glob('*/design2code-self-revision.prompt.json')))
+    assert prompt_json['images'][0].endswith('page.png')
+    assert prompt_json['images'][1].endswith('design2code-self-revision-input.png')
 
 
 @pytest.mark.browser

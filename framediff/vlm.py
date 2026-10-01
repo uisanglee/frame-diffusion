@@ -53,8 +53,11 @@ def images_for(args):
     return images
 
 def api_generate(args,prompt,images):
+    labels=getattr(args,'image_labels',None)
+    if labels is not None and len(labels)!=len(images):raise ValueError('image_labels must match images')
     content=[{'type':'text','text':prompt}]
-    for image in images:
+    for index,image in enumerate(images):
+        if labels:content.append({'type':'text','text':labels[index]})
         buf=io.BytesIO();image.save(buf,format='PNG')
         content.append({'type':'image_url','image_url':{'url':'data:image/png;base64,'+base64.b64encode(buf.getvalue()).decode()}})
     payload={'model':args.model,'messages':[{'role':'user','content':content}],'temperature':0,'max_tokens':args.max_new_tokens,'seed':args.seed}
@@ -79,7 +82,16 @@ def load_qwen_runtime(args):
 def qwen_generate(args,prompt,images,runtime=None):
     import torch
     model,processor=runtime or load_qwen_runtime(args)
-    messages=[{'role':'user','content':[{'type':'image','image':im} for im in images]+[{'type':'text','text':prompt}]}]
+    labels=getattr(args,'image_labels',None)
+    if labels is not None and len(labels)!=len(images):raise ValueError('image_labels must match images')
+    if getattr(args,'prompt_first',False):
+        content=[{'type':'text','text':prompt}]
+        for index,image in enumerate(images):
+            if labels:content.append({'type':'text','text':labels[index]})
+            content.append({'type':'image','image':image})
+    else:
+        content=[{'type':'image','image':im} for im in images]+[{'type':'text','text':prompt}]
+    messages=[{'role':'user','content':content}]
     inputs=processor.apply_chat_template(messages,tokenize=True,add_generation_prompt=True,return_dict=True,return_tensors='pt').to(model.device)
     torch.cuda.reset_peak_memory_stats();torch.cuda.synchronize();start=time.perf_counter()
     with torch.inference_mode():outputs=model.generate(**inputs,max_new_tokens=args.max_new_tokens,do_sample=False)
