@@ -2,11 +2,16 @@
 
 
 def add_parsers(sub):
+    p=sub.add_parser('visual-import-webui',help='Build domain-disjoint WebUI manifests and optional native AX detector labels')
+    p.add_argument('--root',required=True);p.add_argument('--out',required=True);p.add_argument('--view',default='default_1280-720')
+    p.add_argument('--train-count',type=int,default=600);p.add_argument('--val-count',type=int,default=200)
+    p.add_argument('--test-count',type=int,default=200);p.add_argument('--seed',type=int,default=42);p.add_argument('--resume',action='store_true')
     p=sub.add_parser('visual-generate',help='Generate styled procedural HTML for browser-based visual training')
     p.add_argument('--out',required=True);p.add_argument('--count',type=int,default=1000);p.add_argument('--seed',type=int,default=42)
     p=sub.add_parser('visual-build-data',help='Render HTML and verified corruption trajectories for parser and policies')
     p.add_argument('--manifest',required=True);p.add_argument('--out',required=True);p.add_argument('--resume',action='store_true')
-    for k,v in [('max-nodes',128),('trajectories',3),('max-noise',4),('abstract-size',384),('seed',42)]:p.add_argument('--'+k,type=int,default=v)
+    for k,v in [('max-nodes',128),('trajectories',3),('max-noise',4),('abstract-size',384),('seed',42),('min-elements',1)]:p.add_argument('--'+k,type=int,default=v)
+    p.add_argument('--max-source-mae',type=float,default=1.,help='Reject rerenders too different from optional source screenshot; 1 disables')
     for name in ('visual-train-detector','visual-train-policy'):
         p=sub.add_parser(name)
         for k in ('train','val','out'):p.add_argument('--'+k,required=True)
@@ -43,8 +48,12 @@ def run(args):
     if getattr(args,'threshold',.4)<0 or getattr(args,'threshold',.4)>1:raise ValueError('threshold must be in [0,1]')
     if getattr(args,'limit',0)<0:raise ValueError('limit must be nonnegative')
     if getattr(args,'warmup',0)<0:raise ValueError('warmup must be nonnegative')
-    for key in ('size','abstract_size','trajectories'):
+    if not 0<=getattr(args,'max_source_mae',1.)<=1:raise ValueError('max-source-mae must be in [0,1]')
+    for key in ('size','abstract_size','trajectories','min_elements'):
         if hasattr(args,key) and getattr(args,key)<1:raise ValueError(key+' must be positive')
+    if args.command=='visual-import-webui':
+        from .webui_visual import import_webui
+        return import_webui(args)
     if args.command=='visual-generate':
         from .visual_data import generate
         return generate(args)

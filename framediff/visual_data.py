@@ -4,6 +4,9 @@ import hashlib
 import random
 from pathlib import Path
 
+import numpy as np
+from PIL import Image
+
 from .ir import read_jsonl,write_json,write_jsonl
 from .html_bridge import HtmlBrowser,embed_placeholder
 from .html_feedback import refresh_geometry
@@ -81,7 +84,18 @@ def build(args):
                 if asset.exists():raw=embed_placeholder(raw,asset)
                 dom=browser.snapshot(raw,viewport,work/'target.png',args.max_nodes-1)
                 tree,target_boxes,_=dom_tree(dom);annotate(browser,tree)
-                if not elements(tree,target_boxes,viewport):raise ValueError('No visible abstraction elements')
+                target_elements=elements(tree,target_boxes,viewport)
+                min_elements=getattr(args,'min_elements',1)
+                if len(target_elements)<min_elements:raise ValueError(f'Only {len(target_elements)} visible abstraction elements')
+                source_mae=None
+                if source.get('screenshot'):
+                    with Image.open(source['screenshot']) as reference,Image.open(work/'target.png') as rendered:
+                        if reference.size!=rendered.size:raise ValueError('Source screenshot and rerender dimensions differ')
+                        source_mae=float(np.abs(np.asarray(reference.convert('RGB'),dtype=np.float32)-
+                            np.asarray(rendered.convert('RGB'),dtype=np.float32)).mean()/255)
+                    max_source_mae=getattr(args,'max_source_mae',1.)
+                    if source_mae>max_source_mae:
+                        raise ValueError(f'Source rerender pixel MAE {source_mae:.4f} exceeds {max_source_mae}')
                 tagged=dom['html'];(work/'reference.html').write_text(tagged)
                 ids=[n['id'] for n in tree['nodes'][1:]];root=tree['nodes'][0]['id']
                 base={k:source[k] for k in ('id','group','split','source_sha')}
@@ -132,6 +146,7 @@ def build(args):
                 page={**base,'screenshot':base['target_image'],'html':str(work/'reference.html'),
                       'initial_html':last_corrupted['current_html'],'evaluation_target_boxes':target_boxes,
                       'total_visible_nodes':dom['total_visible_nodes'],'selected_nodes':len(ids),
+                      'source_screenshot':source.get('screenshot'),'source_pixel_mae':source_mae,
                       'construction':'controlled same-DOM corruption; not screenshot-generated initial HTML'}
                 saved={'page':page,'policy':local_policy,'detection':local_detection};write_json(cache,saved)
                 pages.append(page);policy+=local_policy;detection+=local_detection

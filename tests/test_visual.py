@@ -1,5 +1,8 @@
 import copy
+import gzip
+import json
 from dataclasses import asdict
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -10,6 +13,32 @@ import torch
 from framediff.ir import node,write_jsonl,read_jsonl
 from framediff.visual import (CONTRACT,VisualConfig,VisualPolicy,abstract_image,elements,current_features,
     visual_batch,action_index,ACTIONS,load_policy)
+
+
+def test_webui_visual_import_domain_split_and_native_labels(tmp_path):
+    from framediff.webui_visual import import_webui
+    root=tmp_path/'webui'
+    for i in range(6):
+        folder=root/f'page-{i}';folder.mkdir(parents=True)
+        stem=folder/'default_100-80'
+        Image.new('RGB',(100,80),'white').save(str(stem)+'-screenshot.png')
+        Path(str(stem)+'-html.html').write_text(f'<html><body><button>Page {i}</button></body></html>')
+        Path(str(stem)+'-url.txt').write_text(f'https://domain-{i}.example/page')
+        nodes={'nodes':[{'nodeId':str(i),'backendDOMNodeId':i+1,'ignored':False,
+                         'role':{'value':'button'}}]}
+        boxes={str(i+1):{'x':10,'y':12,'width':30,'height':20}}
+        with gzip.open(str(stem)+'-axtree.json.gz','wt') as stream:json.dump(nodes,stream)
+        with gzip.open(str(stem)+'-bb.json.gz','wt') as stream:json.dump(boxes,stream)
+    args=SimpleNamespace(root=str(root),out=str(tmp_path/'out'),view='default_100-80',
+        train_count=2,val_count=2,test_count=2,seed=42,resume=False)
+    rows=import_webui(args)
+    assert {split:sum(r['split']==split for r in rows) for split in ('train','val','test')}=={
+        'train':2,'val':2,'test':2}
+    groups={split:{r['group'] for r in rows if r['split']==split} for split in ('train','val','test')}
+    assert not groups['train']&groups['val'] and not groups['train']&groups['test'] and not groups['val']&groups['test']
+    native=list(read_jsonl(tmp_path/'out/native-detector-train.jsonl'))
+    assert len(native)==2 and native[0]['elements']==[{'box':[10.,12.,40.,32.],'label':3}]
+    assert native[0]['annotation_scope'].endswith('no-painted-region')
 
 
 def fixture_tree():

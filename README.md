@@ -30,6 +30,7 @@
 - [변경 이력](CHANGELOG.md)
 - [보안·데이터 취급](SECURITY.md)
 - [실제 HTML Self-Revision vs FrameDiff 전체 실험](docs/REAL_WEB_EXPERIMENT.md)
+- [WebUI 600/200/200 전체 visual fine-tuning 및 D2C/Hard 평가](docs/webui-finetuning.md)
 
 소스와 설정만 Git으로 관리합니다. `data/`, `runs/`, checkpoint, VLM weight, Playwright cache는 의도적으로 제외됩니다. MIT 라이선스이며 실제 저자·기관 정보는 공개 전에 `CITATION.cff`에 보완하세요.
 
