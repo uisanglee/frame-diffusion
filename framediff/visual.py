@@ -17,11 +17,79 @@ from .ir import FIELDS, ROLES
 from .model import encode, collate, Block, ModelConfig
 
 CONTRACT = 'visible-ui-v1'
+ACTION_CONTRACT = 'single-css-declaration-normalized-v2'
 CLASSES = ('background', 'text', 'image', 'control', 'painted-region')
 COLORS = ('white', '#2864b4', '#26946c', '#df7832', '#b49ac7')
-EDIT_FIELDS = ('width', 'height', 'dx', 'dy')
-DELTAS = (-64, -32, -16, -8, -4, -2, -1, 1, 2, 4, 8, 16, 32, 64)
-ACTIONS = len(EDIT_FIELDS)*len(DELTAS)
+MAX_ACTION_FRACTION = .05
+# Numeric actions are fractions of the corresponding viewport axis.  Thus one
+# action changes exactly one CSS declaration by at most 5% of the viewport.
+NORMALIZED_DELTAS = (-.05, -.025, -.0125, -.00625, -.003125,
+                       .003125, .00625, .0125, .025, .05)
+NUMERIC_FIELDS = ('width','height',
+                  'margin-left','margin-right','margin-top','margin-bottom',
+                  'padding-left','padding-right','padding-top','padding-bottom',
+                  'column-gap','row-gap')
+CATEGORICAL_VALUES = {
+    'flex-direction': ('row','row-reverse','column','column-reverse'),
+    'justify-content': ('normal','flex-start','center','flex-end','space-between','space-around','space-evenly','start','end'),
+    'align-items': ('normal','stretch','flex-start','center','flex-end','baseline','start','end'),
+}
+EDIT_FIELDS = NUMERIC_FIELDS + tuple(CATEGORICAL_VALUES)
+ACTION_VALUES = {field:NORMALIZED_DELTAS for field in NUMERIC_FIELDS} | CATEGORICAL_VALUES
+ACTION_SPECS = tuple((field,value) for field in EDIT_FIELDS for value in ACTION_VALUES[field])
+ACTION_TO_INDEX = {action:i for i,action in enumerate(ACTION_SPECS)}
+ACTIONS = len(ACTION_SPECS)
+
+
+def action_axis(field):
+    """Viewport axis used to turn a normalized numeric action into CSS pixels."""
+    if field in ('width','margin-left','margin-right','padding-left','padding-right','column-gap'):
+        return 0
+    if field in ('height','margin-top','margin-bottom','padding-top','padding-bottom','row-gap'):
+        return 1
+    return None
+
+
+def validate_action(edit, viewport=None):
+    """Validate the v2 action-size contract: one declaration per action.
+
+    Numeric mutations are bounded by MAX_ACTION_FRACTION of one viewport axis;
+    categorical mutations replace one value from a finite grammar.
+    """
+    if not isinstance(edit,(tuple,list)) or len(edit)!=3:raise ValueError('Action must be [node, field, value]')
+    node,field,value=edit
+    if type(node) is not int or node<0 or (field,value) not in ACTION_TO_INDEX:
+        raise ValueError('Action is outside the structured CSS grammar')
+    if field in NUMERIC_FIELDS:
+        if not isinstance(value,(int,float)) or not math.isfinite(value) or not 0<abs(value)<=MAX_ACTION_FRACTION:
+            raise ValueError('Numeric action exceeds normalized size limit')
+        if viewport is not None and (len(viewport)!=2 or min(viewport)<=0):raise ValueError('Invalid viewport')
+    return tuple(edit)
+
+
+def action_size(edit):
+    """Explicit complexity measure used by the structured-action contract."""
+    _,field,value=validate_action(edit)
+    return {'declarations':1,
+            'normalized_magnitude':abs(float(value)) if field in NUMERIC_FIELDS else None}
+
+
+def action_delta_px(field, value, viewport):
+    validate_action((0,field,value),viewport)
+    axis=action_axis(field)
+    if axis is None:raise ValueError('Categorical action has no pixel delta')
+    return float(value)*float(viewport[axis])
+
+
+def candidate_fields(tree, index):
+    """Syntactically legal declaration locations, independent of target geometry."""
+    if index==0:return ()
+    node_id=tree['nodes'][index]['id']
+    has_children=any(n.get('parent')==node_id for n in tree['nodes'])
+    base=('width','height','margin-left','margin-right','margin-top','margin-bottom')
+    if not has_children:return base
+    return base+('padding-left','padding-right','padding-top','padding-bottom',
+                 'column-gap','row-gap','flex-direction','justify-content','align-items')
 
 
 def annotate(browser, tree):
@@ -91,12 +159,16 @@ def current_features(tree, boxes, viewport, max_nodes):
     divisor=max(viewport)
     feature['roi']=torch.tensor([[b[0]/divisor,b[1]/divisor,(b[0]+b[2])/divisor,(b[1]+b[3])/divisor]
                                  for n in tree['nodes'] for b in [boxes[n['id']]]]).clamp(0,1)
-    feature['action_legal']=torch.ones(len(tree['nodes']),len(EDIT_FIELDS),len(DELTAS),dtype=torch.bool)
-    feature['action_legal'][0]=False
+    legal=torch.zeros(len(tree['nodes']),ACTIONS,dtype=torch.bool)
     for i,n in enumerate(tree['nodes'][1:],1):
-        for j,axis in ((0,2),(1,3)):
-            for k,delta in enumerate(DELTAS):
-                if boxes[n['id']][axis]+delta<=0:feature['action_legal'][i,j,k]=False
+        for field in candidate_fields(tree,i):
+            for value in ACTION_VALUES[field]:
+                allowed=True
+                if field in ('width','height'):
+                    axis=0 if field=='width' else 1
+                    allowed=boxes[n['id']][axis+2]+action_delta_px(field,value,viewport)>0
+                if allowed:legal[i,ACTION_TO_INDEX[(field,value)]]=True
+    feature['action_legal']=legal
     return feature
 
 
@@ -120,9 +192,11 @@ class VisualConfig:
     max_nodes: int = 128
     token_grid: int = 12
     contract: str = CONTRACT
+    action_contract: str = ACTION_CONTRACT
 
     def __post_init__(self):
-        if self.mode not in ('abstract','screenshot') or self.contract!=CONTRACT:raise ValueError('Visual policy contract mismatch')
+        if (self.mode not in ('abstract','screenshot') or self.contract!=CONTRACT or
+                self.action_contract!=ACTION_CONTRACT):raise ValueError('Visual policy contract mismatch')
         if self.size<32 or min(self.hidden,self.layers,self.heads,self.max_nodes,self.token_grid)<1 or self.hidden%self.heads:
             raise ValueError('Invalid visual model dimensions')
 
@@ -186,8 +260,8 @@ class VisualPolicy(nn.Module):
         x=x+self.cross(self.norm(x),memory,memory,need_weights=False)[0]
         for block in self.blocks:x=block(x,batch['relation'],batch['mask'])
         x=self.norm(x);pooled=(x*batch['mask'][...,None]).sum(1)/batch['mask'].sum(1,keepdim=True)
-        logits=self.action(x).reshape(x.shape[0],x.shape[1],len(EDIT_FIELDS),len(DELTAS))
-        legal=batch['action_legal'] & batch['mask'][:,:,None,None]
+        logits=self.action(x)
+        legal=batch['action_legal'] & batch['mask'][:,:,None]
         return torch.cat([logits.masked_fill(~legal,float('-inf')).flatten(1),self.stop(pooled)],1)
 
     def forward(self,batch,target,current):
@@ -197,18 +271,18 @@ class VisualPolicy(nn.Module):
 
 def action_index(edit,n):
     if edit is None:return n*ACTIONS
-    i,field,delta=edit
-    return i*ACTIONS+EDIT_FIELDS.index(field)*len(DELTAS)+DELTAS.index(delta)
+    i,field,value=validate_action(edit)
+    return i*ACTIONS+ACTION_TO_INDEX[(field,value)]
 
 
 def decode_action(index,n):
     if index==n*ACTIONS:return None
-    node,rest=divmod(index,ACTIONS);field,value=divmod(rest,len(DELTAS))
-    return node,EDIT_FIELDS[field],DELTAS[value]
+    node,action=divmod(index,ACTIONS);field,value=ACTION_SPECS[action]
+    return node,field,value
 
 
 def load_policy(path,device):
     checkpoint=torch.load(path,map_location='cpu',weights_only=True)
-    if checkpoint.get('kind')!='visual-policy-v1':raise ValueError('Requires a visual policy checkpoint; legacy checkpoints are incompatible')
+    if checkpoint.get('kind')!='visual-policy-v2':raise ValueError('Requires a v2 structured-action visual policy checkpoint; retrain legacy policies')
     model=VisualPolicy(VisualConfig(**checkpoint['config']),pretrained=False)
     model.load_state_dict(checkpoint['model']);return model.to(device).eval(),checkpoint

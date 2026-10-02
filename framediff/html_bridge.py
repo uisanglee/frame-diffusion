@@ -108,6 +108,47 @@ class HtmlBrowser(Browser):
           e.style.setProperty(property,`${value}px`,'important');
         }''', {'id':node_id,'field':field,'delta':delta})
 
+    def edit_visual_action(self, html, viewport, node_id, field, value, return_inverse=False):
+        """Apply one v2 structured action under the normalized size contract.
+
+        Numeric values are viewport-axis fractions, never raw pixels. Categorical
+        values replace one grammar-constrained flex declaration. The returned
+        inverse is used only while constructing verified corruption trajectories.
+        """
+        from .visual import (NUMERIC_FIELDS,ACTION_TO_INDEX,
+                             action_delta_px,validate_action)
+        validate_action((0,field,value),viewport)
+        numeric=field in NUMERIC_FIELDS
+        delta=action_delta_px(field,value,viewport) if numeric else None
+        self.load(html,viewport)
+        old=self.page.evaluate('''({id,field,value,delta,numeric})=>{
+          const e=[...document.querySelectorAll('[data-fd-id]')].find(e=>e.getAttribute('data-fd-id')===id);
+          if(!e)throw new Error('Missing edit target');
+          const s=getComputedStyle(e),r=e.getBoundingClientRect();
+          const num=k=>{const v=parseFloat(s.getPropertyValue(k));return Number.isFinite(v)?v:0};
+          if(!numeric){
+            const old=s.getPropertyValue(field).trim();
+            e.style.setProperty(field,value,'important');return old;
+          }
+          let current,minimum=-Infinity;
+          if(field==='width'||field==='height'){
+            const horizontal=field==='width';
+            const edges=horizontal?['padding-left','padding-right','border-left-width','border-right-width']:
+              ['padding-top','padding-bottom','border-top-width','border-bottom-width'];
+            const inset=s.boxSizing==='border-box'?0:edges.reduce((a,k)=>a+num(k),0);
+            current=(horizontal?r.width:r.height)-inset;minimum=0;
+          }else{
+            current=num(field);
+            if(field.startsWith('padding-')||field.endsWith('-gap'))minimum=0;
+          }
+          e.style.setProperty(field,`${Math.max(minimum,current+delta)}px`,'important');return null;
+        }''', {'id':node_id,'field':field,'value':value,'delta':delta,'numeric':numeric})
+        if not return_inverse:return None
+        inverse=(field,-value) if numeric else (field,old)
+        if inverse not in ACTION_TO_INDEX:
+            raise ValueError(f'CSS value has no reversible action: {field}={old!r}')
+        return inverse
+
 
     def patch(self, html, viewport, desired):
         """Calibrate geometry in DOM order, then serialize inline CSS (no JS in output).

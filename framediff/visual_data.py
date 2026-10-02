@@ -11,7 +11,8 @@ from .ir import read_jsonl,write_json,write_jsonl
 from .html_bridge import HtmlBrowser,embed_placeholder
 from .html_feedback import refresh_geometry
 from .plans import dom_tree
-from .visual import CONTRACT,DELTAS,EDIT_FIELDS,annotate,elements,abstract_image
+from .visual import (CONTRACT,ACTION_CONTRACT,ACTION_VALUES,candidate_fields,
+                     annotate,elements,abstract_image)
 from .web_experiment import guard_run,digest
 
 
@@ -67,7 +68,8 @@ def build(args):
     sources=[{**r,'source_sha':digest(r['html'])} for r in sources];validate_splits(sources)
     if len({r['id'] for r in sources})!=len(sources):raise ValueError('Duplicate source IDs')
     out=Path(args.out).resolve()
-    config={'kind':'visual-data-v1','contract':CONTRACT,'sources':sources,'settings':{k:v for k,v in vars(args).items() if k not in ('out','resume')}}
+    config={'kind':'visual-data-v2','contract':CONTRACT,'action_contract':ACTION_CONTRACT,
+            'sources':sources,'settings':{k:v for k,v in vars(args).items() if k not in ('out','resume')}}
     guard_run(out,config,args.resume)
     policy=[];detection=[];pages=[];errors=[]
     with HtmlBrowser() as browser:
@@ -99,7 +101,7 @@ def build(args):
                 tagged=dom['html'];(work/'reference.html').write_text(tagged)
                 ids=[n['id'] for n in tree['nodes'][1:]];root=tree['nodes'][0]['id']
                 base={k:source[k] for k in ('id','group','split','source_sha')}
-                base.update(contract=CONTRACT,viewport=viewport,target_image=str(work/'target.png'),
+                base.update(contract=CONTRACT,action_contract=ACTION_CONTRACT,viewport=viewport,target_image=str(work/'target.png'),
                             target_abstract=str(work/'target-abstract.png'))
                 abstract_image(elements(tree,target_boxes,viewport),viewport,args.abstract_size).save(base['target_abstract'])
                 def observe():
@@ -127,18 +129,20 @@ def build(args):
                     for step in range(args.max_noise):
                         accepted=False
                         for attempt in range(30):
-                            i=rng.randrange(1,len(tree['nodes']));field=rng.choice(EDIT_FIELDS)
+                            i=rng.randrange(1,len(tree['nodes']));fields=candidate_fields(tree,i)
+                            if not fields:continue
+                            field=rng.choice(fields)
                             if (i,field) in used:continue
-                            delta=rng.choice(DELTAS);nid=tree['nodes'][i]['id']
-                            if field in ('width','height') and boxes[nid][2 if field=='width' else 3]+delta<=1:continue
-                            browser.edit_property(html,viewport,nid,field,delta)
+                            value=rng.choice(ACTION_VALUES[field]);nid=tree['nodes'][i]['id']
+                            try:inverse=browser.edit_visual_action(html,viewport,nid,field,value,return_inverse=True)
+                            except ValueError:continue
                             candidate_html=browser.page.content();candidate=observe()
                             if distance(candidate)<=distance(boxes)+1e-7:continue
                             # Verify the inverse pixel action in the real browser.
-                            browser.edit_property(candidate_html,viewport,nid,field,-delta);restored=observe()
+                            browser.edit_visual_action(candidate_html,viewport,nid,*inverse);restored=observe()
                             if max(abs(restored[k][a]-boxes[k][a]) for k in ids for a in range(4))>.15:continue
                             browser.load(candidate_html,viewport)
-                            save_example(f't{trajectory}-s{step}',candidate_html,candidate,[i,field,-delta])
+                            save_example(f't{trajectory}-s{step}',candidate_html,candidate,[i,*inverse])
                             html,boxes=candidate_html,candidate;used.add((i,field));accepted=True
                             last_corrupted=local_policy[-1];break
                         if not accepted:break

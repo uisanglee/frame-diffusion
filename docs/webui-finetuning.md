@@ -52,6 +52,17 @@ bash scripts/finetune_visual_webui.sh \
 fine-tuning은 optimizer를 새로 만들고 기존 checkpoint의 학습 group/hash provenance를 보존한다.
 기본 LR은 detector/policy stage 1이 `3e-5`, stage 2가 `1e-5`다. 기존 run과 architecture,
 `RAW_SIZE`, `ABS_SIZE`가 같아야 한다. 각 stage의 `last.pt`가 있으면 정확히 resume한다.
+structured-action v2로 전환할 때는 기존 v1 policy의 공통 encoder/transformer만 초기화에 재사용되고
+확장된 action head는 새로 학습된다. 기존 v1 rendered data/run 디렉터리를 resume하지 말고 새 경로를 쓴다.
+detector는 action grammar와 독립적이므로 이미 fine-tune한 run을 네 번째 인자로 주고
+`REUSE_DETECTOR=1`을 설정하면 detector 학습을 건너뛸 수 있다:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 REUSE_DETECTOR=1 \
+POLICY_STAGE1_STEPS=3000 POLICY_STAGE2_STEPS=3000 \
+bash scripts/finetune_visual_webui.sh \
+  "$WEBUI_ROOT/test" data/visual-webui-v2 runs/visual-webui-v2 runs/visual-webui-ft
+```
 
 HTML 재렌더링과 원본 WebUI screenshot의 `source_pixel_mae`가 각 held-out page에 기록된다.
 외부 CSS/asset 누락 페이지를 필터링하려면 새 data/run 디렉터리에서 예를 들어

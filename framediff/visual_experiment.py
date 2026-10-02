@@ -13,7 +13,8 @@ from .html_bridge import HtmlBrowser
 from .html_feedback import refresh_geometry
 from .ir import read_jsonl,write_json,write_jsonl
 from .train import select_device
-from .visual import CONTRACT,abstract_image,elements,image_tensor,current_features,visual_batch,decode_action,load_policy
+from .visual import (CONTRACT,ACTION_CONTRACT,abstract_image,elements,image_tensor,
+                     current_features,visual_batch,decode_action,load_policy)
 from .visual_train import load_detector,detect,detector_input
 from .web_experiment import digest,guard_run,signature
 
@@ -77,7 +78,7 @@ def rollout(browser,html,tree,viewport,target_path,policy,parser=None,threshold=
         if action is None:stats['stop_reason']='policy_stop';break
         if time_budget and time.perf_counter()-start>=time_budget:stats['stop_reason']='time_budget';break
         i,field,delta=action;t=time.perf_counter()
-        browser.edit_property(current_html,viewport,current_tree['nodes'][i]['id'],field,delta)
+        browser.edit_visual_action(current_html,viewport,current_tree['nodes'][i]['id'],field,delta)
         current_html=browser.page.content();stats['layout_seconds']+=time.perf_counter()-t;stats['actions']+=1
     sync(device);stats['seconds']=time.perf_counter()-start
     stats['browser_executions']=browser.executions-before;stats['browser_screenshots']=browser.screenshots-shots
@@ -132,7 +133,9 @@ def evaluate(args):
                     started=time.perf_counter()
                     try:
                         if initial['failed']:raise ValueError(initial.get('error') or 'Initial HTML generation failed')
-                        if record.get('visual_contract')!=CONTRACT:raise ValueError('Run web-prepare --repair-conditioning visual')
+                        if (record.get('visual_contract')!=CONTRACT or
+                                record.get('visual_action_contract')!=ACTION_CONTRACT):
+                            raise ValueError('Run web-prepare --repair-conditioning visual with the v2 action contract')
                         oracle=None
                         if method=='abstract-oracle':
                             if not str(record.get('construction','')).startswith('controlled') or 'evaluation_target_boxes' not in record:

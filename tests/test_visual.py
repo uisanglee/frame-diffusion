@@ -11,8 +11,8 @@ import pytest
 import torch
 
 from framediff.ir import node,write_jsonl,read_jsonl
-from framediff.visual import (CONTRACT,VisualConfig,VisualPolicy,abstract_image,elements,current_features,
-    visual_batch,action_index,ACTIONS,load_policy)
+from framediff.visual import (CONTRACT,ACTION_CONTRACT,VisualConfig,VisualPolicy,abstract_image,elements,current_features,
+    visual_batch,action_index,ACTIONS,load_policy,validate_action,action_size)
 
 
 def test_webui_visual_import_domain_split_and_native_labels(tmp_path):
@@ -57,6 +57,35 @@ def test_abstraction_is_id_free_and_spatial():
     assert not np.array_equal(a,c)
 
 
+def test_structured_action_contract_is_single_and_normalized():
+    assert validate_action((1,'padding-left',.05))==(1,'padding-left',.05)
+    assert validate_action((1,'justify-content','space-between'))==(1,'justify-content','space-between')
+    assert action_size((1,'padding-left',.05))=={'declarations':1,'normalized_magnitude':.05}
+    assert action_size((1,'align-items','center'))=={'declarations':1,'normalized_magnitude':None}
+    with pytest.raises(ValueError,match='grammar'):validate_action((1,'padding-left',.1))
+    with pytest.raises(ValueError,match='grammar'):validate_action((1,'unknown',.01))
+
+
+@pytest.mark.browser
+def test_structured_actions_apply_normalized_reflow():
+    from framediff.html_bridge import HtmlBrowser
+    html='''<html><body style="margin:0"><section id="row" style="display:flex;width:400px;height:120px;gap:0;padding:0">
+    <div id="a" style="width:40px;height:20px"></div><div id="b" style="width:40px;height:20px"></div>
+    </section></body></html>'''
+    viewport=[400,200]
+    with HtmlBrowser() as browser:
+        dom=browser.snapshot(html,viewport,max_nodes=16);base=dom['html']
+        ids=browser.page.evaluate("()=>Object.fromEntries(['row','a','b'].map(id=>[id,document.getElementById(id).getAttribute('data-fd-id')]))")
+        browser.edit_visual_action(base,viewport,ids['row'],'column-gap',.05)
+        gap=browser.page.locator('#b').bounding_box()['x']-browser.page.locator('#a').bounding_box()['x']-40
+        assert gap==pytest.approx(20,abs=.1)
+        browser.edit_visual_action(base,viewport,ids['row'],'padding-left',.05)
+        assert browser.page.locator('#a').bounding_box()['x']==pytest.approx(20,abs=.1)
+        inverse=browser.edit_visual_action(base,viewport,ids['row'],'flex-direction','column',return_inverse=True)
+        assert inverse==('flex-direction','row')
+        assert browser.page.locator('#b').bounding_box()['y']>browser.page.locator('#a').bounding_box()['y']
+
+
 def test_pixels_drive_policy_and_receive_gradients(tmp_path):
     torch.set_num_threads(2);torch.manual_seed(17)
     tree,boxes=fixture_tree();cfg=VisualConfig(size=64,hidden=16,layers=1,heads=2,token_grid=3,max_nodes=16)
@@ -65,7 +94,7 @@ def test_pixels_drive_policy_and_receive_gradients(tmp_path):
     assert torch.count_nonzero(features['geometry'][:,:,4:13])==0
     assert 'plan' not in features
     batch=visual_batch([features],'cpu');target=torch.rand(1,3,64,64,requires_grad=True);current=torch.rand(1,3,64,64,requires_grad=True)
-    logits=net(batch,target,current);label=action_index((1,'width',-4),2)
+    logits=net(batch,target,current);label=action_index((1,'width',-.003125),2)
     torch.nn.functional.cross_entropy(logits,torch.tensor([label])).backward()
     assert target.grad.abs().sum()>0 and current.grad.abs().sum()>0
     assert net.vision.projections[0].weight.grad.abs().sum()>0
@@ -74,7 +103,7 @@ def test_pixels_drive_policy_and_receive_gradients(tmp_path):
         before=net(batch,target,current);after=net(batch,torch.zeros_like(target),current)
     valid=torch.isfinite(before)
     assert not torch.allclose(before[valid],after[valid])
-    path=tmp_path/'visual.pt';torch.save({'kind':'visual-policy-v1','config':asdict(cfg),'model':net.state_dict()},path)
+    path=tmp_path/'visual.pt';torch.save({'kind':'visual-policy-v2','config':asdict(cfg),'model':net.state_dict()},path)
     restored,_=load_policy(path,'cpu')
     with torch.no_grad():assert torch.allclose(before,restored(batch,target,current))
 
@@ -114,7 +143,7 @@ def test_rollout_uses_one_target_parse_and_real_feedback(tmp_path,monkeypatch):
             self.images.append(image.clone());return torch.zeros(1,1,16),torch.zeros(1,16,4,4)
         def decode(self,batch,*args):
             n=batch['mask'].shape[1];logits=torch.full((1,n*ACTIONS+1),-100.)
-            edit=(self.index,'width',-64) if self.calls==0 else None
+            edit=(self.index,'width',-.05) if self.calls==0 else None
             logits[0,action_index(edit,n)]=100.;self.calls+=1;return logits
     def parse(*args):parse_calls.append(1);return [{'box':[0,0,300,100],'label':4}]
     monkeypatch.setattr('framediff.visual_experiment.detect',parse)
@@ -128,7 +157,7 @@ def test_rollout_uses_one_target_parse_and_real_feedback(tmp_path,monkeypatch):
             assert stats['actions']==1 and stats['stop_reason']=='policy_stop'
             assert stats['target_image_encodings']==1 and stats['current_image_encodings']==2
             assert stats['browser_screenshots']==(2 if mode=='screenshot' else 0)
-            assert stats['history'][1]['boxes']['fd-3'][1]>boxes['fd-3'][1]
+            assert stats['history'][1]['boxes']['fd-2'][2]<boxes['fd-2'][2]
             assert not torch.equal(policy.images[1],policy.images[2])
             outputs.append(result)
         assert len(parse_calls)==1 and outputs[0]==outputs[1]
@@ -148,7 +177,7 @@ def test_visual_data_training_resume_and_preparation(tmp_path,monkeypatch):
         trajectories=1,max_noise=2,seed=17,max_nodes=16,abstract_size=64))
     train=list(read_jsonl(tmp_path/'data/policy-train.jsonl'))
     assert len(train)>=2 and train[0]['teacher_edits']==[]
-    assert train[1]['teacher_edits'][0][2] in (-64,-32,-16,-8,-4,-2,-1,1,2,4,8,16,32,64)
+    assert validate_action(train[1]['teacher_edits'][0])
     common=['--train',str(tmp_path/'data/policy-train.jsonl'),'--val',str(tmp_path/'data/policy-val.jsonl'),
             '--out',str(tmp_path/'policy'),'--mode','abstract','--size','64','--hidden','16','--layers','1',
             '--heads','2','--max-nodes','16','--token-grid','3','--device','cpu','--cpu-threads','2',
@@ -165,7 +194,8 @@ def test_visual_data_training_resume_and_preparation(tmp_path,monkeypatch):
         four_bit=False,initial_mode='direct',repair_conditioning='visual',vlm_retries=0)
     rows=prepare(args)
     assert not rows[0]['errors'] and 'plan' not in rows[0] and 'observations' not in rows[0]
-    assert rows[0]['visual_contract']==CONTRACT and rows[0]['frame_vlm_calls']==0
+    assert rows[0]['visual_contract']==CONTRACT and rows[0]['visual_action_contract']==ACTION_CONTRACT
+    assert rows[0]['frame_vlm_calls']==0
     assert any(n.get('visual_class') for n in rows[0]['current']['nodes'])
     main(['visual-train-detector','--train',str(tmp_path/'data/detector-train.jsonl'),
           '--val',str(tmp_path/'data/detector-val.jsonl'),'--out',str(tmp_path/'detector'),

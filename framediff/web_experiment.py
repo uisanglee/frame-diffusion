@@ -143,6 +143,9 @@ def prepare(args):
                 'placeholder_sha':digest(Path(i['html']).parent/'rick.jpg')
                     if i.get('html') and (Path(i['html']).parent/'rick.jpg').exists() else None} for i in items]
     settings = {k:v for k,v in vars(args).items() if k not in ('resume','out','retry_failed')}
+    if settings.get('repair_conditioning')=='visual':
+        from .visual import ACTION_CONTRACT
+        settings['visual_action_contract']=ACTION_CONTRACT
     # Preserve existing Design2Code cache signatures when newly added flags are defaults.
     if settings.get('dataset','design2code')=='design2code':
         settings.pop('dataset',None); settings.pop('webui_view',None)
@@ -304,9 +307,10 @@ def prepare(args):
                     record['plan_initial_screenshots']=1
                     write_json(work/'plan.json',raw)
                 elif getattr(args,'repair_conditioning','boxes')=='visual':
-                    from .visual import annotate,CONTRACT
+                    from .visual import annotate,CONTRACT,ACTION_CONTRACT
                     annotate(browser,tree)
                     record['visual_contract']=CONTRACT
+                    record['visual_action_contract']=ACTION_CONTRACT
                     record['initial_screenshot']=str(work/'initial.png')
                     write_json(ir_path,tree)
                 else:

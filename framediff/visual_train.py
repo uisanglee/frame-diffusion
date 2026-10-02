@@ -12,7 +12,8 @@ import torch.nn.functional as F
 
 from .ir import read_jsonl,write_json,write_jsonl
 from .train import select_device,seed_all
-from .visual import CONTRACT,CLASSES,VisualConfig,VisualPolicy,current_features,visual_batch,image_tensor,action_index,abstract_image
+from .visual import (CONTRACT,ACTION_CONTRACT,CLASSES,VisualConfig,VisualPolicy,
+                     current_features,visual_batch,image_tensor,action_index,abstract_image)
 from .visual_data import validate_splits
 from .web_experiment import digest,guard_run
 
@@ -91,20 +92,36 @@ def train(args):
         if cfg['min_size']<32 or cfg['max_size']<cfg['min_size'] or cfg['max_detections']<1:raise ValueError('Invalid detector dimensions')
         kind='visual-detector-v1'
     else:
+        if any(r.get('action_contract')!=ACTION_CONTRACT for r in train_rows+val_rows):
+            raise ValueError('Policy data uses a legacy action contract; rebuild visual data')
         cfg=asdict(VisualConfig(mode=args.mode,size=args.size,hidden=args.hidden,layers=args.layers,
-                                heads=args.heads,max_nodes=args.max_nodes,token_grid=args.token_grid));kind='visual-policy-v1'
+                                heads=args.heads,max_nodes=args.max_nodes,token_grid=args.token_grid));kind='visual-policy-v2'
     if args.resume and args.init_checkpoint:raise ValueError('Choose resume or init-checkpoint')
     data_signature={'train':digest(args.train),'val':digest(args.val)}
     out=Path(args.out).resolve()
     run_settings={k:v for k,v in vars(args).items() if k not in ('out','resume','steps','init_checkpoint')}
     guard_run(out,{'kind':kind,'config':cfg,'data':data_signature,'settings':run_settings},bool(args.resume))
     ck=torch.load(args.resume or args.init_checkpoint,map_location='cpu',weights_only=True) if args.resume or args.init_checkpoint else None
-    if ck and (ck.get('kind')!=kind or ck['config']!=cfg):raise ValueError('Checkpoint architecture/mode mismatch')
+    legacy_policy_init=False
+    if ck:
+        if ck.get('kind')==kind and ck['config']==cfg:pass
+        elif (args.init_checkpoint and not is_detector and ck.get('kind')=='visual-policy-v1' and
+              ck.get('config')=={k:v for k,v in cfg.items() if k!='action_contract'}):
+            # Reuse the image/tree encoder and transformer, but deliberately
+            # reinitialize the expanded structured-action head.
+            legacy_policy_init=True
+        else:raise ValueError('Checkpoint architecture/mode mismatch')
     net=(detector(cfg,not args.no_pretrained and ck is None) if is_detector else
          VisualPolicy(VisualConfig(**cfg),not args.no_pretrained and ck is None)).to(device)
     groups={r['group'] for r in train_rows};source_hashes={r['source_sha'] for r in train_rows}
     if ck:
-        net.load_state_dict(ck['model']);groups.update(ck.get('training_groups',[]));source_hashes.update(ck.get('training_hashes',[]))
+        if legacy_policy_init:
+            reusable={k:v for k,v in ck['model'].items() if not k.startswith('action.')}
+            missing,unexpected=net.load_state_dict(reusable,strict=False)
+            if set(missing)!={'action.weight','action.bias'} or unexpected:
+                raise ValueError('Legacy policy migration found unexpected parameters')
+        else:net.load_state_dict(ck['model'])
+        groups.update(ck.get('training_groups',[]));source_hashes.update(ck.get('training_hashes',[]))
     if groups & {r['group'] for r in val_rows} or source_hashes & {r['source_sha'] for r in val_rows}:raise ValueError('Historical training/validation leakage')
     # Frozen parser provenance follows the policy into downstream evaluation.
     parser_groups=set(ck.get('parser_training_groups',[])) if ck else set()

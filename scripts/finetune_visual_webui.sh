@@ -14,11 +14,15 @@ abs_size=${ABS_SIZE:-384}
 raw_size=${RAW_SIZE:-384}
 from_procedural=${FINETUNE_FROM_PROCEDURAL:-1}
 detector_source=${DETECTOR_SOURCE:-rendered}
+reuse_detector=${REUSE_DETECTOR:-0}
 if [[ "$from_procedural" != 0 && "$from_procedural" != 1 ]]; then
   echo 'FINETUNE_FROM_PROCEDURAL must be 0 or 1' >&2; exit 2
 fi
 if [[ "$detector_source" != rendered && "$detector_source" != native ]]; then
   echo 'DETECTOR_SOURCE must be rendered or native' >&2; exit 2
+fi
+if [[ "$reuse_detector" != 0 && "$reuse_detector" != 1 ]]; then
+  echo 'REUSE_DETECTOR must be 0 or 1' >&2; exit 2
 fi
 
 python -m framediff visual-import-webui --root "$webui_root" --out "$data_dir/source" \
@@ -68,8 +72,17 @@ if [[ "$from_procedural" == 1 ]]; then
   done
 fi
 
-train_stage visual-train-detector "$run_dir/detector" "$detector_init" "${DETECTOR_LR:-0.00003}" \
-  --train "$detector_train" --val "$detector_val" --steps "${DETECTOR_STEPS:-5000}"
+if [[ "$reuse_detector" == 1 ]]; then
+  if [[ -z "$detector_init" || ! -f "$detector_init" ]]; then
+    echo 'REUSE_DETECTOR=1 requires FINETUNE_FROM_PROCEDURAL=1 and a base detector checkpoint' >&2; exit 2
+  fi
+  mkdir -p "$run_dir/detector"
+  cp "$detector_init" "$run_dir/detector/best.pt"
+  echo "Reused frozen detector: $detector_init"
+else
+  train_stage visual-train-detector "$run_dir/detector" "$detector_init" "${DETECTOR_LR:-0.00003}" \
+    --train "$detector_train" --val "$detector_val" --steps "${DETECTOR_STEPS:-5000}"
+fi
 python -m framediff visual-evaluate-detector --data "$detector_test" \
   --checkpoint "$run_dir/detector/best.pt" --out "$run_dir/detector-test.json" --device "$device"
 

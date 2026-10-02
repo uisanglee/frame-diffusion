@@ -2,7 +2,8 @@
 
 이 경로는 **고정 계획/목표 좌표 residual 없이 이미지로 action을 예측**한다.
 기존 box/plan 체크포인트와 호환되지 않으며 새로 학습해야 한다.
-반복 역편집(denoising) 정책이며 Gaussian DDPM이나 원 논문 재현이라고 주장하지 않는다.
+반복 역편집(denoising) 정책이며 Gaussian DDPM은 아니다. v2 action contract는 한 step을
+하나의 문법적으로 허용된 CSS declaration 변경으로 제한하는 discrete structured diffusion이다.
 
 ## 모델과 입력
 
@@ -12,8 +13,15 @@
 2. 이미지 조건 정책: ImageNet 사전학습 ResNet-18 + 다중 해상도 특징(stride 4/8/16),
    spatial tokens, 현재 DOM ROIAlign, target/current cross-attention, tree attention.
    이미지 픽셀과 현재 DOM 구조·속성·box를 입력한다. 목표 box/정답 HTML/계획은 입력하지 않는다.
-3. 행동: node 선택 + width/height/margin-left/margin-top의 ±1/2/4/8/16/32/64 px 편집 또는 STOP.
-   실제 CSS 재실행 후 줄바꿈·자동 높이·형제 이동을 다음 스텝에 반영한다.
+3. 행동: node 선택 + CSS declaration 하나의 변경 또는 STOP. 수치 변화는 해당 viewport 축의
+   ±0.3125/0.625/1.25/2.5/5%로 제한한다. 지원 grammar는 width/height, 4방향 margin과 padding,
+   row/column gap, flex-direction, justify-content, align-items다. 실제 CSS 재실행 후 줄바꿈·자동
+   높이·형제 이동을 다음 스텝에 반영한다.
+
+모든 action에 `sigma_decl(a)=변경 declaration 수=1`을 적용한다. 수치형에는 추가로
+`sigma_mag(a)=abs(delta_px)/viewport_axis <= 0.05`를 적용한다. action은 여러 declaration이나
+여러 DOM node를 동시에 수정할 수 없다. CSS reflow로 여러 자식 box가 바뀌는 것은 action의 실행
+결과이지 추가 action이 아니다.
 
 | 방식 | 목표 입력 | 매 스텝 현재 입력 |
 |---|---|---|
@@ -45,7 +53,9 @@ abstract 정책 정답 추상화 5,000 steps + 예측 추상화 5,000 steps.
 두 정책의 optimizer 초기화/학습률/step 예산은 동일하다. 검출기 추가 학습 비용은 별도다.
 stage 2는 stage 1 best에서 시작하며 optimizer는 새로 만든다.
 같은 명령을 재실행하면 데이터 캐시 및 각 단계 last checkpoint에서 재개한다.
-데이터·설정이 바뀌면 새 output 디렉터리를 사용한다.
+데이터·설정이 바뀌면 새 output 디렉터리를 사용한다. v1 width/height/dx/dy 데이터는 v2 action
+grammar와 호환되지 않으므로 반드시 새 data/run 디렉터리에서 다시 생성·학습한다. v1 policy를
+`--init-checkpoint`로 지정하면 vision/tree/transformer 가중치만 이관하고 확장 action head는 새로 초기화한다.
 
 기본 batch=2, accumulation=4, 정책 BF16, 검출기 FP32. OOM이면 `BATCH_SIZE=1`을 사용한다.
 RTX 4090의 전체 시간/최대 메모리는 실측하지 않았다. elapsed_s 로그로 산출해야 한다.
