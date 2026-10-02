@@ -20,10 +20,16 @@ def add_parsers(sub):
         p.add_argument('--bf16',action='store_true',help='Policy training only; detector uses float32')
         p.add_argument('--lr',type=float,default=1e-4)
         p.add_argument('--prediction-probability',type=float,default=0.)
+        p.add_argument('--early-stop-patience',type=int,default=10,
+                       help='Stop after this many consecutive validations without improvement; 0 disables')
+        p.add_argument('--early-stop-min-delta',type=float,default=0.,
+                       help='Minimum absolute validation-loss decrease to reset patience')
         for k,v in [('steps',10000),('batch-size',2),('accumulation',4),('seed',42),('cpu-threads',4),
                     ('eval-every',500),('log-every',50),('val-samples',32)]:p.add_argument('--'+k,type=int,default=v)
         if name.endswith('detector'):
             for k,v in [('min-size',800),('max-size',1600),('max-detections',256)]:p.add_argument('--'+k,type=int,default=v)
+            p.add_argument('--metric-threshold',type=float,default=.4,
+                           help='Confidence threshold for checkpoint-time IoU50 validation metrics')
         else:
             p.add_argument('--mode',choices=['screenshot','abstract'],required=True)
             for k,v in [('size',384),('hidden',128),('layers',3),('heads',4),('max-nodes',128),('token-grid',12)]:p.add_argument('--'+k,type=int,default=v)
@@ -42,10 +48,15 @@ def add_parsers(sub):
     p.add_argument('--oracle-ablation',action='store_true',help='Controlled visual-build-data pages ONLY')
     p.add_argument('--resume',action='store_true')
     for k,v in [('steps',20),('repeats',3),('warmup',1),('limit',0),('seed',42),('cpu-threads',4)]:p.add_argument('--'+k,type=int,default=v)
+    p=sub.add_parser('visual-figures',help='Generate paper-ready training and denoising figures')
+    p.add_argument('--run-root',required=True,help='Root containing detector and policy stage directories')
+    p.add_argument('--out',required=True)
+    p.add_argument('--evaluation',help='Optional visual-evaluate output containing per-step traces')
 
 
 def run(args):
     if getattr(args,'threshold',.4)<0 or getattr(args,'threshold',.4)>1:raise ValueError('threshold must be in [0,1]')
+    if getattr(args,'metric_threshold',.4)<0 or getattr(args,'metric_threshold',.4)>1:raise ValueError('metric-threshold must be in [0,1]')
     if getattr(args,'limit',0)<0:raise ValueError('limit must be nonnegative')
     if getattr(args,'warmup',0)<0:raise ValueError('warmup must be nonnegative')
     if not 0<=getattr(args,'max_source_mae',1.)<=1:raise ValueError('max-source-mae must be in [0,1]')
@@ -72,4 +83,7 @@ def run(args):
     if args.command=='visual-evaluate':
         from .visual_experiment import evaluate
         return evaluate(args)
+    if args.command=='visual-figures':
+        from .visual_figures import generate
+        return generate(args)
     raise ValueError('Unknown visual command')

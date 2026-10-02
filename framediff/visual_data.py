@@ -160,6 +160,10 @@ def build(args):
         write_jsonl(out/f'policy-{split}.jsonl',[r for r in policy if r['split']==split])
         write_jsonl(out/f'detector-{split}.jsonl',[r for r in detection if r['split']==split])
         write_jsonl(out/f'pages-{split}.jsonl',[r for r in pages if r['split']==split])
-    write_json(out/'report.json',{'pages':len(pages),'policy_examples':len(policy),'detector_examples':len(detection),'errors':errors})
+    coverage={split:{'selected':sum(r['split']==split for r in sources),
+                     'usable':sum(r['split']==split for r in pages)} for split in ('train','val','test')}
+    for counts in coverage.values():counts['excluded']=counts['selected']-counts['usable']
+    write_json(out/'report.json',{'pages':len(pages),'policy_examples':len(policy),'detector_examples':len(detection),
+                                'split_coverage':coverage,'errors':errors})
     if not policy:raise ValueError('No usable visual training examples; see report.json')
     return policy

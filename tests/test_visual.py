@@ -47,6 +47,17 @@ def fixture_tree():
     return tree,{'page':[0,0,320,240],'card':[16,20,80,30]}
 
 
+def test_validation_sampling_covers_pages_and_is_repeatable():
+    from framediff.visual_train import validation_sample
+    rows=[{'id':f'{page}/{state}','source_sha':str(page),'target_image':f'{page}.png'}
+          for page in range(20) for state in range(13)]
+    sample=validation_sample(rows,32)
+    assert sample==validation_sample(rows,32)
+    assert len(sample)==32 and len({r['source_sha'] for r in sample})==20
+    assert len({r['id'] for r in sample})==32
+    assert validation_sample(rows,1000)==rows
+
+
 def test_abstraction_is_id_free_and_spatial():
     tree,boxes=fixture_tree();a=abstract_image(elements(tree,boxes,[320,240]),[320,240],64)
     renamed=copy.deepcopy(tree);renamed['nodes'][1]['id']='other';renamed_boxes={'page':boxes['page'],'other':boxes['card']}
@@ -153,11 +164,13 @@ def test_rollout_uses_one_target_parse_and_real_feedback(tmp_path,monkeypatch):
         outputs=[]
         for mode in ('screenshot','abstract'):
             policy=ScriptedPolicy(mode,index)
-            result,stats,_=rollout(browser,dom['html'],tree,[320,240],str(target_path),policy,object(),steps=3)
+            result,stats,_=rollout(browser,dom['html'],tree,[320,240],str(target_path),policy,object(),steps=3,
+                                   diagnostic_target_boxes=boxes)
             assert stats['actions']==1 and stats['stop_reason']=='policy_stop'
             assert stats['target_image_encodings']==1 and stats['current_image_encodings']==2
             assert stats['browser_screenshots']==(2 if mode=='screenshot' else 0)
             assert stats['history'][1]['boxes']['fd-2'][2]<boxes['fd-2'][2]
+            assert 'box_iou' in stats['history'][0]['diagnostic_metrics']
             assert not torch.equal(policy.images[1],policy.images[2])
             outputs.append(result)
         assert len(parse_calls)==1 and outputs[0]==outputs[1]
@@ -183,6 +196,8 @@ def test_visual_data_training_resume_and_preparation(tmp_path,monkeypatch):
             '--heads','2','--max-nodes','16','--token-grid','3','--device','cpu','--cpu-threads','2',
             '--batch-size','1','--accumulation','1','--val-samples','1','--eval-every','1','--no-pretrained']
     main(['visual-train-policy',*common,'--steps','1'])
+    policy_log=list(read_jsonl(tmp_path/'policy/train.jsonl'))
+    assert policy_log[-1]['validation_n']==1 and 'action_accuracy' in policy_log[-1]
     main(['visual-train-policy',*common,'--steps','2','--resume',str(tmp_path/'policy/last.pt')])
     _,ck=load_policy(tmp_path/'policy/last.pt','cpu');assert ck['step']==2
     # Existing initial HTML -> no VLM call, no plan, no target-box extraction.
@@ -201,6 +216,8 @@ def test_visual_data_training_resume_and_preparation(tmp_path,monkeypatch):
           '--val',str(tmp_path/'data/detector-val.jsonl'),'--out',str(tmp_path/'detector'),
           '--device','cpu','--cpu-threads','2','--steps','1','--batch-size','1','--accumulation','1',
           '--val-samples','1','--min-size','64','--max-size','96','--max-detections','8','--no-pretrained'])
+    detector_log=list(read_jsonl(tmp_path/'detector/train.jsonl'))
+    assert 'detector_recall_iou50' in detector_log[-1] and 'validation_components' in detector_log[-1]
     for split in ('train','val'):
         main(['visual-cache-targets','--data',str(tmp_path/f'data/policy-{split}.jsonl'),
               '--checkpoint',str(tmp_path/'detector/best.pt'),'--out',str(tmp_path/f'cached-{split}'),
@@ -224,3 +241,31 @@ def test_visual_data_training_resume_and_preparation(tmp_path,monkeypatch):
     main(['web-evaluate','--data',str(tmp_path/'comparison/results.jsonl'),
           '--out',str(tmp_path/'evaluation')])
     assert (tmp_path/'evaluation/report.md').exists()
+
+
+def test_publication_figures_from_persisted_metrics(tmp_path):
+    pytest.importorskip('matplotlib')
+    from framediff.cli import main
+    run=tmp_path/'run'
+    detector=[{'step':50,'loss':2.},
+              {'step':50,'validation_loss':1.5,'best':1.5,'detector_precision_iou50':.6,
+               'detector_recall_iou50':.5,'detector_small_recall_iou50':.3}]
+    policy=[{'step':50,'loss':4.},
+            {'step':50,'validation_loss':3.5,'best':3.5,'action_accuracy':.4,'node_accuracy':.7,
+             'property_accuracy':.6,'value_accuracy':.5,
+             'per_property':{'width':{'n':3,'accuracy':2/3}}}]
+    write_jsonl(run/'detector/train.jsonl',detector)
+    for stage in ('raw-stage1','policy-raw','abstract-stage1','policy-abstract'):
+        write_jsonl(run/f'{stage}/train.jsonl',policy)
+    evaluation=tmp_path/'evaluation';trace=evaluation/'pages/page-1/abstract-policy-r1-trace.json'
+    trace.parent.mkdir(parents=True)
+    trace.write_text(json.dumps({'history':[
+        {'step':0,'diagnostic_metrics':{'box_iou':.4,'relation_accuracy':.7}},
+        {'step':1,'diagnostic_metrics':{'box_iou':.6,'relation_accuracy':.8}}]}))
+    out=tmp_path/'figures'
+    main(['visual-figures','--run-root',str(run),'--evaluation',str(evaluation),'--out',str(out)])
+    for name in ('training-curves','action-accuracy','per-property-accuracy',
+                 'detector-validation','denoising-trajectory'):
+        assert (out/f'{name}.png').stat().st_size>0
+        assert (out/f'{name}.pdf').stat().st_size>0
+    assert json.loads((out/'trajectory-summary.json').read_text())['abstract-policy']['1']['box_iou']==.6

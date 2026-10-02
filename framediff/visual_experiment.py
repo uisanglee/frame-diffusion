@@ -12,6 +12,7 @@ import torch
 from .html_bridge import HtmlBrowser
 from .html_feedback import refresh_geometry
 from .ir import read_jsonl,write_json,write_jsonl
+from .metrics import box_metrics
 from .train import select_device
 from .visual import (CONTRACT,ACTION_CONTRACT,abstract_image,elements,image_tensor,
                      current_features,visual_batch,decode_action,load_policy)
@@ -24,7 +25,7 @@ def sync(device):
 
 
 def rollout(browser,html,tree,viewport,target_path,policy,parser=None,threshold=.4,
-            steps=10,time_budget=0,oracle_elements=None):
+            steps=10,time_budget=0,oracle_elements=None,diagnostic_target_boxes=None):
     """Only the explicitly enabled oracle ablation accepts target elements.
 
     Greedy actions (including STOP), no box/pixel oracle ranking, no hidden
@@ -74,7 +75,8 @@ def rollout(browser,html,tree,viewport,target_path,policy,parser=None,threshold=
             logits=policy.decode(batch,target_tokens,current_tokens,current_map)[0]
             action=decode_action(int(logits.argmax()),len(current_tree['nodes']))
         sync(device);stats['policy_seconds']+=time.perf_counter()-t
-        stats['history'].append({'step':step,'action':action,'boxes':boxes,'elapsed_seconds':time.perf_counter()-start})
+        history={'step':step,'action':action,'boxes':boxes,'elapsed_seconds':time.perf_counter()-start}
+        stats['history'].append(history)
         if action is None:stats['stop_reason']='policy_stop';break
         if time_budget and time.perf_counter()-start>=time_budget:stats['stop_reason']='time_budget';break
         i,field,delta=action;t=time.perf_counter()
@@ -83,6 +85,16 @@ def rollout(browser,html,tree,viewport,target_path,policy,parser=None,threshold=
     sync(device);stats['seconds']=time.perf_counter()-start
     stats['browser_executions']=browser.executions-before;stats['browser_screenshots']=browser.screenshots-shots
     stats['time_budget_overshoot']=max(0.,stats['seconds']-time_budget) if time_budget else 0.
+    # Diagnostic work runs after the repair timer and cannot affect time-budget decisions.
+    diagnostic_start=time.perf_counter()
+    if diagnostic_target_boxes is not None and stats['actions']==len(stats['history']) and stats['actions']:
+        boxes=browser.tagged_boxes(ids);boxes[root]=[0,0,*viewport]
+        stats['history'].append({'step':len(stats['history']),'action':None,'boxes':boxes,
+            'elapsed_seconds':stats['seconds'],'phase':'final_observation'})
+    if diagnostic_target_boxes is not None:
+        for state in stats['history']:
+            state['diagnostic_metrics']=box_metrics(state['boxes'],diagnostic_target_boxes,viewport,(root,))
+    stats['diagnostic_seconds']=time.perf_counter()-diagnostic_start
     return current_html,stats,target
 
 
@@ -142,7 +154,8 @@ def evaluate(args):
                                 raise ValueError('Oracle ablation only supports visual-build-data controlled pages')
                             oracle=elements(record['current'],record['evaluation_target_boxes'],record['viewport'])
                         html,stats,target=rollout(browser,Path(record['tagged_html']).read_text(),record['current'],
-                            record['viewport'],record['screenshot'],methods[method],parser,args.threshold,args.steps,args.time_budget,oracle)
+                            record['viewport'],record['screenshot'],methods[method],parser,args.threshold,args.steps,args.time_budget,
+                            oracle,record.get('evaluation_target_boxes'))
                     except Exception as exc:error=str(exc)
                     if 'seconds' not in stats:stats['seconds']=time.perf_counter()-started
                     path=work/f'{method}-r{repeat+1}.html';path.write_text(html)

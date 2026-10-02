@@ -27,6 +27,8 @@ train_stage() {
   elif [[ -n "$init" ]]; then checkpoint_options=(--init-checkpoint "$init"); fi
   python -m framediff "$command" --out "$output" --device "$device" \
     --batch-size "${BATCH_SIZE:-2}" --accumulation "${ACCUMULATION:-4}" \
+    --val-samples "${VAL_SAMPLES:-512}" --eval-every "${EVAL_EVERY:-500}" \
+    --early-stop-patience "${EARLY_STOP_PATIENCE:-10}" --early-stop-min-delta "${EARLY_STOP_MIN_DELTA:-0}" \
     "${checkpoint_options[@]}" "$@"
 }
 train_stage visual-train-detector "$run_dir/detector" '' \
