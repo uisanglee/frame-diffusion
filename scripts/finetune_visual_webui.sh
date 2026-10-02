@@ -34,6 +34,12 @@ train_stage() {
   shift 4
   local checkpoint_options=()
   if [[ -f "$output/last.pt" ]]; then checkpoint_options=(--resume "$output/last.pt")
+  elif [[ -f "$output/best.pt" ]]; then checkpoint_options=(--resume "$output/best.pt")
+  elif [[ -d "$output" ]]; then
+    local archive="${output}.incomplete-$(date +%s)"
+    echo "No checkpoint in partial stage; preserving it as $archive"
+    mv "$output" "$archive"
+    if [[ -n "$init" ]]; then checkpoint_options=(--init-checkpoint "$init"); fi
   elif [[ -n "$init" ]]; then checkpoint_options=(--init-checkpoint "$init"); fi
   python -m framediff "$command" --out "$output" --device "$device" \
     --batch-size "${BATCH_SIZE:-2}" --accumulation "${ACCUMULATION:-4}" --lr "$lr" \
