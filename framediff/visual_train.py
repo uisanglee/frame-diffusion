@@ -154,7 +154,7 @@ def train(args):
         if any(r.get('action_contract')!=ACTION_CONTRACT for r in train_rows+val_rows):
             raise ValueError('Policy data uses a legacy action contract; rebuild visual data')
         cfg=asdict(VisualConfig(mode=args.mode,size=args.size,hidden=args.hidden,layers=args.layers,
-                                heads=args.heads,max_nodes=args.max_nodes,token_grid=args.token_grid));kind='visual-policy-v2'
+                                heads=args.heads,max_nodes=args.max_nodes,token_grid=args.token_grid));kind='visual-policy-v3'
     if args.resume and args.init_checkpoint:raise ValueError('Choose resume or init-checkpoint')
     data_signature={'train':digest(args.train),'val':digest(args.val)}
     out=Path(args.out).resolve()

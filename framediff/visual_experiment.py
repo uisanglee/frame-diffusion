@@ -147,7 +147,7 @@ def evaluate(args):
                         if initial['failed']:raise ValueError(initial.get('error') or 'Initial HTML generation failed')
                         if (record.get('visual_contract')!=CONTRACT or
                                 record.get('visual_action_contract')!=ACTION_CONTRACT):
-                            raise ValueError('Run web-prepare --repair-conditioning visual with the v2 action contract')
+                            raise ValueError('Run web-prepare --repair-conditioning visual with the v3 no-padding/gap action contract')
                         oracle=None
                         if method=='abstract-oracle':
                             if not str(record.get('construction','')).startswith('controlled') or 'evaluation_target_boxes' not in record:

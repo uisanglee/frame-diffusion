@@ -68,7 +68,7 @@ def build(args):
     sources=[{**r,'source_sha':digest(r['html'])} for r in sources];validate_splits(sources)
     if len({r['id'] for r in sources})!=len(sources):raise ValueError('Duplicate source IDs')
     out=Path(args.out).resolve()
-    config={'kind':'visual-data-v2','contract':CONTRACT,'action_contract':ACTION_CONTRACT,
+    config={'kind':'visual-data-v3','contract':CONTRACT,'action_contract':ACTION_CONTRACT,
             'sources':sources,'settings':{k:v for k,v in vars(args).items() if k not in ('out','resume')}}
     guard_run(out,config,args.resume)
     policy=[];detection=[];pages=[];errors=[]

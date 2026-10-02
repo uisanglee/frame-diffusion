@@ -109,7 +109,7 @@ class HtmlBrowser(Browser):
         }''', {'id':node_id,'field':field,'delta':delta})
 
     def edit_visual_action(self, html, viewport, node_id, field, value, return_inverse=False):
-        """Apply one v2 structured action under the normalized size contract.
+        """Apply one v3 structured action under the normalized size contract.
 
         Numeric values are viewport-axis fractions, never raw pixels. Categorical
         values replace one grammar-constrained flex declaration. The returned
@@ -137,10 +137,7 @@ class HtmlBrowser(Browser):
               ['padding-top','padding-bottom','border-top-width','border-bottom-width'];
             const inset=s.boxSizing==='border-box'?0:edges.reduce((a,k)=>a+num(k),0);
             current=(horizontal?r.width:r.height)-inset;minimum=0;
-          }else{
-            current=num(field);
-            if(field.startsWith('padding-')||field.endsWith('-gap'))minimum=0;
-          }
+          }else{current=num(field)}
           e.style.setProperty(field,`${Math.max(minimum,current+delta)}px`,'important');return null;
         }''', {'id':node_id,'field':field,'value':value,'delta':delta,'numeric':numeric})
         if not return_inverse:return None

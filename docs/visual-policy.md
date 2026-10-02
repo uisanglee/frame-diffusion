@@ -2,7 +2,7 @@
 
 이 경로는 **고정 계획/목표 좌표 residual 없이 이미지로 action을 예측**한다.
 기존 box/plan 체크포인트와 호환되지 않으며 새로 학습해야 한다.
-반복 역편집(denoising) 정책이며 Gaussian DDPM은 아니다. v2 action contract는 한 step을
+반복 역편집(denoising) 정책이며 Gaussian DDPM은 아니다. v3 action contract는 한 step을
 하나의 문법적으로 허용된 CSS declaration 변경으로 제한하는 discrete structured diffusion이다.
 
 ## 모델과 입력
@@ -14,8 +14,9 @@
    spatial tokens, 현재 DOM ROIAlign, target/current cross-attention, tree attention.
    이미지 픽셀과 현재 DOM 구조·속성·box를 입력한다. 목표 box/정답 HTML/계획은 입력하지 않는다.
 3. 행동: node 선택 + CSS declaration 하나의 변경 또는 STOP. 수치 변화는 해당 viewport 축의
-   ±0.3125/0.625/1.25/2.5/5%로 제한한다. 지원 grammar는 width/height, 4방향 margin과 padding,
-   row/column gap, flex-direction, justify-content, align-items다. 실제 CSS 재실행 후 줄바꿈·자동
+   ±0.3125/0.625/1.25/2.5/5%로 제한한다. 지원 grammar는 width/height, 4방향 margin,
+   flex-direction, justify-content, align-items다. padding과 row/column gap은 v3에서 제거했다.
+   node당 action은 81개이며 별도 STOP 하나가 있다. 실제 CSS 재실행 후 줄바꿈·자동
    높이·형제 이동을 다음 스텝에 반영한다.
 
 모든 action에 `sigma_decl(a)=변경 declaration 수=1`을 적용한다. 수치형에는 추가로
@@ -63,7 +64,7 @@ CLI 옵션은 `--early-stop-patience`, `--early-stop-min-delta`이며, patience=
 이 옵션들도 resume 설정 검사 대상이다. 기능 추가 전 run이나 다른 patience 설정을 사용하려면
 새 output에서 `--init-checkpoint`로 가중치를 이관한다(optimizer와 patience는 새로 시작).
 같은 명령을 재실행하면 데이터 캐시 및 각 단계 last checkpoint에서 재개한다.
-데이터·설정이 바뀌면 새 output 디렉터리를 사용한다. v1 width/height/dx/dy 데이터는 v2 action
+데이터·설정이 바뀌면 새 output 디렉터리를 사용한다. v1/v2 데이터와 체크포인트는 v3 action
 grammar와 호환되지 않으므로 반드시 새 data/run 디렉터리에서 다시 생성·학습한다. v1 policy를
 `--init-checkpoint`로 지정하면 vision/tree/transformer 가중치만 이관하고 확장 action head는 새로 초기화한다.
 
@@ -93,7 +94,7 @@ DETECTOR_STEPS, POLICY_STAGE1_STEPS, POLICY_STAGE2_STEPS, RAW_SIZE, ABS_SIZE, PR
 CUDA_VISIBLE_DEVICES=1 BATCH_SIZE=2 ACCUMULATION=4 \
 WEBUI_TRAIN=6000 WEBUI_VAL=2000 WEBUI_TEST=2000 \
 VAL_SAMPLES=2000 REPEATS=3 REPAIR_STEPS=20 \
-bash scripts/run_visual_full.sh data/raw/webui/test webui-10k-v2
+bash scripts/run_visual_full.sh data/raw/webui/test webui-10k-v3-nospacing
 ```
 
 이 스크립트는 procedural 1,000페이지 생성(800 train/100 val/100 test), detector 10,000 steps,
@@ -104,15 +105,15 @@ fine-tuning은 `FT_DETECTOR_STEPS`, `FT_POLICY_STAGE1_STEPS`, `FT_POLICY_STAGE2_
 
 먼저 WebUI에 요청한 수만큼 중복 제거·host 분리 가능한 HTML이 있는지 확인한다. 전체 screenshot
 파일 수만으로 6,000/2,000/2,000 분할 가능 여부를 보장할 수 없다. 분할 후 생성 실패 페이지는
-제외하므로 `data/webui-10k-v2-webui/rendered/report.json`의 `split_coverage`에서 선택 수,
+제외하므로 `data/webui-10k-v3-nospacing-webui/rendered/report.json`의 `split_coverage`에서 선택 수,
 실제 사용 수, 제외 수를 확인한다. 선택한 test 2,000개 중 사용 가능한 **모든** 페이지를 평가하고,
 누락을 감추거나 실패 페이지를 다른 split에서 보충하지 않는다. 실제 2,000개의 유효 평가 페이지가
 필요하다면 먼저 데이터 생성 성공률을 확인하고 별도 분할 설계를 정해야 한다.
 
 테스트는 저장된 손상 HTML과 재렌더링한 목표 화면을 쓰는 controlled 복구 실험이다.
 원본 WebUI screenshot에서 VLM이 HTML을 생성하는 end-to-end 평가는 별도다.
-결과는 `runs/webui-10k-v2-test/evaluation/report.md`, figure는
-`runs/webui-10k-v2-webui/figures`에 저장한다. repeats=3이면 n은 실제 페이지 수의 3배다.
+결과는 `runs/webui-10k-v3-nospacing-test/evaluation/report.md`, figure는
+`runs/webui-10k-v3-nospacing-webui/figures`에 저장한다. repeats=3이면 n은 실제 페이지 수의 3배다.
 
 학습 스크립트의 validation 기본값은 고정된 512개 **중간 상태 예제**다. 페이지를 순회해 샘플링하므로
 앞쪽 페이지에만 치우치지 않으며 `validation_pages`에 실제 페이지 수를 기록한다.
@@ -232,12 +233,12 @@ accuracy와 시간을 함께 보고해야 한다.
 
 ## 논문용 학습 figure
 
-새로 시작한 v2 run은 각 stage의 `train.jsonl`에 train/validation loss와 함께 다음 검증 지표를
+새로 시작한 v3 run은 각 stage의 `train.jsonl`에 train/validation loss와 함께 다음 검증 지표를
 영구 저장한다.
 
 - detector: loss component, class-aware precision/recall@IoU 0.5, 32×32 미만 small-element recall
 - policy: full action, node, CSS property, value 및 STOP 정확도
-- policy: width/height/margin/padding/gap/flex/justify/align별 정확도와 표본 수
+- policy: width/height/margin/flex/justify/align별 정확도와 표본 수
 - controlled rollout: step별 geometry IoU와 relation accuracy. 이 정답 지표는 action 선택에는
   사용하지 않고 figure를 위한 사후 진단에만 사용한다.
 
@@ -245,9 +246,9 @@ accuracy와 시간을 함께 보고해야 한다.
 
 ```bash
 python -m framediff visual-figures \
-  --run-root runs/visual-webui-v2 \
-  --evaluation runs/eval-webui-controlled-v2/repair \
-  --out runs/visual-webui-v2/figures
+  --run-root runs/visual-webui-v3-nospacing \
+  --evaluation runs/eval-webui-controlled-v3-nospacing/repair \
+  --out runs/visual-webui-v3-nospacing/figures
 ```
 
 생성물은 `training-curves`, `detector-validation`, `action-accuracy`,

@@ -17,7 +17,7 @@ from .ir import FIELDS, ROLES
 from .model import encode, collate, Block, ModelConfig
 
 CONTRACT = 'visible-ui-v1'
-ACTION_CONTRACT = 'single-css-declaration-normalized-v2'
+ACTION_CONTRACT = 'single-css-declaration-normalized-v3-no-padding-gap'
 CLASSES = ('background', 'text', 'image', 'control', 'painted-region')
 COLORS = ('white', '#2864b4', '#26946c', '#df7832', '#b49ac7')
 MAX_ACTION_FRACTION = .05
@@ -26,9 +26,7 @@ MAX_ACTION_FRACTION = .05
 NORMALIZED_DELTAS = (-.05, -.025, -.0125, -.00625, -.003125,
                        .003125, .00625, .0125, .025, .05)
 NUMERIC_FIELDS = ('width','height',
-                  'margin-left','margin-right','margin-top','margin-bottom',
-                  'padding-left','padding-right','padding-top','padding-bottom',
-                  'column-gap','row-gap')
+                  'margin-left','margin-right','margin-top','margin-bottom')
 CATEGORICAL_VALUES = {
     'flex-direction': ('row','row-reverse','column','column-reverse'),
     'justify-content': ('normal','flex-start','center','flex-end','space-between','space-around','space-evenly','start','end'),
@@ -43,15 +41,15 @@ ACTIONS = len(ACTION_SPECS)
 
 def action_axis(field):
     """Viewport axis used to turn a normalized numeric action into CSS pixels."""
-    if field in ('width','margin-left','margin-right','padding-left','padding-right','column-gap'):
+    if field in ('width','margin-left','margin-right'):
         return 0
-    if field in ('height','margin-top','margin-bottom','padding-top','padding-bottom','row-gap'):
+    if field in ('height','margin-top','margin-bottom'):
         return 1
     return None
 
 
 def validate_action(edit, viewport=None):
-    """Validate the v2 action-size contract: one declaration per action.
+    """Validate the v3 no-padding/gap action contract: one declaration per action.
 
     Numeric mutations are bounded by MAX_ACTION_FRACTION of one viewport axis;
     categorical mutations replace one value from a finite grammar.
@@ -88,8 +86,7 @@ def candidate_fields(tree, index):
     has_children=any(n.get('parent')==node_id for n in tree['nodes'])
     base=('width','height','margin-left','margin-right','margin-top','margin-bottom')
     if not has_children:return base
-    return base+('padding-left','padding-right','padding-top','padding-bottom',
-                 'column-gap','row-gap','flex-direction','justify-content','align-items')
+    return base+('flex-direction','justify-content','align-items')
 
 
 def annotate(browser, tree):
@@ -283,6 +280,6 @@ def decode_action(index,n):
 
 def load_policy(path,device):
     checkpoint=torch.load(path,map_location='cpu',weights_only=True)
-    if checkpoint.get('kind')!='visual-policy-v2':raise ValueError('Requires a v2 structured-action visual policy checkpoint; retrain legacy policies')
+    if checkpoint.get('kind')!='visual-policy-v3':raise ValueError('Requires a v3 no-padding/gap visual policy checkpoint; retrain legacy policies')
     model=VisualPolicy(VisualConfig(**checkpoint['config']),pretrained=False)
     model.load_state_dict(checkpoint['model']);return model.to(device).eval(),checkpoint

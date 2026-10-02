@@ -69,11 +69,13 @@ def test_abstraction_is_id_free_and_spatial():
 
 
 def test_structured_action_contract_is_single_and_normalized():
-    assert validate_action((1,'padding-left',.05))==(1,'padding-left',.05)
+    assert validate_action((1,'margin-left',.05))==(1,'margin-left',.05)
     assert validate_action((1,'justify-content','space-between'))==(1,'justify-content','space-between')
-    assert action_size((1,'padding-left',.05))=={'declarations':1,'normalized_magnitude':.05}
+    assert action_size((1,'margin-left',.05))=={'declarations':1,'normalized_magnitude':.05}
     assert action_size((1,'align-items','center'))=={'declarations':1,'normalized_magnitude':None}
-    with pytest.raises(ValueError,match='grammar'):validate_action((1,'padding-left',.1))
+    assert ACTIONS==81
+    with pytest.raises(ValueError,match='grammar'):validate_action((1,'padding-left',.05))
+    with pytest.raises(ValueError,match='grammar'):validate_action((1,'column-gap',.05))
     with pytest.raises(ValueError,match='grammar'):validate_action((1,'unknown',.01))
 
 
@@ -87,10 +89,10 @@ def test_structured_actions_apply_normalized_reflow():
     with HtmlBrowser() as browser:
         dom=browser.snapshot(html,viewport,max_nodes=16);base=dom['html']
         ids=browser.page.evaluate("()=>Object.fromEntries(['row','a','b'].map(id=>[id,document.getElementById(id).getAttribute('data-fd-id')]))")
-        browser.edit_visual_action(base,viewport,ids['row'],'column-gap',.05)
+        browser.edit_visual_action(base,viewport,ids['b'],'margin-left',.05)
         gap=browser.page.locator('#b').bounding_box()['x']-browser.page.locator('#a').bounding_box()['x']-40
         assert gap==pytest.approx(20,abs=.1)
-        browser.edit_visual_action(base,viewport,ids['row'],'padding-left',.05)
+        browser.edit_visual_action(base,viewport,ids['a'],'margin-left',.05)
         assert browser.page.locator('#a').bounding_box()['x']==pytest.approx(20,abs=.1)
         inverse=browser.edit_visual_action(base,viewport,ids['row'],'flex-direction','column',return_inverse=True)
         assert inverse==('flex-direction','row')
@@ -114,7 +116,7 @@ def test_pixels_drive_policy_and_receive_gradients(tmp_path):
         before=net(batch,target,current);after=net(batch,torch.zeros_like(target),current)
     valid=torch.isfinite(before)
     assert not torch.allclose(before[valid],after[valid])
-    path=tmp_path/'visual.pt';torch.save({'kind':'visual-policy-v2','config':asdict(cfg),'model':net.state_dict()},path)
+    path=tmp_path/'visual.pt';torch.save({'kind':'visual-policy-v3','config':asdict(cfg),'model':net.state_dict()},path)
     restored,_=load_policy(path,'cpu')
     with torch.no_grad():assert torch.allclose(before,restored(batch,target,current))
 
