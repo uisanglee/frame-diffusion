@@ -99,6 +99,20 @@ def test_structured_actions_apply_normalized_reflow():
         assert browser.page.locator('#b').bounding_box()['y']>browser.page.locator('#a').bounding_box()['y']
 
 
+@pytest.mark.browser
+def test_html_browser_recovers_context_and_disables_meta_refresh(tmp_path):
+    from framediff.html_bridge import HtmlBrowser
+    target=tmp_path/'page.png'
+    html='''<html><head><meta http-equiv="refresh" content="0; url=https://invalid.example"></head>
+    <body><button>safe</button></body></html>'''
+    with HtmlBrowser() as browser:
+        first=browser.snapshot(html,[160,100],target,max_nodes=8)
+        assert any(n['role']=='button' for n in first['nodes'])
+        browser.page.close();browser.reset_context()
+        second=browser.snapshot('<html><body><p>again</p></body></html>',[160,100],max_nodes=8)
+        assert any(n['role']=='p' for n in second['nodes'])
+
+
 def test_pixels_drive_policy_and_receive_gradients(tmp_path):
     torch.set_num_threads(2);torch.manual_seed(17)
     tree,boxes=fixture_tree();cfg=VisualConfig(size=64,hidden=16,layers=1,heads=2,token_grid=3,max_nodes=16)

@@ -25,6 +25,10 @@ def embed_placeholder(html, path=None):
 
 class HtmlBrowser(Browser):
     def load(self, html, viewport):
+        # Meta refresh can navigate the main frame while set_content/evaluate is
+        # running. Dataset HTML is an untrusted static snapshot, so disable it.
+        html=re.sub(r'<meta\b[^>]*http-equiv\s*=\s*["\']?\s*refresh\s*["\']?[^>]*>',
+                    '',html,flags=re.I)
         self.page.set_viewport_size({'width': int(viewport[0]), 'height': int(viewport[1])})
         self.page.set_content(html, wait_until='load', timeout=30000)
         self.executions += 1

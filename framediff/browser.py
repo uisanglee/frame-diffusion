@@ -11,12 +11,24 @@ class Browser:
         try:self.browser=self.pw.chromium.launch(headless=True)
         except Exception:
             self.pw.stop();raise
+        self._new_context()
+        return self
+    def _new_context(self):
         self.context=self.browser.new_context(java_script_enabled=False)
         self.context.route('**/*',lambda route:route.abort())
         self.page=self.context.new_page()
-        return self
+    def reset_context(self):
+        """Isolate untrusted pages and recover after a renderer/page crash."""
+        try:self.context.close()
+        except Exception:pass
+        if not self.browser.is_connected():
+            try:self.browser.close()
+            except Exception:pass
+            self.browser=self.pw.chromium.launch(headless=True)
+        self._new_context()
     def __exit__(self,*args):
-        self.browser.close();self.pw.stop()
+        try:self.browser.close()
+        finally:self.pw.stop()
     def render(self,tree,viewport,screenshot=None):
         self.page.set_viewport_size({'width':viewport[0],'height':viewport[1]})
         self.page.set_content(compile_html(tree,viewport),wait_until='load')

@@ -81,6 +81,9 @@ def build(args):
                 saved=read_json(cache);policy+=saved['policy'];detection+=saved['detection'];pages.append(saved['page']);continue
             rng=random.Random(args.seed+index);local_policy=[];local_detection=[]
             try:
+                # A renderer crash must affect at most one source page. A fresh
+                # context also bounds memory retained by large real-world DOMs.
+                browser.reset_context()
                 viewport=source.get('viewport',[1280,800]);raw=Path(source['html']).read_text()
                 asset=Path(source['html']).parent/'rick.jpg'
                 if asset.exists():raw=embed_placeholder(raw,asset)
