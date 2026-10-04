@@ -12,7 +12,7 @@ import torch
 
 from framediff.ir import node,write_jsonl,read_jsonl
 from framediff.visual import (CONTRACT,ACTION_CONTRACT,VisualConfig,VisualPolicy,abstract_image,elements,current_features,
-    visual_batch,action_index,ACTIONS,load_policy,validate_action,action_size)
+    visual_batch,action_index,ACTIONS,load_policy,validate_action,action_size,action_is_legal)
 
 
 def test_webui_visual_import_domain_split_and_native_labels(tmp_path):
@@ -77,6 +77,29 @@ def test_structured_action_contract_is_single_and_normalized():
     with pytest.raises(ValueError,match='grammar'):validate_action((1,'padding-left',.05))
     with pytest.raises(ValueError,match='grammar'):validate_action((1,'column-gap',.05))
     with pytest.raises(ValueError,match='grammar'):validate_action((1,'unknown',.01))
+
+
+def test_teacher_action_legality_matches_policy_mask():
+    tree,boxes=fixture_tree();viewport=[320,240]
+    assert action_is_legal(tree,boxes,viewport,(1,'width',-.05))
+    tiny={**boxes,'card':[16,20,4,30]}
+    assert not action_is_legal(tree,tiny,viewport,(1,'width',-.05))
+    assert action_is_legal(tree,tiny,viewport,(1,'width',.05))
+    feature=current_features(tree,tiny,viewport,16)
+    invalid=action_index((1,'width',-.05),len(tree['nodes']))
+    assert not feature['action_legal'].flatten()[invalid]
+
+
+def test_policy_legality_filter_reports_bad_teacher_rows():
+    from framediff.visual_train import filter_legal_policy_rows
+    tree,boxes=fixture_tree();base={'current':tree,'current_boxes':boxes,'viewport':[320,240]}
+    rows=[{**base,'id':'clean','teacher_edits':[]},
+          {**base,'id':'valid','teacher_edits':[[1,'width',.05]]},
+          {**base,'id':'invalid','current_boxes':{**boxes,'card':[16,20,4,30]},
+           'teacher_edits':[[1,'width',-.05]]}]
+    kept,rejected=filter_legal_policy_rows(rows)
+    assert [r['id'] for r in kept]==['clean','valid']
+    assert rejected==[{'id':'invalid','edits':[[1,'width',-.05]]}]
 
 
 @pytest.mark.browser

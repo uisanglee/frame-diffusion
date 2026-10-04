@@ -11,7 +11,7 @@ from .ir import read_jsonl,write_json,write_jsonl
 from .html_bridge import HtmlBrowser,embed_placeholder
 from .html_feedback import refresh_geometry
 from .plans import dom_tree
-from .visual import (CONTRACT,ACTION_CONTRACT,ACTION_VALUES,candidate_fields,
+from .visual import (CONTRACT,ACTION_CONTRACT,ACTION_VALUES,candidate_fields,action_is_legal,
                      annotate,elements,abstract_image)
 from .web_experiment import guard_run,digest
 
@@ -141,11 +141,18 @@ def build(args):
                             except ValueError:continue
                             candidate_html=browser.page.content();candidate=observe()
                             if distance(candidate)<=distance(boxes)+1e-7:continue
+                            # CSS constraints and reflow can make the nominal
+                            # inverse invalid for the actually rendered box
+                            # (notably a negative width/height edit on a tiny
+                            # element). Never persist supervision that the
+                            # policy's legal-action mask will reject.
+                            teacher=[i,*inverse]
+                            if not action_is_legal(tree,candidate,viewport,teacher):continue
                             # Verify the inverse pixel action in the real browser.
                             browser.edit_visual_action(candidate_html,viewport,nid,*inverse);restored=observe()
                             if max(abs(restored[k][a]-boxes[k][a]) for k in ids for a in range(4))>.15:continue
                             browser.load(candidate_html,viewport)
-                            save_example(f't{trajectory}-s{step}',candidate_html,candidate,[i,*inverse])
+                            save_example(f't{trajectory}-s{step}',candidate_html,candidate,teacher)
                             html,boxes=candidate_html,candidate;used.add((i,field));accepted=True
                             last_corrupted=local_policy[-1];break
                         if not accepted:break

@@ -89,6 +89,27 @@ def candidate_fields(tree, index):
     return base+('flex-direction','justify-content','align-items')
 
 
+def action_is_legal(tree, boxes, viewport, edit):
+    """Return whether an edit is executable under the policy action mask.
+
+    This is deliberately shared by data construction and model input creation so
+    a stored teacher action can never disagree with the mask used for training.
+    """
+    try:
+        index,field,value=validate_action(edit,viewport)
+    except (TypeError,ValueError):
+        return False
+    if index>=len(tree['nodes']) or field not in candidate_fields(tree,index):return False
+    node_id=tree['nodes'][index]['id']
+    if node_id not in boxes:return False
+    box=boxes[node_id]
+    if len(box)!=4 or not all(math.isfinite(float(v)) for v in box):return False
+    if field in ('width','height'):
+        axis=0 if field=='width' else 1
+        if box[axis+2]+action_delta_px(field,value,viewport)<=0:return False
+    return True
+
+
 def annotate(browser, tree):
     """Visible primitives and painted regions, never invisible DOM wrappers.
 
@@ -160,11 +181,8 @@ def current_features(tree, boxes, viewport, max_nodes):
     for i,n in enumerate(tree['nodes'][1:],1):
         for field in candidate_fields(tree,i):
             for value in ACTION_VALUES[field]:
-                allowed=True
-                if field in ('width','height'):
-                    axis=0 if field=='width' else 1
-                    allowed=boxes[n['id']][axis+2]+action_delta_px(field,value,viewport)>0
-                if allowed:legal[i,ACTION_TO_INDEX[(field,value)]]=True
+                if action_is_legal(tree,boxes,viewport,(i,field,value)):
+                    legal[i,ACTION_TO_INDEX[(field,value)]]=True
     feature['action_legal']=legal
     return feature
 

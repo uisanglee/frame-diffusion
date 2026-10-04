@@ -14,7 +14,8 @@ import torch.nn.functional as F
 from .ir import read_jsonl,write_json,write_jsonl
 from .train import select_device,seed_all
 from .visual import (CONTRACT,ACTION_CONTRACT,CLASSES,VisualConfig,VisualPolicy,
-                     current_features,visual_batch,image_tensor,action_index,decode_action,abstract_image)
+                     current_features,visual_batch,image_tensor,action_index,decode_action,abstract_image,
+                     action_is_legal)
 from .visual_data import validate_splits
 from .web_experiment import digest,guard_run
 
@@ -75,7 +76,12 @@ def policy_batch(net,rows,device,rng,prediction_probability):
     logp=F.log_softmax(logits,dim=-1);n=batch['mask'].shape[1];losses=[];labels=[]
     for i,row in enumerate(rows):
         valid=[action_index(e,n) for e in row['teacher_edits']] or [action_index(None,n)]
-        if not torch.isfinite(logits[i,valid]).all():raise ValueError('Illegal training edit')
+        illegal=[e for e in row['teacher_edits'] if not action_is_legal(
+            row['current'],row['current_boxes'],row['viewport'],e)]
+        if illegal:raise ValueError(f'Illegal teacher edit: row={row.get("id")} edits={illegal}')
+        if not torch.isfinite(logits[i,valid]).all():
+            values=logits[i,valid].detach().float().cpu().tolist()
+            raise RuntimeError(f'Non-finite policy logits: row={row.get("id")} target_logits={values}')
         losses.append(-torch.logsumexp(logp[i,valid],0));labels.append(valid)
     return torch.stack(losses).mean(),logits,labels,n
 
@@ -146,6 +152,15 @@ def train(args):
     if any(r.get('contract')!=CONTRACT for r in train_rows+val_rows):raise ValueError('Dataset contract mismatch')
     if not 0<=args.prediction_probability<=1:raise ValueError('Prediction probability must be in [0,1]')
     is_detector=args.command=='visual-train-detector'
+    legality_report=None
+    if not is_detector:
+        train_rows,train_rejected=filter_legal_policy_rows(train_rows)
+        val_rows,val_rejected=filter_legal_policy_rows(val_rows)
+        legality_report={'train_rejected':len(train_rejected),'val_rejected':len(val_rejected),
+                         'train_examples':train_rejected[:10],'val_examples':val_rejected[:10]}
+        if train_rejected or val_rejected:
+            print({'policy_legality_filter':legality_report},flush=True)
+        if not train_rows or not val_rows:raise ValueError('No legal policy train/validation rows remain')
     if is_detector:
         cfg={'contract':CONTRACT,'min_size':args.min_size,'max_size':args.max_size,'max_detections':args.max_detections}
         if cfg['min_size']<32 or cfg['max_size']<cfg['min_size'] or cfg['max_detections']<1:raise ValueError('Invalid detector dimensions')
@@ -211,6 +226,7 @@ def train(args):
         if device.startswith('cuda') and ck.get('cuda_rng'):torch.cuda.set_rng_state_all(ck['cuda_rng'])
         early=ck.get('early_stopping',{'reference_loss':best,'bad_validations':0,'stopped':False})
     write_json(out/'manifest.json',{'kind':kind,'config':cfg,'settings':vars(args),'data':data_signature,
+        'policy_legality_filter':legality_report,
         'parameters':sum(p.numel() for p in net.parameters()),'pretrained_backbone':not args.no_pretrained,
         'torch':str(torch.__version__)})
     def amp():return torch.autocast('cuda',dtype=torch.bfloat16) if device.startswith('cuda') and args.bf16 and not is_detector else contextlib.nullcontext()
@@ -288,6 +304,22 @@ def update_early_stopping(state,validation,patience,min_delta):
 def math_isfinite(value):
     import math
     return math.isfinite(value)
+
+
+def filter_legal_policy_rows(rows):
+    """Drop only examples whose teacher edit contradicts the action grammar/mask.
+
+    Existing rendered corpora can therefore be reused after this invariant was
+    tightened. Clean STOP rows remain valid. Rejected IDs and edits are returned
+    for an explicit, auditable training manifest.
+    """
+    kept=[];rejected=[]
+    for row in rows:
+        illegal=[edit for edit in row.get('teacher_edits',[]) if not action_is_legal(
+            row['current'],row['current_boxes'],row['viewport'],edit)]
+        if illegal:rejected.append({'id':row.get('id'),'edits':illegal})
+        else:kept.append(row)
+    return kept,rejected
 
 
 def validation_sample(rows,limit,seed=90210):
