@@ -15,6 +15,10 @@ raw_size=${RAW_SIZE:-384}
 from_procedural=${FINETUNE_FROM_PROCEDURAL:-1}
 detector_source=${DETECTOR_SOURCE:-rendered}
 reuse_detector=${REUSE_DETECTOR:-0}
+reuse_rendered=${REUSE_RENDERED_DATA:-0}
+freeze_existing_detector=${FREEZE_EXISTING_DETECTOR:-0}
+refresh_target_cache=${REFRESH_TARGET_CACHE:-0}
+restart_policies=${RESTART_POLICIES:-0}
 if [[ "$from_procedural" != 0 && "$from_procedural" != 1 ]]; then
   echo 'FINETUNE_FROM_PROCEDURAL must be 0 or 1' >&2; exit 2
 fi
@@ -24,14 +28,35 @@ fi
 if [[ "$reuse_detector" != 0 && "$reuse_detector" != 1 ]]; then
   echo 'REUSE_DETECTOR must be 0 or 1' >&2; exit 2
 fi
+for pair in "REUSE_RENDERED_DATA:$reuse_rendered" \
+            "FREEZE_EXISTING_DETECTOR:$freeze_existing_detector" \
+            "REFRESH_TARGET_CACHE:$refresh_target_cache" \
+            "RESTART_POLICIES:$restart_policies"; do
+  name=${pair%%:*}; value=${pair#*:}
+  if [[ "$value" != 0 && "$value" != 1 ]]; then echo "$name must be 0 or 1" >&2; exit 2; fi
+done
+if [[ "$reuse_detector" == 1 && "$freeze_existing_detector" == 1 ]]; then
+  echo 'Choose REUSE_DETECTOR or FREEZE_EXISTING_DETECTOR, not both' >&2; exit 2
+fi
 
 python -m framediff visual-import-webui --root "$webui_root" --out "$data_dir/source" \
   --view "${WEBUI_VIEW:-default_1280-720}" --train-count "${WEBUI_TRAIN:-600}" \
   --val-count "${WEBUI_VAL:-200}" --test-count "${WEBUI_TEST:-200}" --seed "${SEED:-42}" --resume
 
-python -m framediff visual-build-data --manifest "$data_dir/source/manifest.jsonl" --out "$data_dir/rendered" \
-  --abstract-size "$abs_size" --trajectories "${TRAJECTORIES:-3}" --max-noise "${MAX_NOISE:-4}" \
-  --min-elements "${MIN_ELEMENTS:-3}" --max-source-mae "${MAX_SOURCE_MAE:-1.0}" --resume
+if [[ "$reuse_rendered" == 1 ]]; then
+  for required in detector-train.jsonl detector-val.jsonl detector-test.jsonl \
+                  policy-train.jsonl policy-val.jsonl pages-test.jsonl; do
+    if [[ ! -s "$data_dir/rendered/$required" ]]; then
+      echo "REUSE_RENDERED_DATA=1 but missing/nonempty file required: $data_dir/rendered/$required" >&2
+      exit 2
+    fi
+  done
+  echo "Reusing frozen rendered dataset: $data_dir/rendered"
+else
+  python -m framediff visual-build-data --manifest "$data_dir/source/manifest.jsonl" --out "$data_dir/rendered" \
+    --abstract-size "$abs_size" --trajectories "${TRAJECTORIES:-3}" --max-noise "${MAX_NOISE:-4}" \
+    --min-elements "${MIN_ELEMENTS:-3}" --max-source-mae "${MAX_SOURCE_MAE:-1.0}" --resume
+fi
 
 train_stage() {
   local command=$1 output=$2 init=$3 lr=$4
@@ -74,7 +99,12 @@ if [[ "$from_procedural" == 1 ]]; then
   done
 fi
 
-if [[ "$reuse_detector" == 1 ]]; then
+if [[ "$freeze_existing_detector" == 1 ]]; then
+  if [[ ! -f "$run_dir/detector/best.pt" ]]; then
+    echo "FREEZE_EXISTING_DETECTOR=1 requires $run_dir/detector/best.pt" >&2; exit 2
+  fi
+  echo "Reused existing frozen WebUI detector: $run_dir/detector/best.pt"
+elif [[ "$reuse_detector" == 1 ]]; then
   if [[ -z "$detector_init" || ! -f "$detector_init" ]]; then
     echo 'REUSE_DETECTOR=1 requires FINETUNE_FROM_PROCEDURAL=1 and a base detector checkpoint' >&2; exit 2
   fi
@@ -88,12 +118,34 @@ fi
 python -m framediff visual-evaluate-detector --data "$detector_test" \
   --checkpoint "$run_dir/detector/best.pt" --out "$run_dir/detector-test.json" --device "$device"
 
+if [[ "$refresh_target_cache" == 1 ]]; then
+  cache_archive_stamp=$(date +%s)
+  for split in train val; do
+    cache_dir="$data_dir/predicted-$split"
+    if [[ -d "$cache_dir" ]]; then
+      archive="$cache_dir.stale-$cache_archive_stamp"
+      echo "Preserving stale target cache as $archive"
+      mv "$cache_dir" "$archive"
+    fi
+  done
+fi
 for split in train val; do
   python -m framediff visual-cache-targets --data "$data_dir/rendered/policy-$split.jsonl" \
     --checkpoint "$run_dir/detector/best.pt" --out "$data_dir/predicted-$split" \
     --device "$device" --size "$abs_size" --resume
 done
 
+if [[ "$restart_policies" == 1 ]]; then
+  policy_archive_stamp=$(date +%s)
+  for label in raw-stage1 policy-raw abstract-stage1 policy-abstract; do
+    policy_dir="$run_dir/$label"
+    if [[ -d "$policy_dir" ]]; then
+      archive="$policy_dir.stale-$policy_archive_stamp"
+      echo "Preserving previous policy stage as $archive"
+      mv "$policy_dir" "$archive"
+    fi
+  done
+fi
 for mode in screenshot abstract; do
   size=$raw_size; label=raw; init=$raw_init
   if [[ "$mode" == abstract ]]; then size=$abs_size; label=abstract; init=$abstract_init; fi
