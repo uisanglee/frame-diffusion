@@ -2,6 +2,8 @@
 
 
 def add_parsers(sub):
+    p=sub.add_parser('visual-subset-numeric',help='Filter cached trajectories without rendering or changing source assets')
+    p.add_argument('--rendered',required=True);p.add_argument('--out',required=True)
     p=sub.add_parser('visual-import-webui',help='Build domain-disjoint WebUI manifests and optional native AX detector labels')
     p.add_argument('--root',required=True);p.add_argument('--out',required=True);p.add_argument('--view',default='default_1280-720')
     p.add_argument('--train-count',type=int,default=600);p.add_argument('--val-count',type=int,default=200)
@@ -32,6 +34,9 @@ def add_parsers(sub):
                            help='Confidence threshold for checkpoint-time IoU50 validation metrics')
         else:
             p.add_argument('--mode',choices=['screenshot','abstract'],required=True)
+            p.add_argument('--policy-head',choices=['flat','hierarchical'],default='flat')
+            p.add_argument('--numeric-only',action='store_true')
+            p.add_argument('--decoding',choices=['joint','aggregate'],default='joint')
             for k,v in [('size',384),('hidden',128),('layers',3),('heads',4),('max-nodes',128),('token-grid',12)]:p.add_argument('--'+k,type=int,default=v)
     p=sub.add_parser('visual-cache-targets',help='Run frozen detector once per target for policy fine-tuning')
     for k in ('data','checkpoint','out'):p.add_argument('--'+k,required=True)
@@ -42,6 +47,7 @@ def add_parsers(sub):
     p.add_argument('--device',default='auto');p.add_argument('--threshold',type=float,default=.4)
     p.add_argument('--limit',type=int,default=0);p.add_argument('--cpu-threads',type=int,default=4)
     p=sub.add_parser('visual-evaluate',help='Paired actual screenshot vs one-shot abstraction greedy rollouts')
+    p.add_argument('--decoding',choices=['joint','aggregate'],help='Override flat decoding for a paired ablation')
     for k in ('data','raw-checkpoint','abstract-checkpoint','detector-checkpoint','out'):p.add_argument('--'+k,required=True)
     p.add_argument('--device',default='auto');p.add_argument('--threshold',type=float,default=.4)
     p.add_argument('--time-budget',type=float,default=0.,help='Per-method seconds including target preprocessing; soft operation-boundary limit')
@@ -55,6 +61,9 @@ def add_parsers(sub):
 
 
 def run(args):
+    if args.command=='visual-subset-numeric':
+        from .visual_numeric import prepare
+        return prepare(args)
     if getattr(args,'threshold',.4)<0 or getattr(args,'threshold',.4)>1:raise ValueError('threshold must be in [0,1]')
     if getattr(args,'metric_threshold',.4)<0 or getattr(args,'metric_threshold',.4)>1:raise ValueError('metric-threshold must be in [0,1]')
     if getattr(args,'limit',0)<0:raise ValueError('limit must be nonnegative')

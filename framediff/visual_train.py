@@ -92,19 +92,24 @@ def policy_loss(net,rows,device,rng,prediction_probability):
 
 def policy_validation_metrics(net,rows,device,rng,prediction_probability,batch_size,amp):
     totals={'n':0,'correct':0,'stop_n':0,'stop_correct':0,'non_stop_n':0,'non_stop_correct':0,
-            'node_correct':0,'property_correct':0,'value_correct':0}
+            'node_correct':0,'property_correct':0,'value_correct':0,'predicted_stop':0,'false_stop':0,
+            'edit_only_correct':0}
     per_property={}
     for offset in range(0,len(rows),batch_size):
         batch_rows=rows[offset:offset+batch_size]
         with amp():_,logits,labels,n=policy_batch(net,batch_rows,device,rng,prediction_probability)
-        predictions=logits.argmax(-1).cpu().tolist()
-        for prediction,valid in zip(predictions,labels):
+        predictions=net.select(logits).cpu().tolist()
+        edit_predictions=logits[:,:-1].argmax(-1).cpu().tolist()
+        for prediction,valid,edit_prediction in zip(predictions,labels,edit_predictions):
             predicted=decode_action(prediction,n);targets=[decode_action(label,n) for label in valid];target=targets[0]
             totals['n']+=1;totals['correct']+=prediction in valid
+            totals['predicted_stop']+=predicted is None
             if target is None:
                 totals['stop_n']+=1;totals['stop_correct']+=predicted is None
                 continue
             totals['non_stop_n']+=1;totals['non_stop_correct']+=prediction in valid
+            totals['false_stop']+=predicted is None
+            totals['edit_only_correct']+=edit_prediction in valid
             fields={item[1] for item in targets};field=target[1]
             entry=per_property.setdefault(field,{'n':0,'correct':0});entry['n']+=1;entry['correct']+=prediction in valid
             if predicted is not None:
@@ -113,6 +118,8 @@ def policy_validation_metrics(net,rows,device,rng,prediction_probability,batch_s
                 totals['value_correct']+=any(predicted[2]==item[2] for item in targets)
     div=lambda a,b:totals[a]/totals[b] if totals[b] else None
     return {'action_accuracy':div('correct','n'),'node_accuracy':div('node_correct','non_stop_n'),
+            'predicted_stop_rate':div('predicted_stop','n'),'false_stop_rate':div('false_stop','non_stop_n'),
+            'edit_only_joint_accuracy':div('edit_only_correct','non_stop_n'),
             'property_accuracy':div('property_correct','non_stop_n'),'value_accuracy':div('value_correct','non_stop_n'),
             'stop_accuracy':div('stop_correct','stop_n'),'non_stop_accuracy':div('non_stop_correct','non_stop_n'),
             'validation_n':totals['n'],'stop_n':totals['stop_n'],'non_stop_n':totals['non_stop_n'],
@@ -169,7 +176,11 @@ def train(args):
         if any(r.get('action_contract')!=ACTION_CONTRACT for r in train_rows+val_rows):
             raise ValueError('Policy data uses a legacy action contract; rebuild visual data')
         cfg=asdict(VisualConfig(mode=args.mode,size=args.size,hidden=args.hidden,layers=args.layers,
-                                heads=args.heads,max_nodes=args.max_nodes,token_grid=args.token_grid));kind='visual-policy-v3'
+                                heads=args.heads,max_nodes=args.max_nodes,token_grid=args.token_grid,
+                                policy_head=getattr(args,'policy_head','flat'),numeric_only=getattr(args,'numeric_only',False),
+                                decoding=getattr(args,'decoding','joint')));kind='visual-policy-v3'
+        if cfg['numeric_only'] and any(r.get('policy_subset')!='numeric-prefix-v1' for r in train_rows+val_rows):
+            raise ValueError('Use visual-subset-numeric first: remove categorical corruption ancestry, not just labels')
     if args.resume and args.init_checkpoint:raise ValueError('Choose resume or init-checkpoint')
     data_signature={'train':digest(args.train),'val':digest(args.val)}
     out=Path(args.out).resolve()
@@ -179,9 +190,13 @@ def train(args):
     ck=torch.load(args.resume or args.init_checkpoint,map_location='cpu',weights_only=True) if args.resume or args.init_checkpoint else None
     legacy_policy_init=False
     if ck:
-        if ck.get('kind')==kind and ck['config']==cfg:pass
+        checkpoint_config=ck['config']
+        if not is_detector and ck.get('kind')=='visual-policy-v3':
+            checkpoint_config=asdict(VisualConfig(**checkpoint_config))
+        if ck.get('kind')==kind and checkpoint_config==cfg:pass
         elif (args.init_checkpoint and not is_detector and ck.get('kind')=='visual-policy-v1' and
-              ck.get('config')=={k:v for k,v in cfg.items() if k!='action_contract'}):
+              cfg['policy_head']=='flat' and not cfg['numeric_only'] and cfg['decoding']=='joint' and
+              ck.get('config')=={k:v for k,v in cfg.items() if k not in ('action_contract','policy_head','numeric_only','decoding')}):
             # Reuse the image/tree encoder and transformer, but deliberately
             # reinitialize the expanded structured-action head.
             legacy_policy_init=True

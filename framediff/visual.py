@@ -208,8 +208,15 @@ class VisualConfig:
     token_grid: int = 12
     contract: str = CONTRACT
     action_contract: str = ACTION_CONTRACT
+    policy_head: str = 'flat'
+    numeric_only: bool = False
+    decoding: str = 'joint'
 
     def __post_init__(self):
+        if self.policy_head not in ('flat','hierarchical') or self.decoding not in ('joint','aggregate'):
+            raise ValueError('Invalid policy head/decoding')
+        if self.policy_head=='hierarchical' and not self.numeric_only:
+            raise ValueError('Hierarchical policy requires numeric-only actions')
         if (self.mode not in ('abstract','screenshot') or self.contract!=CONTRACT or
                 self.action_contract!=ACTION_CONTRACT):raise ValueError('Visual policy contract mismatch')
         if self.size<32 or min(self.hidden,self.layers,self.heads,self.max_nodes,self.token_grid)<1 or self.hidden%self.heads:
@@ -257,7 +264,13 @@ class VisualPolicy(nn.Module):
         self.norm=nn.LayerNorm(cfg.hidden)
         bc=ModelConfig(hidden=cfg.hidden,layers=cfg.layers,heads=cfg.heads,dropout=0.)
         self.blocks=nn.ModuleList(Block(bc) for _ in range(cfg.layers))
-        self.action=nn.Linear(cfg.hidden,ACTIONS);self.stop=nn.Linear(cfg.hidden,1)
+        if cfg.policy_head=='hierarchical':
+            self.operation=nn.Linear(cfg.hidden,2)
+            self.node_head=nn.Linear(cfg.hidden,1)
+            self.property_head=nn.Linear(cfg.hidden,6)
+            self.delta_head=nn.Linear(cfg.hidden,60)
+        else:
+            self.action=nn.Linear(cfg.hidden,ACTIONS);self.stop=nn.Linear(cfg.hidden,1)
 
     def encode_image(self,image):return self.vision(image)
 
@@ -275,13 +288,47 @@ class VisualPolicy(nn.Module):
         x=x+self.cross(self.norm(x),memory,memory,need_weights=False)[0]
         for block in self.blocks:x=block(x,batch['relation'],batch['mask'])
         x=self.norm(x);pooled=(x*batch['mask'][...,None]).sum(1)/batch['mask'].sum(1,keepdim=True)
-        logits=self.action(x)
         legal=batch['action_legal'] & batch['mask'][:,:,None]
+        if self.cfg.numeric_only:
+            legal=legal.clone();legal[:,:,60:]=False
+        if self.cfg.policy_head=='hierarchical':
+            valid=legal[:,:,:60].reshape(*x.shape[:2],6,10)
+            # Empty parents get a finite dummy distribution before masking;
+            # softmax over all -inf would poison gradients for padded nodes.
+            def masked_logp(scores,mask):
+                safe=mask | ~mask.any(-1,keepdim=True)
+                return F.log_softmax(scores.float().masked_fill(~safe,float('-inf')),-1).masked_fill(~mask,float('-inf'))
+            node_valid=valid.any(-1).any(-1)
+            op_valid=torch.stack([torch.ones_like(node_valid[:,0]),node_valid.any(-1)],-1)
+            op=masked_logp(self.operation(pooled),op_valid)
+            nodes=masked_logp(self.node_head(x).squeeze(-1),node_valid)
+            props=masked_logp(self.property_head(x),valid.any(-1))
+            values=masked_logp(self.delta_head(x).reshape(*x.shape[:2],6,10),valid)
+            joint=op[:,1,None,None,None]+nodes[:,:,None,None]+props[:,:,:,None]+values
+            padded=F.pad(joint.flatten(2),(0,ACTIONS-60),value=float('-inf'))
+            return torch.cat([padded.flatten(1),op[:,:1]],1)
+        logits=self.action(x)
         return torch.cat([logits.masked_fill(~legal,float('-inf')).flatten(1),self.stop(pooled)],1)
 
     def forward(self,batch,target,current):
         target_tokens,_=self.encode_image(target);current_tokens,current_map=self.encode_image(current)
         return self.decode(batch,target_tokens,current_tokens,current_map)
+
+    def select(self,logits):
+        if self.cfg.policy_head=='flat' and self.cfg.decoding=='joint':return logits.argmax(-1)
+        # Compare STOP to total EDIT probability, not to one tiny edit class.
+        edits=logits[...,:-1];stop=logits[...,-1]
+        choose_stop=stop>=torch.logsumexp(edits.float(),-1)
+        if self.cfg.policy_head=='hierarchical':
+            shape=edits.shape[:-1]
+            tree=edits.reshape(*shape,-1,ACTIONS)[...,:60].reshape(*shape,-1,6,10)
+            node=torch.logsumexp(tree,(-1,-2)).argmax(-1)
+            selected=tree.gather(-3,node[...,None,None,None].expand(*shape,1,6,10)).squeeze(-3)
+            prop=torch.logsumexp(selected,-1).argmax(-1)
+            delta=selected.gather(-2,prop[...,None,None].expand(*shape,1,10)).squeeze(-2).argmax(-1)
+            action=node*ACTIONS+prop*10+delta
+        else:action=edits.argmax(-1)
+        return torch.where(choose_stop,torch.full_like(action,edits.shape[-1]),action)
 
 
 def action_index(edit,n):

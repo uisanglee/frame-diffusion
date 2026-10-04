@@ -1,5 +1,8 @@
 # Image-conditioned FrameDiff
 
+크기·margin 전용 계층형 policy와 기존 detector/렌더링 재사용 경로는
+[numeric-policy.md](numeric-policy.md)를 참고한다. 아래는 기존 전체 v3 grammar의 설명이다.
+
 이 경로는 **고정 계획/목표 좌표 residual 없이 이미지로 action을 예측**한다.
 기존 box/plan 체크포인트와 호환되지 않으며 새로 학습해야 한다.
 반복 역편집(denoising) 정책이며 Gaussian DDPM은 아니다. v3 action contract는 한 step을

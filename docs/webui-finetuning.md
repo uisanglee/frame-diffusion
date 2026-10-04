@@ -1,5 +1,9 @@
 # WebUI visual fine-tuning
 
+이미 렌더링과 detector 학습을 완료했다면, 크기·margin 전용 재학습에는
+[policy-only 실행 경로](numeric-policy.md)를 사용한다. 이 경로는 아래 전체 파이프라인을
+재실행하지 않고 기존 이미지와 detector를 유지한다.
+
 이 경로는 LLM/VLM 없이 WebUI에서 detector, screenshot policy, abstract policy를 모두
 fine-tuning한다. 기본 주 실험은 procedural checkpoint에서 시작하고, 동일 데이터의 WebUI-only
 초기화 실험을 ablation으로 둔다.

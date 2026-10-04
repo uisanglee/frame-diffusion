@@ -185,6 +185,7 @@ def test_rollout_uses_one_target_parse_and_real_feedback(tmp_path,monkeypatch):
     from framediff.visual_experiment import rollout
     target_path=tmp_path/'target.png';parse_calls=[]
     class ScriptedPolicy(torch.nn.Module):
+        select = VisualPolicy.select
         def __init__(self,mode,index):
             super().__init__();self.weight=torch.nn.Parameter(torch.zeros(1))
             self.cfg=VisualConfig(mode=mode,size=64,hidden=16,layers=1,heads=2,max_nodes=16)

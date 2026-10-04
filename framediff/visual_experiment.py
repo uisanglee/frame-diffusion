@@ -73,7 +73,7 @@ def rollout(browser,html,tree,viewport,target_path,policy,parser=None,threshold=
         batch=visual_batch([current_features(current_tree,boxes,viewport,cfg.max_nodes)],device)
         with torch.inference_mode():
             logits=policy.decode(batch,target_tokens,current_tokens,current_map)[0]
-            action=decode_action(int(logits.argmax()),len(current_tree['nodes']))
+            action=decode_action(int(policy.select(logits)),len(current_tree['nodes']))
         sync(device);stats['policy_seconds']+=time.perf_counter()-t
         history={'step':step,'action':action,'boxes':boxes,'elapsed_seconds':time.perf_counter()-start}
         stats['history'].append(history)
@@ -103,9 +103,11 @@ def evaluate(args):
     if device=='cpu':torch.set_num_threads(args.cpu_threads)
     raw,raw_ck=load_policy(args.raw_checkpoint,device)
     abstract,abstract_ck=load_policy(args.abstract_checkpoint,device)
+    if getattr(args,'decoding',None):
+        raw.cfg.decoding=args.decoding;abstract.cfg.decoding=args.decoding
     parser,parser_ck=load_detector(args.detector_checkpoint,device)
     if raw.cfg.mode!='screenshot' or abstract.cfg.mode!='abstract':raise ValueError('Policy modality mismatch')
-    for key in ('hidden','layers','heads','max_nodes','token_grid'):
+    for key in ('hidden','layers','heads','max_nodes','token_grid','policy_head','numeric_only'):
         if getattr(raw.cfg,key)!=getattr(abstract.cfg,key):raise ValueError('Matched policies must share tree/policy architecture')
     rows=list(read_jsonl(args.data));rows=rows[:args.limit] if args.limit else rows
     if not rows:raise ValueError('No prepared evaluation pages')
