@@ -211,10 +211,14 @@ class VisualConfig:
     policy_head: str = 'flat'
     numeric_only: bool = False
     decoding: str = 'joint'
+    training_scheme: str = 'legacy'
 
     def __post_init__(self):
-        if self.policy_head not in ('flat','hierarchical') or self.decoding not in ('joint','aggregate'):
+        if (self.policy_head not in ('flat','hierarchical') or self.decoding not in ('joint','aggregate') or
+                self.training_scheme not in ('legacy','balanced-v1')):
             raise ValueError('Invalid policy head/decoding')
+        if self.training_scheme=='balanced-v1' and not self.numeric_only:
+            raise ValueError('Balanced policy training requires numeric-only actions')
         if self.policy_head=='hierarchical' and not self.numeric_only:
             raise ValueError('Hierarchical policy requires numeric-only actions')
         if (self.mode not in ('abstract','screenshot') or self.contract!=CONTRACT or
@@ -264,17 +268,22 @@ class VisualPolicy(nn.Module):
         self.norm=nn.LayerNorm(cfg.hidden)
         bc=ModelConfig(hidden=cfg.hidden,layers=cfg.layers,heads=cfg.heads,dropout=0.)
         self.blocks=nn.ModuleList(Block(bc) for _ in range(cfg.layers))
+        self.stop_threshold=.5
+        stop_width=cfg.hidden*4 if cfg.training_scheme=='balanced-v1' else cfg.hidden
         if cfg.policy_head=='hierarchical':
-            self.operation=nn.Linear(cfg.hidden,2)
+            self.operation=(nn.Sequential(nn.Linear(stop_width,cfg.hidden),nn.GELU(),nn.Linear(cfg.hidden,2))
+                            if cfg.training_scheme=='balanced-v1' else nn.Linear(cfg.hidden,2))
             self.node_head=nn.Linear(cfg.hidden,1)
             self.property_head=nn.Linear(cfg.hidden,6)
             self.delta_head=nn.Linear(cfg.hidden,60)
         else:
-            self.action=nn.Linear(cfg.hidden,ACTIONS);self.stop=nn.Linear(cfg.hidden,1)
+            self.action=nn.Linear(cfg.hidden,ACTIONS)
+            self.stop=(nn.Sequential(nn.Linear(stop_width,cfg.hidden),nn.GELU(),nn.Linear(cfg.hidden,1))
+                       if cfg.training_scheme=='balanced-v1' else nn.Linear(cfg.hidden,1))
 
     def encode_image(self,image):return self.vision(image)
 
-    def decode(self,batch,target_tokens,current_tokens,current_map):
+    def decode(self,batch,target_tokens,current_tokens,current_map,return_components=False):
         from torchvision.ops import roi_align
         x=self.role(batch['roles'])+self.name(batch['names'])+self.depth(batch['depth'])
         x=x+sum(e(batch['props'][:,:,j]) for j,e in enumerate(self.props))/len(FIELDS)
@@ -288,6 +297,11 @@ class VisualPolicy(nn.Module):
         x=x+self.cross(self.norm(x),memory,memory,need_weights=False)[0]
         for block in self.blocks:x=block(x,batch['relation'],batch['mask'])
         x=self.norm(x);pooled=(x*batch['mask'][...,None]).sum(1)/batch['mask'].sum(1,keepdim=True)
+        if self.cfg.training_scheme=='balanced-v1':
+            target_mean=target_tokens.mean(1);current_mean=current_tokens.mean(1)
+            stop_features=torch.cat([pooled,target_mean,current_mean,
+                                     (target_tokens-current_tokens).abs().mean(1)],-1)
+        else:stop_features=pooled
         legal=batch['action_legal'] & batch['mask'][:,:,None]
         if self.cfg.numeric_only:
             legal=legal.clone();legal[:,:,60:]=False
@@ -300,25 +314,30 @@ class VisualPolicy(nn.Module):
                 return F.log_softmax(scores.float().masked_fill(~safe,float('-inf')),-1).masked_fill(~mask,float('-inf'))
             node_valid=valid.any(-1).any(-1)
             op_valid=torch.stack([torch.ones_like(node_valid[:,0]),node_valid.any(-1)],-1)
-            op=masked_logp(self.operation(pooled),op_valid)
+            op=masked_logp(self.operation(stop_features),op_valid)
             nodes=masked_logp(self.node_head(x).squeeze(-1),node_valid)
             props=masked_logp(self.property_head(x),valid.any(-1))
             values=masked_logp(self.delta_head(x).reshape(*x.shape[:2],6,10),valid)
             joint=op[:,1,None,None,None]+nodes[:,:,None,None]+props[:,:,:,None]+values
             padded=F.pad(joint.flatten(2),(0,ACTIONS-60),value=float('-inf'))
-            return torch.cat([padded.flatten(1),op[:,:1]],1)
+            logits=torch.cat([padded.flatten(1),op[:,:1]],1)
+            components={'operation':op,'node':nodes,'property':props,'delta':values}
+            return (logits,components) if return_components else logits
         logits=self.action(x)
-        return torch.cat([logits.masked_fill(~legal,float('-inf')).flatten(1),self.stop(pooled)],1)
+        logits=torch.cat([logits.masked_fill(~legal,float('-inf')).flatten(1),self.stop(stop_features)],1)
+        return (logits,None) if return_components else logits
 
-    def forward(self,batch,target,current):
+    def forward(self,batch,target,current,return_components=False):
         target_tokens,_=self.encode_image(target);current_tokens,current_map=self.encode_image(current)
-        return self.decode(batch,target_tokens,current_tokens,current_map)
+        return self.decode(batch,target_tokens,current_tokens,current_map,return_components)
 
     def select(self,logits):
         if self.cfg.policy_head=='flat' and self.cfg.decoding=='joint':return logits.argmax(-1)
         # Compare STOP to total EDIT probability, not to one tiny edit class.
         edits=logits[...,:-1];stop=logits[...,-1]
-        choose_stop=stop>=torch.logsumexp(edits.float(),-1)
+        edit_total=torch.logsumexp(edits.float(),-1)
+        stop_probability=torch.sigmoid(stop.float()-edit_total)
+        choose_stop=stop_probability>=getattr(self,'stop_threshold',.5)
         if self.cfg.policy_head=='hierarchical':
             shape=edits.shape[:-1]
             tree=edits.reshape(*shape,-1,ACTIONS)[...,:60].reshape(*shape,-1,6,10)
@@ -347,4 +366,5 @@ def load_policy(path,device):
     checkpoint=torch.load(path,map_location='cpu',weights_only=True)
     if checkpoint.get('kind')!='visual-policy-v3':raise ValueError('Requires a v3 no-padding/gap visual policy checkpoint; retrain legacy policies')
     model=VisualPolicy(VisualConfig(**checkpoint['config']),pretrained=False)
-    model.load_state_dict(checkpoint['model']);return model.to(device).eval(),checkpoint
+    model.load_state_dict(checkpoint['model']);model.stop_threshold=float(checkpoint.get('stop_threshold',.5))
+    return model.to(device).eval(),checkpoint

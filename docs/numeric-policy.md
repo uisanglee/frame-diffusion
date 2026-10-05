@@ -19,8 +19,16 @@ Three comparisons use the same numeric dataset:
    against the sum of all edit probabilities, then select the best edit.
 3. Hierarchical head: P(operation) P(node|edit) P(property|node,edit)
    P(delta|property,node,edit). Greedy decoding follows that hierarchy. Training
-   minimizes joint negative log likelihood (sum of conditional cross-entropies
-   for a single teacher edit). There is no forced minimum edit count.
+   uses separately normalized operation, node, property, and delta losses.
+   There is no forced minimum edit count.
+
+Balanced-v1 training draws STOP and EDIT equally. EDIT properties are sampled
+uniformly over the six fields instead of in corpus-frequency proportion. The
+STOP head observes the current DOM feature, pooled target/current image features,
+and their absolute feature difference. Validation keeps the natural distribution
+and records both raw and balanced operation accuracy, conditional head metrics,
+and a validation-only recommended STOP threshold. The threshold is stored in the
+checkpoint and reused at test time.
 
 The legacy 81-slot indexing is retained for checkpoint/action interoperability;
 the 21 categorical slots are masked out, leaving 60 legal candidate slots per
@@ -39,7 +47,7 @@ POLICY_STAGE1_STEPS=30000 POLICY_STAGE2_STEPS=15000 \
 bash scripts/train_numeric_policy.sh \
   data/webui-10k-v3-nospacing-fresh-webui/rendered \
   runs/webui-10k-v3-nospacing-fresh-webui/detector/best.pt \
-  runs/numeric-policy-v1
+  runs/numeric-policy-v2-balanced
 ```
 
 Use the actual existing detector path if different. Default trains both flat and
@@ -47,8 +55,14 @@ hierarchical heads, each in screenshot/abstract modalities and two stages (eight
 stages total). `POLICY_HEADS=hierarchical` trains only the new architecture.
 Stage 1 uses stored ground-truth abstractions; stage 2 uses frozen detector
 predictions for target abstractions. Screenshot stages use stored RGB images.
-Identical arguments resume each stage from last.pt. Changed settings or source
+`POLICY_MODES=abstract` or `POLICY_MODES=screenshot` trains only one modality.
+`PREPARE_DATA=0` may be used by parallel lanes after one process has completed
+subset/cache preparation. Identical arguments resume each stage from last.pt. Changed settings or source
 manifests require a new output directory. No source assets are regenerated.
+Set `POLICY_RUN_DIR` to write new balanced checkpoints separately while reusing
+the third argument's existing subset and predicted-target cache.
+Legacy numeric checkpoints cannot resume balanced-v1 because the STOP head and
+objective changed; use a new run directory.
 
 The subset retains clean samples and complete numeric-only trajectory prefixes.
 It drops categorical teacher edits **and all their descendants**, including ones
@@ -75,8 +89,9 @@ For comparison 1 use both `flat/...` checkpoints, `--decoding joint`, and a new
 `--decoding aggregate` and `--out .../eval-flat-aggregate`. Never select a decoding
 threshold on test results. Keep pages, steps, seeds and repeat counts identical.
 
-Monitor `false_stop_rate`, `predicted_stop_rate`, `non_stop_accuracy`,
-`edit_only_joint_accuracy`, per-property accuracy and final rollout improvement.
+Monitor `false_stop_rate`, `predicted_stop_rate`, `operation_balanced_accuracy`,
+`property_accuracy_given_correct_node`, `delta_accuracy_given_correct_node_property`,
+component losses and final rollout improvement.
 Low edit-only accuracy means separating STOP alone is insufficient. This change
 does not guarantee recovery: corruption coverage, ambiguous inverse labels and
 real-image distribution shift remain empirical issues. Stop accuracy alone and

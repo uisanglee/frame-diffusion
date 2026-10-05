@@ -36,6 +36,8 @@ def add_parsers(sub):
             p.add_argument('--mode',choices=['screenshot','abstract'],required=True)
             p.add_argument('--policy-head',choices=['flat','hierarchical'],default='flat')
             p.add_argument('--numeric-only',action='store_true')
+            p.add_argument('--balanced-policy',action='store_true',
+                           help='Balanced STOP/EDIT and property sampling, factorized hierarchy loss, visual STOP residual')
             p.add_argument('--decoding',choices=['joint','aggregate'],default='joint')
             for k,v in [('size',384),('hidden',128),('layers',3),('heads',4),('max-nodes',128),('token-grid',12)]:p.add_argument('--'+k,type=int,default=v)
     p=sub.add_parser('visual-cache-targets',help='Run frozen detector once per target for policy fine-tuning')

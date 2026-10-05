@@ -1,6 +1,7 @@
 from dataclasses import asdict
 import torch
 from framediff.visual import VisualConfig, VisualPolicy, ACTIONS, current_features, visual_batch, action_index, load_policy
+from framediff.visual import NUMERIC_FIELDS
 from framediff.visual_numeric import numeric_rows
 from framediff.ir import node
 
@@ -52,6 +53,36 @@ def test_aggregate_changes_only_stop_decision():
     assert VisualPolicy.select(net,scores).item()==0
 
 
+def test_balanced_sampler_equal_operations_and_uniform_properties():
+    import random
+    from collections import Counter
+    from framediff.visual_train import policy_training_pools,sample_policy_rows
+    rows=[{'id':'stop','teacher_edits':[]}]+[
+        {'id':field,'teacher_edits':[[1,field,.05]]} for field in NUMERIC_FIELDS]
+    pools=policy_training_pools(rows);rng=random.Random(7);counts=Counter()
+    for _ in range(2000):
+        batch=sample_policy_rows(pools,2,rng)
+        assert sum(not r['teacher_edits'] for r in batch)==1
+        counts.update(r['teacher_edits'][0][1] for r in batch if r['teacher_edits'])
+    assert max(counts.values())-min(counts.values())<100
+
+
+def test_balanced_hierarchy_uses_visual_difference_for_operation():
+    torch.set_num_threads(2);torch.manual_seed(4)
+    cfg=VisualConfig(size=32,hidden=16,layers=1,heads=2,token_grid=2,numeric_only=True,
+                     policy_head='hierarchical',training_scheme='balanced-v1')
+    net=VisualPolicy(cfg,False)
+    tree={'version':1,'nodes':[node('page',None,'page'),node('card','page','card',width=80)]}
+    boxes={'page':[0,0,320,240],'card':[16,20,80,30]}
+    batch=visual_batch([current_features(tree,boxes,[320,240],16)],'cpu')
+    target=torch.randn(1,3,32,32,requires_grad=True);current=torch.randn(1,3,32,32,requires_grad=True)
+    logits,parts=net(batch,target,current,return_components=True)
+    assert set(parts)=={'operation','node','property','delta'}
+    (-parts['operation'][0,1]).backward()
+    assert target.grad.abs().sum()>0 and current.grad.abs().sum()>0
+    assert net.operation[0].weight.shape[1]==cfg.hidden*4
+
+
 def test_numeric_prepare_train_resume_without_browser(tmp_path):
     from PIL import Image
     from framediff.ir import write_jsonl,read_jsonl
@@ -68,18 +99,20 @@ def test_numeric_prepare_train_resume_without_browser(tmp_path):
               'action_contract':ACTION_CONTRACT,'viewport':[320,240],
               'current':tree,'current_boxes':boxes,'current_html':str(html),
               **{k:str(image) for k in ('target_image','target_abstract','current_image','current_abstract')}}
-        rows=[{**base,'id':split+'/clean','teacher_edits':[]},
-              {**base,'id':split+'/t0-s0','teacher_edits':[[1,'width',.05]]}]
+        rows=[{**base,'id':split+'/clean','teacher_edits':[]}]+[
+              {**base,'id':f'{split}/t0-s{i}','teacher_edits':[[1,field,.05]]}
+              for i,field in enumerate(NUMERIC_FIELDS)]
         write_jsonl(source/f'policy-{split}.jsonl',rows)
         write_jsonl(source/f'pages-{split}.jsonl',[{'id':split,'split':split,'html':str(html)}])
     subset=tmp_path/'subset'
     command=['visual-subset-numeric','--rendered',str(source),'--out',str(subset)]
     main(command);main(command)
-    assert len(list(read_jsonl(subset/'policy-train.jsonl')))==2
+    assert len(list(read_jsonl(subset/'policy-train.jsonl')))==7
     out=tmp_path/'policy'
     command=['visual-train-policy','--train',str(subset/'policy-train.jsonl'),
              '--val',str(subset/'policy-val.jsonl'),'--out',str(out),'--mode','abstract',
              '--numeric-only','--policy-head','hierarchical','--device','cpu','--no-pretrained',
+             '--balanced-policy',
              '--size','32','--hidden','16','--layers','1','--heads','2','--token-grid','2',
              '--eval-every','1','--val-samples','2','--batch-size','2','--accumulation','1']
     main(command+['--steps','1'])
@@ -88,4 +121,6 @@ def test_numeric_prepare_train_resume_without_browser(tmp_path):
     assert ck['step']==2
     metrics=list(read_jsonl(out/'train.jsonl'))[-1]
     assert 'false_stop_rate' in metrics
+    assert set(metrics['validation_components'])=={'operation','node','property','delta'}
+    assert 0<ck['stop_threshold']<1
     assert original==(image.read_bytes(),html.read_bytes())
