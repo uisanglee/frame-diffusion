@@ -75,7 +75,7 @@ def relabel_best_reverse(args):
     if out==source or source in out.parents:raise ValueError('Use a separate relabeled output directory')
     paths=[source/f'{kind}-{split}.jsonl' for split in ('train','val','test')
            for kind in ('policy','pages','detector')]
-    config={'kind':'visual-relabel-best-reverse-v1','contract':CONTRACT,'action_contract':ACTION_CONTRACT,
+    config={'kind':'visual-relabel-best-reverse-v2','contract':CONTRACT,'action_contract':ACTION_CONTRACT,
             'sources':{str(path):digest(path) for path in paths}}
     guard_run(out,config,args.resume)
     totals={'pages':0,'input_rows':0,'kept_rows':0,'rejected_rows':0,'failed_pages':0}
@@ -99,7 +99,6 @@ def relabel_best_reverse(args):
                     if len(clean)!=1:raise ValueError(f'Expected one clean row, found {len(clean)}')
                     clean=clean[0];tree=clean['current'];target_boxes=clean['current_boxes'];viewport=clean['viewport']
                     root=tree['nodes'][0]['id'];ids=[node['id'] for node in tree['nodes'][1:]]
-                    all_ids=[node['id'] for node in tree['nodes']]
                     target_items=clean.get('target_elements') or elements(tree,target_boxes,viewport)
                     clean_copy={**clean,'teacher_strategy':'best-improving-reverse-v1',
                                 'target_elements':target_items}
@@ -126,7 +125,9 @@ def relabel_best_reverse(args):
                                 try:
                                     browser.edit_visual_action(Path(row['current_html']).read_text(),viewport,
                                                                node_id,field,value)
-                                    observed=browser.tagged_boxes(all_ids);observed[root]=[0,0,*viewport]
+                                    # The LayoutIR root is the synthetic __viewport__
+                                    # node and has no DOM element/data-fd-id.
+                                    observed=browser.tagged_boxes(ids);observed[root]=[0,0,*viewport]
                                     score=distance(observed)
                                 except Exception:
                                     continue

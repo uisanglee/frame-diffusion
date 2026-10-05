@@ -181,20 +181,20 @@ def test_legacy_policy_relabel_reuses_assets_and_browser_reflow(tmp_path):
     from framediff.visual import CONTRACT,ACTION_CONTRACT
     source=tmp_path/'legacy';source.mkdir();assets=tmp_path/'assets';assets.mkdir()
     target_html=assets/'target.html';target_html.write_text(
-        '<html><body data-fd-id="fd-0" style="margin:0"><div data-fd-id="fd-1" '
+        '<html><body style="margin:0"><div data-fd-id="fd-1" '
         'style="width:100px;height:20px"></div></body></html>')
     current_html=assets/'current.html';current_html.write_text(
-        '<html><body data-fd-id="fd-0" style="margin:0"><div data-fd-id="fd-1" '
+        '<html><body style="margin:0"><div data-fd-id="fd-1" '
         'style="width:120px;height:20px"></div></body></html>')
     image=assets/'unchanged.png';Image.new('RGB',(400,200),'white').save(image);original=image.read_bytes()
-    tree={'version':1,'nodes':[node('fd-0',None,'body'),node('fd-1','fd-0','div',width=100)]}
+    tree={'version':1,'nodes':[node('__viewport__',None,'page'),node('fd-1','__viewport__','div',width=100)]}
     tree['nodes'][1]['visual_class']=4
     common={'group':'page','source_sha':'page','split':'train','contract':CONTRACT,
             'action_contract':ACTION_CONTRACT,'viewport':[400,200],'target_image':str(image),
             'target_abstract':str(image),'current_image':str(image),'current_abstract':str(image),'current':tree}
-    clean={**common,'id':'page/clean','current_boxes':{'fd-0':[0,0,400,200],'fd-1':[0,0,100,20]},
+    clean={**common,'id':'page/clean','current_boxes':{'__viewport__':[0,0,400,200],'fd-1':[0,0,100,20]},
            'current_html':str(target_html),'teacher_edits':[]}
-    edit={**common,'id':'page/t0-s0','current_boxes':{'fd-0':[0,0,400,200],'fd-1':[0,0,120,20]},
+    edit={**common,'id':'page/t0-s0','current_boxes':{'__viewport__':[0,0,400,200],'fd-1':[0,0,120,20]},
           'current_html':str(current_html),'teacher_edits':[[1,'width',-.05]],
           'corruption_edit':[1,'width',.05]}
     for split in ('train','val','test'):

@@ -80,7 +80,7 @@ does not regenerate or copy screenshots, HTML states, corruptions or detector da
 ```bash
 python -m framediff visual-relabel-best-reverse \
   --rendered data/webui-10k-v3-nospacing-fresh-webui/rendered \
-  --out data/webui-10k-v4-best-reverse/rendered \
+  --out data/webui-10k-v4-best-reverse-v2/rendered \
   --resume
 ```
 
