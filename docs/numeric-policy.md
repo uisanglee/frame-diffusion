@@ -73,6 +73,20 @@ command derives target elements from cached clean DOM boxes without a browser.
 Cached detector prediction JSONs can also be reused by `visual-cache-targets`.
 The mask representation change alone requires no HTML rerendering.
 
+For legacy inverse-label data, relabel the cached trajectories in place by
+reference. This runs candidate CSS edits through Chromium to observe reflow, but
+does not regenerate or copy screenshots, HTML states, corruptions or detector data:
+
+```bash
+python -m framediff visual-relabel-best-reverse \
+  --rendered data/webui-10k-v3-nospacing-fresh-webui/rendered \
+  --out data/webui-10k-v4-best-reverse/rendered \
+  --resume
+```
+
+Use the new output as `EXISTING_RENDERED_DIR`. Per-page progress is resumable;
+`relabel-report.json` and `relabel-{train,val,test}.json` record exclusions.
+
 If you only have older last-mutation supervision, first create v4 policy supervision
 in a new directory. This rerenders candidate
 edits for labels but does not require retraining an existing detector:

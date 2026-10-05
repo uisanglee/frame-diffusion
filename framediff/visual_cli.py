@@ -4,6 +4,9 @@
 def add_parsers(sub):
     p=sub.add_parser('visual-subset-numeric',help='Filter cached trajectories without rendering or changing source assets')
     p.add_argument('--rendered',required=True);p.add_argument('--out',required=True)
+    p=sub.add_parser('visual-relabel-best-reverse',
+        help='Recompute best-improving teachers from cached HTML/boxes without regenerating assets')
+    p.add_argument('--rendered',required=True);p.add_argument('--out',required=True);p.add_argument('--resume',action='store_true')
     p=sub.add_parser('visual-import-webui',help='Build domain-disjoint WebUI manifests and optional native AX detector labels')
     p.add_argument('--root',required=True);p.add_argument('--out',required=True);p.add_argument('--view',default='default_1280-720')
     p.add_argument('--train-count',type=int,default=600);p.add_argument('--val-count',type=int,default=200)
@@ -70,6 +73,9 @@ def run(args):
     if args.command=='visual-subset-numeric':
         from .visual_numeric import prepare
         return prepare(args)
+    if args.command=='visual-relabel-best-reverse':
+        from .visual_numeric import relabel_best_reverse
+        return relabel_best_reverse(args)
     if getattr(args,'threshold',.4)<0 or getattr(args,'threshold',.4)>1:raise ValueError('threshold must be in [0,1]')
     if getattr(args,'metric_threshold',.4)<0 or getattr(args,'metric_threshold',.4)>1:raise ValueError('metric-threshold must be in [0,1]')
     for key in ('goal_threshold','abstract_goal_threshold'):
