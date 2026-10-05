@@ -3,7 +3,7 @@ from pathlib import Path
 import re
 from collections import Counter
 from .ir import read_jsonl, write_jsonl, write_json
-from .visual import NUMERIC_FIELDS
+from .visual import NUMERIC_FIELDS,elements
 from .web_experiment import digest, guard_run
 
 
@@ -20,6 +20,7 @@ def numeric_rows(rows):
             trajectory,step=map(int,match.groups())
             history=[indexed.get(f'{prefix}/t{trajectory}-s{k}') for k in range(step+1)]
             if any(r is None or not r['teacher_edits'] or
+                   (r.get('corruption_edit') or r['teacher_edits'][0])[1] not in NUMERIC_FIELDS or
                    any(e[1] not in NUMERIC_FIELDS for e in r['teacher_edits']) for r in history):continue
         else:raise ValueError(f'Unrecognized trajectory ID: {row["id"]}')
         kept.append({**row,'policy_subset':'numeric-prefix-v1'})
@@ -34,6 +35,12 @@ def prepare(args):
     report={}
     for split in ('train','val','test'):
         rows=list(read_jsonl(source/f'policy-{split}.jsonl'));kept=numeric_rows(rows)
+        clean={r['target_image']:r for r in rows if r['id'].endswith('/clean')}
+        for row in kept:
+            if 'target_elements' not in row:
+                target=clean.get(row['target_image'])
+                if target is None:raise ValueError('Missing clean cached geometry for target masks')
+                row['target_elements']=elements(target['current'],target['current_boxes'],target['viewport'])
         if not kept or not any(r['teacher_edits'] for r in kept):raise ValueError(f'No numeric edits in {split}')
         by_page={}
         for r in kept:

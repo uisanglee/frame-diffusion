@@ -25,9 +25,9 @@ elif [[ "$prepare" == 0 ]]; then
 else
   echo 'PREPARE_DATA must be 0 or 1' >&2;exit 2
 fi
-for head in ${POLICY_HEADS:-flat hierarchical}; do
+for head in ${POLICY_HEADS:-autoregressive}; do
   for mode in ${POLICY_MODES:-screenshot abstract}; do
-    [[ "$head" == flat || "$head" == hierarchical ]] || { echo "Invalid POLICY_HEADS item: $head" >&2; exit 2; }
+    [[ "$head" == flat || "$head" == hierarchical || "$head" == autoregressive ]] || { echo "Invalid POLICY_HEADS item: $head" >&2; exit 2; }
     [[ "$mode" == screenshot || "$mode" == abstract ]] || { echo "Invalid POLICY_MODES item: $mode" >&2; exit 2; }
     label=raw
     [[ "$mode" == abstract ]] && label=abstract

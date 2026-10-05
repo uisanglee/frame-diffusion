@@ -15,7 +15,7 @@ from .ir import read_jsonl,write_json,write_jsonl
 from .train import select_device,seed_all
 from .visual import (CONTRACT,ACTION_CONTRACT,CLASSES,VisualConfig,VisualPolicy,
                      current_features,visual_batch,image_tensor,action_index,decode_action,abstract_image,
-                     action_is_legal,NUMERIC_FIELDS,NORMALIZED_DELTAS)
+                     action_is_legal,NUMERIC_FIELDS,NORMALIZED_DELTAS,semantic_masks,elements)
 from .visual_data import validate_splits
 from .web_experiment import digest,guard_run
 
@@ -65,6 +65,19 @@ def policy_batch(net,rows,device,rng,prediction_probability):
     batch=visual_batch([current_features(r['current'],r['current_boxes'],r['viewport'],cfg.max_nodes) for r in rows],device)
     target=[];current=[]
     for row in rows:
+        if cfg.semantic:
+            predicted=rng.random()<prediction_probability
+            if predicted:
+                from .ir import read_json
+                path=row.get('predicted_target_elements')
+                if not path:raise ValueError('Missing detector JSON; run visual-cache-targets with the new version')
+                items=read_json(path)
+            else:
+                if 'target_elements' not in row:raise ValueError('Missing target elements; run visual-subset-numeric on cached rendered data')
+                items=row['target_elements']
+            target.append(semantic_masks(items,row['viewport'],cfg.size))
+            current.append(semantic_masks(elements(row['current'],row['current_boxes'],row['viewport']),row['viewport'],cfg.size))
+            continue
         if cfg.mode=='screenshot':tp,cp=row['target_image'],row['current_image']
         else:
             use_prediction=rng.random()<prediction_probability
@@ -85,7 +98,15 @@ def policy_batch(net,rows,device,rng,prediction_probability):
             values=logits[i,valid].detach().float().cpu().tolist()
             raise RuntimeError(f'Non-finite policy logits: row={row.get("id")} target_logits={values}')
         labels.append(valid)
-        if net.cfg.policy_head=='hierarchical' and net.cfg.training_scheme=='balanced-v1':
+        if net.cfg.policy_head=='autoregressive' and net.cfg.training_scheme=='balanced-v1':
+            if not row['teacher_edits']:raise ValueError('Autoregressive policy has no learned STOP examples')
+            if len(row['teacher_edits'])!=1:raise ValueError('Autoregressive policy requires one teacher edit per row')
+            node,field,value=row['teacher_edits'][0]
+            prop=NUMERIC_FIELDS.index(field);delta=NORMALIZED_DELTAS.index(value)
+            factor['node'].append(-components['node'][i,node])
+            factor['property'].append(-components['property'][i,node,prop])
+            factor['delta'].append(-components['delta'][i,node,prop,delta])
+        elif net.cfg.policy_head=='hierarchical' and net.cfg.training_scheme=='balanced-v1':
             is_edit=bool(row['teacher_edits']);factor['operation'].append(-components['operation'][i,int(is_edit)])
             if is_edit:
                 if len(row['teacher_edits'])!=1:raise ValueError('Balanced hierarchy requires one teacher edit per row')
@@ -95,9 +116,13 @@ def policy_batch(net,rows,device,rng,prediction_probability):
                 factor['property'].append(-components['property'][i,node,prop])
                 factor['delta'].append(-components['delta'][i,node,prop,delta])
         else:losses.append(-torch.logsumexp(logp[i,valid],0))
-    if net.cfg.policy_head=='hierarchical' and net.cfg.training_scheme=='balanced-v1':
+    if net.cfg.policy_head in ('hierarchical','autoregressive') and net.cfg.training_scheme=='balanced-v1':
         parts={key:torch.stack(values).mean() for key,values in factor.items() if values}
-        loss=sum(parts.values())
+        if net.cfg.policy_head=='autoregressive':
+            # Mean CE over node, property and delta; no STOP token.
+            token_losses=[loss for values in factor.values() for loss in values]
+            loss=torch.stack(token_losses).mean()
+        else:loss=sum(parts.values())
     else:parts={'joint':torch.stack(losses).mean()};loss=parts['joint']
     return loss,logits,labels,n,parts
 
@@ -106,7 +131,7 @@ def policy_loss(net,rows,device,rng,prediction_probability):
     return policy_batch(net,rows,device,rng,prediction_probability)[0]
 
 
-def policy_training_pools(rows):
+def policy_training_pools(rows,include_stop=True):
     """Balanced operation/property pools; assets and row contents remain unchanged."""
     stop=[r for r in rows if not r['teacher_edits']]
     edits={field:[] for field in NUMERIC_FIELDS}
@@ -116,11 +141,15 @@ def policy_training_pools(rows):
                 raise ValueError('Balanced numeric sampler requires one numeric teacher edit')
             edits[row['teacher_edits'][0][1]].append(row)
     missing=[field for field,items in edits.items() if not items]
-    if not stop or missing:raise ValueError(f'Balanced sampler needs STOP and every numeric property; missing={missing}')
-    return {'stop':stop,'edit':edits}
+    if (include_stop and not stop) or missing:
+        raise ValueError(f'Balanced sampler needs requested operations and every numeric property; missing={missing}')
+    return {'stop':stop,'edit':edits} if include_stop else {'edit':edits}
 
 
 def sample_policy_rows(pools,batch_size,rng):
+    if 'stop' not in pools:
+        fields=list(NUMERIC_FIELDS)
+        return [rng.choice(pools['edit'][rng.choice(fields)]) for _ in range(batch_size)]
     stop_count=batch_size//2
     if batch_size%2:stop_count+=rng.randrange(2)
     result=[rng.choice(pools['stop']) for _ in range(stop_count)]
@@ -167,7 +196,7 @@ def policy_validation_metrics(net,rows,device,rng,prediction_probability,batch_s
                     if property_ok:
                         totals['delta_given_node_property_n']+=1
                         totals['delta_given_node_property_correct']+=any(predicted[2]==item[2] for item in targets)
-    div=lambda a,b:totals[a]/totals[b] if totals[b] else None
+    def div(a,b):return totals[a]/totals[b] if totals[b] else None
     edit_recall=1-div('false_stop','non_stop_n') if totals['non_stop_n'] else None
     balanced=(div('stop_correct','stop_n')+edit_recall)/2 if totals['stop_n'] and totals['non_stop_n'] else None
     candidates=[i/100 for i in range(5,100,5)]
@@ -245,8 +274,17 @@ def train(args):
                                 heads=args.heads,max_nodes=args.max_nodes,token_grid=args.token_grid,
                                 policy_head=getattr(args,'policy_head','flat'),numeric_only=getattr(args,'numeric_only',False),
                                 decoding=getattr(args,'decoding','joint'),
+                                observation_contract=('semantic-mask-pair-diff-v1' if args.mode=='abstract' and
+                                    getattr(args,'policy_head','flat')=='autoregressive' else 'rgb-pair-diff-v1'),
                                 training_scheme='balanced-v1' if getattr(args,'balanced_policy',False) else 'legacy'))
-        kind='visual-policy-v3'
+        kind='visual-policy-v6-semantic' if cfg['policy_head']=='autoregressive' else 'visual-policy-v3'
+        if cfg['policy_head']=='autoregressive' and any(
+                r.get('teacher_strategy')!='best-improving-reverse-v1' for r in train_rows+val_rows):
+            raise ValueError('Autoregressive policy requires best-improving reverse labels; rebuild visual data')
+        if cfg['policy_head']=='autoregressive':
+            train_rows=[r for r in train_rows if r['teacher_edits']]
+            val_rows=[r for r in val_rows if r['teacher_edits']]
+            if not train_rows or not val_rows:raise ValueError('Autoregressive policy requires nonempty EDIT rows')
         if cfg['numeric_only'] and any(r.get('policy_subset')!='numeric-prefix-v1' for r in train_rows+val_rows):
             raise ValueError('Use visual-subset-numeric first: remove categorical corruption ancestry, not just labels')
     if args.resume and args.init_checkpoint:raise ValueError('Choose resume or init-checkpoint')
@@ -259,7 +297,7 @@ def train(args):
     legacy_policy_init=False
     if ck:
         checkpoint_config=ck['config']
-        if not is_detector and ck.get('kind')=='visual-policy-v3':
+        if not is_detector and ck.get('kind') in ('visual-policy-v3','visual-policy-v4','visual-policy-v5-no-stop','visual-policy-v6-semantic'):
             checkpoint_config=asdict(VisualConfig(**checkpoint_config))
         if ck.get('kind')==kind and checkpoint_config==cfg:pass
         elif (args.init_checkpoint and not is_detector and ck.get('kind')=='visual-policy-v1' and
@@ -301,7 +339,7 @@ def train(args):
             parser_groups.update(provenance.get('parser_training_groups',[]));parser_hashes.update(provenance.get('parser_training_hashes',[]))
         if parser_groups & {r['group'] for r in val_rows} or parser_hashes & {r['source_sha'] for r in val_rows}:raise ValueError('Parser leaked validation pages')
     opt=torch.optim.AdamW(net.parameters(),lr=args.lr,weight_decay=.01)
-    policy_pools=(policy_training_pools(train_rows) if not is_detector and
+    policy_pools=(policy_training_pools(train_rows,cfg['policy_head']!='autoregressive') if not is_detector and
                   cfg['training_scheme']=='balanced-v1' else None)
     rng=random.Random(args.seed);start=0;best=float('inf')
     early={'reference_loss':float('inf'),'bad_validations':0,'stopped':False}
@@ -378,7 +416,8 @@ def train(args):
                     metrics=policy_validation_metrics(net,selected,device,random.Random(90210),
                         args.prediction_probability,args.batch_size,amp)
                     eval_row.update(metrics)
-                if cfg['training_scheme']=='balanced-v1':net.stop_threshold=metrics['recommended_stop_threshold']
+                if cfg['training_scheme']=='balanced-v1' and cfg['policy_head']!='autoregressive':
+                    net.stop_threshold=metrics['recommended_stop_threshold']
             improved=validation<best;best=min(best,validation)
             early=update_early_stopping(early,validation,patience,min_delta)
             eval_row['best']=best;eval_row['improved']=improved
@@ -389,7 +428,8 @@ def train(args):
                 'training_groups':sorted(groups),'training_hashes':sorted(source_hashes),
                 'parser_training_groups':sorted(parser_groups),'parser_training_hashes':sorted(parser_hashes),
                 'data_signature':data_signature,'early_stopping':early}
-            checkpoint['stop_threshold']=getattr(net,'stop_threshold',.5)
+            if cfg.get('policy_head')!='autoregressive':
+                checkpoint['stop_threshold']=getattr(net,'stop_threshold',.5)
             torch.save(checkpoint,out/'last.pt')
             if improved:torch.save(checkpoint,out/'best.pt')
             with (out/'train.jsonl').open('a') as stream:
@@ -459,12 +499,14 @@ def cache_targets(args):
             raise ValueError('Parser training overlaps held-out target')
         key=digest(r['target_image']);path=out/f'{key}.png'
         if key not in seen:
-            if not (args.resume and path.exists()):
+            if not (args.resume and path.exists() and path.with_suffix('.json').exists()):
                 predictions=detect(model,detector_input(r['target_image']),args.threshold)
                 abstract_image(predictions,r['viewport'],args.size).save(path)
                 write_json(out/f'{key}.json',predictions)
             seen[key]=str(path)
-        result.append({**r,'predicted_target_abstract':seen[key],'parser_sha':parser_sha,'parser_provenance':str(provenance)})
+        result.append({**r,'predicted_target_abstract':seen[key],
+            'predicted_target_elements':str(path.with_suffix('.json')),
+            'parser_sha':parser_sha,'parser_provenance':str(provenance)})
     write_jsonl(out/'data.jsonl',result)
     return result
 

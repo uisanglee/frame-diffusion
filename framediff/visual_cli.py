@@ -34,10 +34,10 @@ def add_parsers(sub):
                            help='Confidence threshold for checkpoint-time IoU50 validation metrics')
         else:
             p.add_argument('--mode',choices=['screenshot','abstract'],required=True)
-            p.add_argument('--policy-head',choices=['flat','hierarchical'],default='flat')
+            p.add_argument('--policy-head',choices=['flat','hierarchical','autoregressive'],default='flat')
             p.add_argument('--numeric-only',action='store_true')
             p.add_argument('--balanced-policy',action='store_true',
-                           help='Balanced STOP/EDIT and property sampling, factorized hierarchy loss, visual STOP residual')
+                           help='Balanced property sampling and structured token NLL; legacy heads also balance STOP/EDIT')
             p.add_argument('--decoding',choices=['joint','aggregate'],default='joint')
             for k,v in [('size',384),('hidden',128),('layers',3),('heads',4),('max-nodes',128),('token-grid',12)]:p.add_argument('--'+k,type=int,default=v)
     p=sub.add_parser('visual-cache-targets',help='Run frozen detector once per target for policy fine-tuning')
@@ -52,6 +52,10 @@ def add_parsers(sub):
     p.add_argument('--decoding',choices=['joint','aggregate'],help='Override flat decoding for a paired ablation')
     for k in ('data','raw-checkpoint','abstract-checkpoint','detector-checkpoint','out'):p.add_argument('--'+k,required=True)
     p.add_argument('--device',default='auto');p.add_argument('--threshold',type=float,default=.4)
+    p.add_argument('--goal-threshold',type=float,default=-1,
+                   help='RGB MAE termination threshold; -1 disables for fixed-budget comparisons')
+    p.add_argument('--abstract-goal-threshold',type=float,default=-1,
+                   help='Semantic mask MAE termination threshold; calibrate on validation only; -1 disables')
     p.add_argument('--time-budget',type=float,default=0.,help='Per-method seconds including target preprocessing; soft operation-boundary limit')
     p.add_argument('--oracle-ablation',action='store_true',help='Controlled visual-build-data pages ONLY')
     p.add_argument('--resume',action='store_true')
@@ -68,6 +72,9 @@ def run(args):
         return prepare(args)
     if getattr(args,'threshold',.4)<0 or getattr(args,'threshold',.4)>1:raise ValueError('threshold must be in [0,1]')
     if getattr(args,'metric_threshold',.4)<0 or getattr(args,'metric_threshold',.4)>1:raise ValueError('metric-threshold must be in [0,1]')
+    for key in ('goal_threshold','abstract_goal_threshold'):
+        value=getattr(args,key,-1)
+        if value!=-1 and not 0<=value<=1:raise ValueError(key+' must be -1 or in [0,1]')
     if getattr(args,'limit',0)<0:raise ValueError('limit must be nonnegative')
     if getattr(args,'warmup',0)<0:raise ValueError('warmup must be nonnegative')
     if not 0<=getattr(args,'max_source_mae',1.)<=1:raise ValueError('max-source-mae must be in [0,1]')

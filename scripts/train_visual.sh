@@ -13,6 +13,7 @@ if [[ -z "${TRAIN_HTML_MANIFEST:-}" && ! -f "$manifest" ]]; then
 fi
 python -m framediff visual-build-data --manifest "$manifest" --out "$data_dir/rendered" \
   --abstract-size "$abs_size" --trajectories "${TRAJECTORIES:-3}" --max-noise "${MAX_NOISE:-4}" --resume
+python -m framediff visual-subset-numeric --rendered "$data_dir/rendered" --out "$data_dir/numeric"
 train_stage() {
   local command=$1 output=$2 init=$3
   shift 3
@@ -37,7 +38,7 @@ train_stage visual-train-detector "$run_dir/detector" '' \
 python -m framediff visual-evaluate-detector --data "$data_dir/rendered/detector-test.jsonl" \
   --checkpoint "$run_dir/detector/best.pt" --out "$run_dir/detector-test.json" --device "$device"
 for split in train val; do
-  python -m framediff visual-cache-targets --data "$data_dir/rendered/policy-$split.jsonl" \
+  python -m framediff visual-cache-targets --data "$data_dir/numeric/policy-$split.jsonl" \
     --checkpoint "$run_dir/detector/best.pt" --out "$data_dir/predicted-$split" \
     --device "$device" --size "$abs_size" --resume
 done
@@ -47,10 +48,11 @@ for mode in screenshot abstract; do
   size=$raw_size; label=raw
   if [[ "$mode" == abstract ]]; then size=$abs_size; label=abstract; fi
   train_stage visual-train-policy "$run_dir/$label-stage1" '' \
-    --train "$data_dir/rendered/policy-train.jsonl" --val "$data_dir/rendered/policy-val.jsonl" \
-    --mode "$mode" --size "$size" --steps "${POLICY_STAGE1_STEPS:-5000}" --bf16
-  train_data=$data_dir/rendered/policy-train.jsonl
-  val_data=$data_dir/rendered/policy-val.jsonl
+    --train "$data_dir/numeric/policy-train.jsonl" --val "$data_dir/numeric/policy-val.jsonl" \
+    --mode "$mode" --size "$size" --policy-head autoregressive --numeric-only --balanced-policy \
+    --steps "${POLICY_STAGE1_STEPS:-5000}" --bf16
+  train_data=$data_dir/numeric/policy-train.jsonl
+  val_data=$data_dir/numeric/policy-val.jsonl
   probability=0
   if [[ "$mode" == abstract ]]; then
     train_data=$data_dir/predicted-train/data.jsonl
@@ -59,6 +61,7 @@ for mode in screenshot abstract; do
   fi
   train_stage visual-train-policy "$run_dir/policy-$label" "$run_dir/$label-stage1/best.pt" \
     --train "$train_data" --val "$val_data" --mode "$mode" --size "$size" \
+    --policy-head autoregressive --numeric-only --balanced-policy \
     --steps "${POLICY_STAGE2_STEPS:-5000}" --lr 0.00003 --prediction-probability "$probability" --bf16
 done
 echo "Training complete: $run_dir. See docs/visual-policy.md for held-out evaluation."

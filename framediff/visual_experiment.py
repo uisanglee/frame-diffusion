@@ -14,7 +14,7 @@ from .html_feedback import refresh_geometry
 from .ir import read_jsonl,write_json,write_jsonl
 from .metrics import box_metrics
 from .train import select_device
-from .visual import (CONTRACT,ACTION_CONTRACT,abstract_image,elements,image_tensor,
+from .visual import (CONTRACT,ACTION_CONTRACT,abstract_image,elements,image_tensor,semantic_masks,observation_mae,
                      current_features,visual_batch,decode_action,load_policy)
 from .visual_train import load_detector,detect,detector_input
 from .web_experiment import digest,guard_run,signature
@@ -25,10 +25,10 @@ def sync(device):
 
 
 def rollout(browser,html,tree,viewport,target_path,policy,parser=None,threshold=.4,
-            steps=10,time_budget=0,oracle_elements=None,diagnostic_target_boxes=None):
+            steps=10,time_budget=0,oracle_elements=None,diagnostic_target_boxes=None,goal_threshold=-1):
     """Only the explicitly enabled oracle ablation accepts target elements.
 
-    Greedy actions (including STOP), no box/pixel oracle ranking, no hidden
+    Autoregressive policies have no learned STOP. No box/pixel oracle ranking, no hidden
     candidate search. Wall-clock budgets are soft and checked between operations.
     """
     device=next(policy.parameters()).device;cfg=policy.cfg
@@ -36,7 +36,9 @@ def rollout(browser,html,tree,viewport,target_path,policy,parser=None,threshold=
     stats={'target_abstraction_seconds':0.,'target_encoding_seconds':0.,'current_render_seconds':0.,
            'current_encoding_seconds':0.,'policy_seconds':0.,'layout_seconds':0.,
            'abstraction_calls':0,'current_image_encodings':0,'target_image_encodings':0,
-           'actions':0,'mode':cfg.mode,'stop_reason':'steps','history':[]}
+           'actions':0,'mode':cfg.mode,'stop_reason':'steps','history':[],
+           'observation_contract':cfg.observation_contract,'goal_threshold':goal_threshold,
+           'pair_encoding_seconds':0.,'pair_image_encodings':0,'dom_queries':0}
     t=time.perf_counter()
     if cfg.mode=='abstract':
         if oracle_elements is None:
@@ -49,32 +51,51 @@ def rollout(browser,html,tree,viewport,target_path,policy,parser=None,threshold=
         stats['predicted_elements']=len(items)
     else:
         with Image.open(target_path) as image:target=image.convert('RGB')
-    t=time.perf_counter()
-    with torch.inference_mode():target_tokens,_=policy.encode_image(image_tensor(target,cfg.size)[None].to(device))
-    sync(device);stats['target_encoding_seconds']=time.perf_counter()-t;stats['target_image_encodings']=1
+    target_tensor=(semantic_masks(items,viewport,cfg.size) if cfg.semantic else image_tensor(target,cfg.size))[None].to(device)
+    target_tokens=None
+    if cfg.policy_head!='autoregressive':
+        t=time.perf_counter()
+        with torch.inference_mode():target_tokens,_=policy.encode_image(target_tensor)
+        sync(device);stats['target_encoding_seconds']=time.perf_counter()-t;stats['target_image_encodings']=1
     root=tree['nodes'][0]['id'];ids=[n['id'] for n in tree['nodes'][1:]]
     t=time.perf_counter();browser.load(html,viewport);stats['layout_seconds']+=time.perf_counter()-t
     current_html=html;current_tree=copy.deepcopy(tree)
     for step in range(steps):
         if time_budget and time.perf_counter()-start>=time_budget:stats['stop_reason']='time_budget';break
         t=time.perf_counter();boxes=browser.tagged_boxes(ids);boxes[root]=[0,0,*viewport]
+        stats['dom_queries']+=1
         current_tree=refresh_geometry(current_tree,boxes);stats['layout_seconds']+=time.perf_counter()-t
         t=time.perf_counter()
         if cfg.mode=='screenshot':
             png=browser.page.screenshot(animations='disabled');browser.screenshots+=1
             with Image.open(io.BytesIO(png)) as image:current_image=image.convert('RGB')
+        elif cfg.semantic:current_image=semantic_masks(elements(current_tree,boxes,viewport),viewport,cfg.size)
         else:current_image=abstract_image(elements(current_tree,boxes,viewport),viewport,cfg.size)
         stats['current_render_seconds']+=time.perf_counter()-t
         t=time.perf_counter()
-        with torch.inference_mode():
-            current_tokens,current_map=policy.encode_image(image_tensor(current_image,cfg.size)[None].to(device))
+        current_tensor=(current_image if cfg.semantic else image_tensor(current_image,cfg.size))[None].to(device)
+        if cfg.policy_head=='autoregressive':
+            goal_mae=observation_mae(target_tensor,current_tensor,cfg.semantic)
+            if goal_threshold>=0 and goal_mae<=goal_threshold:
+                stats['history'].append({'step':step,'action':None,'boxes':boxes,
+                    'goal_mae':goal_mae,'elapsed_seconds':time.perf_counter()-start})
+                stats['stop_reason']='goal';break
+        if cfg.policy_head!='autoregressive':
+            with torch.inference_mode():current_tokens,current_map=policy.encode_image(current_tensor)
         sync(device);stats['current_encoding_seconds']+=time.perf_counter()-t;stats['current_image_encodings']+=1
         t=time.perf_counter()
         batch=visual_batch([current_features(current_tree,boxes,viewport,cfg.max_nodes)],device)
         with torch.inference_mode():
-            logits=policy.decode(batch,target_tokens,current_tokens,current_map)[0]
+            if cfg.policy_head=='autoregressive':
+                sync(device);pair_start=time.perf_counter()
+                tokens,feature_map=policy.encode_pair(target_tensor,current_tensor)
+                sync(device);pair_elapsed=time.perf_counter()-pair_start
+                stats['pair_encoding_seconds']+=pair_elapsed;stats['pair_image_encodings']+=1
+                logits=policy.decode(batch,tokens,None,feature_map)[0]
+                stats['target_image_encodings']+=1
+            else:logits=policy.decode(batch,target_tokens,current_tokens,current_map)[0]
             action=decode_action(int(policy.select(logits)),len(current_tree['nodes']))
-        sync(device);stats['policy_seconds']+=time.perf_counter()-t
+        sync(device);stats['policy_seconds']+=time.perf_counter()-t-(pair_elapsed if cfg.policy_head=='autoregressive' else 0.)
         history={'step':step,'action':action,'boxes':boxes,'elapsed_seconds':time.perf_counter()-start}
         stats['history'].append(history)
         if action is None:stats['stop_reason']='policy_stop';break
@@ -126,7 +147,10 @@ def evaluate(args):
     # Startup and warmup are excluded equally. No real target is parsed in warmup.
     if args.warmup:
         with torch.inference_mode():
-            for policy in (raw,abstract):policy.encode_image(torch.zeros(1,3,policy.cfg.size,policy.cfg.size,device=device))
+            for policy in (raw,abstract):
+                blank=torch.zeros(1,4 if policy.cfg.semantic else 3,policy.cfg.size,policy.cfg.size,device=device)
+                if policy.cfg.policy_head=='autoregressive':policy.encode_pair(blank,blank)
+                else:policy.encode_image(blank)
             parser([torch.zeros(3,parser_ck['config']['min_size'],parser_ck['config']['min_size'],device=device)])
         sync(device)
     methods={'screenshot-policy':raw,'abstract-policy':abstract}
@@ -157,7 +181,8 @@ def evaluate(args):
                             oracle=elements(record['current'],record['evaluation_target_boxes'],record['viewport'])
                         html,stats,target=rollout(browser,Path(record['tagged_html']).read_text(),record['current'],
                             record['viewport'],record['screenshot'],methods[method],parser,args.threshold,args.steps,args.time_budget,
-                            oracle,record.get('evaluation_target_boxes'))
+                            oracle,record.get('evaluation_target_boxes'),
+                            getattr(args,'abstract_goal_threshold',-1) if methods[method].cfg.semantic else args.goal_threshold)
                     except Exception as exc:error=str(exc)
                     if 'seconds' not in stats:stats['seconds']=time.perf_counter()-started
                     path=work/f'{method}-r{repeat+1}.html';path.write_text(html)
@@ -191,7 +216,10 @@ def evaluate(args):
         summary[method]={'n':len(selected),'failed':sum(r['failed'] for r in selected),
             'successful_n':len(valid),'successful_means':{k:statistics.mean(r[k] for r in valid if k in r)
               for k in ('seconds','target_abstraction_seconds','target_encoding_seconds','current_render_seconds',
-                        'current_encoding_seconds','policy_seconds','layout_seconds','browser_screenshots','browser_executions','actions')
+                        'current_encoding_seconds','pair_encoding_seconds','pair_image_encodings',
+                        'policy_seconds','layout_seconds','browser_screenshots','browser_executions','dom_queries','actions')
               if any(k in r for r in valid)}}
-    write_json(out/'timing-summary.json',{'methods':summary,'note':'Target preprocessing included; startup/warmup and final evaluation excluded. Greedy rollout, soft time budget, no oracle candidate selection.'})
+    write_json(out/'timing-summary.json',{'methods':summary,
+        'model_parameters':{name:sum(p.numel() for p in model.parameters()) for name,model in methods.items()},
+        'note':'Target preprocessing included; startup/warmup and final evaluation excluded. Abstract feedback still uses browser layout/reflow. Joint pair encoding runs every step; only target abstraction is cached. Thresholds default to disabled for fixed-budget comparison.'})
     return results

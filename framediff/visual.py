@@ -171,6 +171,38 @@ def image_tensor(image, size):
     return (tensor-torch.tensor([.485,.456,.406])[:,None,None])/torch.tensor([.229,.224,.225])[:,None,None]
 
 
+def semantic_masks(items, viewport, size):
+    """Four independent occupancy planes; preserve cross-class overlaps.
+
+    Area resampling retains fractional coverage of subpixel objects. No RGB
+    palette, IDs, ImageNet normalization, or artificial minimum box thickness.
+    """
+    w,h=viewport
+    if min(w,h,size)<=0:raise ValueError('Invalid semantic mask dimensions')
+    result=np.zeros((4,size,size),dtype=np.float32);scale=size/max(w,h)
+    for item in items:
+        label=int(item['label'])
+        if not 1<=label<=4:continue
+        x1,y1,x2,y2=map(float,item['box'])
+        if not all(math.isfinite(v) for v in (x1,y1,x2,y2)):raise ValueError('Nonfinite box')
+        x1,x2=max(0.,x1)*scale,min(w,x2)*scale
+        y1,y2=max(0.,y1)*scale,min(h,y2)*scale
+        if x2<=x1 or y2<=y1:continue
+        left,right=max(0,int(math.floor(x1))),min(size,int(math.ceil(x2)))
+        top,bottom=max(0,int(math.floor(y1))),min(size,int(math.ceil(y2)))
+        xs=np.arange(left,right);ys=np.arange(top,bottom)
+        coverage=np.maximum(0,np.minimum(ys+1,y2)-np.maximum(ys,y1))[:,None]*np.maximum(0,np.minimum(xs+1,x2)-np.maximum(xs,x1))[None,:]
+        region=result[label-1,top:bottom,left:right]
+        np.maximum(region,coverage,out=region)
+    return torch.from_numpy(result)
+
+
+def observation_mae(target,current,semantic=False):
+    if semantic:return float((target-current).abs().mean())
+    std=target.new_tensor([.229,.224,.225])[None,:,None,None]
+    return float(((target-current)*std).abs().mean())
+
+
 def current_features(tree, boxes, viewport, max_nodes):
     feature=encode(tree,[{'viewport':viewport,'target':{}}],max_nodes,[boxes])
     # ROI coordinates match the aspect-preserving square letterbox used by images.
@@ -212,15 +244,23 @@ class VisualConfig:
     numeric_only: bool = False
     decoding: str = 'joint'
     training_scheme: str = 'legacy'
+    observation_contract: str = 'rgb-pair-diff-v1'
+
+    @property
+    def semantic(self):return self.observation_contract=='semantic-mask-pair-diff-v1'
 
     def __post_init__(self):
-        if (self.policy_head not in ('flat','hierarchical') or self.decoding not in ('joint','aggregate') or
+        if self.observation_contract not in ('rgb-pair-diff-v1','semantic-mask-pair-diff-v1'):
+            raise ValueError('Unknown observation contract')
+        if self.semantic and (self.mode!='abstract' or self.policy_head!='autoregressive'):
+            raise ValueError('Semantic masks require abstract autoregressive policy')
+        if (self.policy_head not in ('flat','hierarchical','autoregressive') or self.decoding not in ('joint','aggregate') or
                 self.training_scheme not in ('legacy','balanced-v1')):
             raise ValueError('Invalid policy head/decoding')
         if self.training_scheme=='balanced-v1' and not self.numeric_only:
             raise ValueError('Balanced policy training requires numeric-only actions')
-        if self.policy_head=='hierarchical' and not self.numeric_only:
-            raise ValueError('Hierarchical policy requires numeric-only actions')
+        if self.policy_head in ('hierarchical','autoregressive') and not self.numeric_only:
+            raise ValueError('Structured policy requires numeric-only actions')
         if (self.mode not in ('abstract','screenshot') or self.contract!=CONTRACT or
                 self.action_contract!=ACTION_CONTRACT):raise ValueError('Visual policy contract mismatch')
         if self.size<32 or min(self.hidden,self.layers,self.heads,self.max_nodes,self.token_grid)<1 or self.hidden%self.heads:
@@ -229,12 +269,24 @@ class VisualConfig:
 
 class SpatialEncoder(nn.Module):
     """Pretrained ResNet18 with top-down stride-4/8/16 features and spatial tokens."""
-    def __init__(self, hidden, grid, pretrained=True):
+    def __init__(self, hidden, grid, pretrained=True, input_channels=3):
         super().__init__()
         from torchvision.models import resnet18, ResNet18_Weights
         from torchvision.ops.misc import FrozenBatchNorm2d
         backbone=resnet18(weights=ResNet18_Weights.DEFAULT if pretrained else None,
                           norm_layer=FrozenBatchNorm2d)
+        if input_channels!=3:
+            original=backbone.conv1
+            expanded=nn.Conv2d(input_channels,original.out_channels,kernel_size=original.kernel_size,
+                               stride=original.stride,padding=original.padding,bias=False)
+            with torch.no_grad():
+                # Preserve the pretrained RGB response while making target,
+                # current and absolute-difference triplets equally scaled.
+                if input_channels==9:
+                    expanded.weight.copy_(original.weight.repeat(1,3,1,1)/3)
+                else:
+                    expanded.weight.copy_(original.weight.mean(1,keepdim=True).repeat(1,input_channels,1,1)*3/input_channels)
+            backbone.conv1=expanded
         self.stem=nn.Sequential(backbone.conv1,backbone.bn1,backbone.relu,backbone.maxpool)
         self.stages=nn.ModuleList([backbone.layer1,backbone.layer2,backbone.layer3])
         self.projections=nn.ModuleList(nn.Conv2d(c,hidden,1) for c in (64,128,256))
@@ -258,7 +310,8 @@ class SpatialEncoder(nn.Module):
 class VisualPolicy(nn.Module):
     def __init__(self,cfg,pretrained=True):
         super().__init__();self.cfg=cfg
-        self.vision=SpatialEncoder(cfg.hidden,cfg.token_grid,pretrained)
+        self.vision=SpatialEncoder(cfg.hidden,cfg.token_grid,pretrained,
+                                   (12 if cfg.semantic else 9) if cfg.policy_head=='autoregressive' else 3)
         self.role=nn.Embedding(len(ROLES),cfg.hidden);self.name=nn.Embedding(4096,cfg.hidden)
         self.depth=nn.Embedding(33,cfg.hidden)
         self.props=nn.ModuleList(nn.Embedding(257,cfg.hidden) for _ in FIELDS)
@@ -270,7 +323,18 @@ class VisualPolicy(nn.Module):
         self.blocks=nn.ModuleList(Block(bc) for _ in range(cfg.layers))
         self.stop_threshold=.5
         stop_width=cfg.hidden*4 if cfg.training_scheme=='balanced-v1' else cfg.hidden
-        if cfg.policy_head=='hierarchical':
+        if cfg.policy_head=='autoregressive':
+            # p(action)=p(node) p(property|node) p(delta|property,node).
+            # As in Tree Diffusion, rollout termination is an external rendered
+            # goal test; this decoder has no learned STOP operation. The implementation scores
+            # every legal branch in parallel, but each later token is
+            # conditioned on the embeddings of the earlier tokens.
+            self.node_query=nn.Linear(cfg.hidden*2,cfg.hidden)
+            self.node_key=nn.Linear(cfg.hidden,cfg.hidden)
+            self.property_head=nn.Sequential(nn.Linear(cfg.hidden*3,cfg.hidden),nn.GELU(),nn.Linear(cfg.hidden,6))
+            self.property_token=nn.Embedding(6,cfg.hidden)
+            self.delta_head=nn.Sequential(nn.Linear(cfg.hidden*4,cfg.hidden),nn.GELU(),nn.Linear(cfg.hidden,10))
+        elif cfg.policy_head=='hierarchical':
             self.operation=(nn.Sequential(nn.Linear(stop_width,cfg.hidden),nn.GELU(),nn.Linear(cfg.hidden,2))
                             if cfg.training_scheme=='balanced-v1' else nn.Linear(cfg.hidden,2))
             self.node_head=nn.Linear(cfg.hidden,1)
@@ -283,6 +347,11 @@ class VisualPolicy(nn.Module):
 
     def encode_image(self,image):return self.vision(image)
 
+    def encode_pair(self,target,current):
+        """Tree-Diffusion-style visual condition [target,current,|difference|]."""
+        if self.cfg.policy_head!='autoregressive':raise ValueError('Paired encoding belongs to autoregressive policies')
+        return self.vision(torch.cat([target,current,(target-current).abs()],1))
+
     def decode(self,batch,target_tokens,current_tokens,current_map,return_components=False):
         from torchvision.ops import roi_align
         x=self.role(batch['roles'])+self.name(batch['names'])+self.depth(batch['depth'])
@@ -293,11 +362,16 @@ class VisualPolicy(nn.Module):
         rois=[r*current_map.shape[-1] for r in batch['roi']]
         local=roi_align(current_map,rois,output_size=3,spatial_scale=1.,aligned=True).mean((-1,-2))
         x=x+local.reshape_as(x)
-        memory=torch.cat([target_tokens+self.modality[0],current_tokens+self.modality[1]],1)
+        if self.cfg.policy_head=='autoregressive':
+            memory=target_tokens
+        else:
+            memory=torch.cat([target_tokens+self.modality[0],current_tokens+self.modality[1]],1)
         x=x+self.cross(self.norm(x),memory,memory,need_weights=False)[0]
         for block in self.blocks:x=block(x,batch['relation'],batch['mask'])
         x=self.norm(x);pooled=(x*batch['mask'][...,None]).sum(1)/batch['mask'].sum(1,keepdim=True)
-        if self.cfg.training_scheme=='balanced-v1':
+        if self.cfg.policy_head=='autoregressive':
+            stop_features=pooled # autoregressive branch builds a paired visual context below
+        elif self.cfg.training_scheme=='balanced-v1':
             target_mean=target_tokens.mean(1);current_mean=current_tokens.mean(1)
             stop_features=torch.cat([pooled,target_mean,current_mean,
                                      (target_tokens-current_tokens).abs().mean(1)],-1)
@@ -305,6 +379,31 @@ class VisualPolicy(nn.Module):
         legal=batch['action_legal'] & batch['mask'][:,:,None]
         if self.cfg.numeric_only:
             legal=legal.clone();legal[:,:,60:]=False
+        if self.cfg.policy_head=='autoregressive':
+            valid=legal[:,:,:60].reshape(*x.shape[:2],6,10)
+            def masked_logp(scores,mask):
+                safe=mask | ~mask.any(-1,keepdim=True)
+                return F.log_softmax(scores.float().masked_fill(~safe,float('-inf')),-1).masked_fill(~mask,float('-inf'))
+            node_valid=valid.any(-1).any(-1)
+            visual=target_tokens.mean(1);context=torch.cat([pooled,visual],-1)
+            node_scores=(self.node_key(x)*self.node_query(context)[:,None]).sum(-1)/math.sqrt(self.cfg.hidden)
+            nodes=masked_logp(node_scores,node_valid)
+            expanded_context=context[:,None].expand(-1,x.shape[1],-1)
+            node_context=torch.cat([expanded_context,x],-1)
+            props=masked_logp(self.property_head(node_context),valid.any(-1))
+            prop_tokens=self.property_token.weight[None,None].expand(x.shape[0],x.shape[1],-1,-1)
+            delta_context=torch.cat([
+                node_context[:,:,None].expand(-1,-1,6,-1),prop_tokens
+            ],-1)
+            values=masked_logp(self.delta_head(delta_context),valid)
+            joint=nodes[:,:,None,None]+props[:,:,:,None]+values
+            padded=F.pad(joint.flatten(2),(0,ACTIONS-60),value=float('-inf'))
+            # Keep an -inf sentinel slot for the shared decode_action API. It
+            # cannot be selected as STOP by an autoregressive policy.
+            sentinel=torch.full((x.shape[0],1),float('-inf'),device=x.device,dtype=padded.dtype)
+            logits=torch.cat([padded.flatten(1),sentinel],1)
+            components={'node':nodes,'property':props,'delta':values}
+            return (logits,components) if return_components else logits
         if self.cfg.policy_head=='hierarchical':
             valid=legal[:,:,:60].reshape(*x.shape[:2],6,10)
             # Empty parents get a finite dummy distribution before masking;
@@ -328,17 +427,24 @@ class VisualPolicy(nn.Module):
         return (logits,None) if return_components else logits
 
     def forward(self,batch,target,current,return_components=False):
+        if self.cfg.policy_head=='autoregressive':
+            visual_tokens,current_map=self.encode_pair(target,current)
+            return self.decode(batch,visual_tokens,None,current_map,return_components)
         target_tokens,_=self.encode_image(target);current_tokens,current_map=self.encode_image(current)
         return self.decode(batch,target_tokens,current_tokens,current_map,return_components)
 
     def select(self,logits):
+        if self.cfg.policy_head=='autoregressive':
+            edits=logits[...,:-1];action=edits.argmax(-1)
+            return torch.where(torch.isfinite(edits).any(-1),action,
+                               torch.full_like(action,edits.shape[-1]))
         if self.cfg.policy_head=='flat' and self.cfg.decoding=='joint':return logits.argmax(-1)
         # Compare STOP to total EDIT probability, not to one tiny edit class.
         edits=logits[...,:-1];stop=logits[...,-1]
         edit_total=torch.logsumexp(edits.float(),-1)
         stop_probability=torch.sigmoid(stop.float()-edit_total)
         choose_stop=stop_probability>=getattr(self,'stop_threshold',.5)
-        if self.cfg.policy_head=='hierarchical':
+        if self.cfg.policy_head in ('hierarchical','autoregressive'):
             shape=edits.shape[:-1]
             tree=edits.reshape(*shape,-1,ACTIONS)[...,:60].reshape(*shape,-1,6,10)
             node=torch.logsumexp(tree,(-1,-2)).argmax(-1)
@@ -364,7 +470,8 @@ def decode_action(index,n):
 
 def load_policy(path,device):
     checkpoint=torch.load(path,map_location='cpu',weights_only=True)
-    if checkpoint.get('kind')!='visual-policy-v3':raise ValueError('Requires a v3 no-padding/gap visual policy checkpoint; retrain legacy policies')
+    if checkpoint.get('kind') not in ('visual-policy-v3','visual-policy-v4','visual-policy-v5-no-stop','visual-policy-v6-semantic'):
+        raise ValueError('Requires a supported no-padding/gap visual policy checkpoint')
     model=VisualPolicy(VisualConfig(**checkpoint['config']),pretrained=False)
     model.load_state_dict(checkpoint['model']);model.stop_threshold=float(checkpoint.get('stop_threshold',.5))
     return model.to(device).eval(),checkpoint

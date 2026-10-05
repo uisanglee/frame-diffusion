@@ -16,6 +16,17 @@ def test_filter_removes_categorical_descendants_not_other_trajectories():
     assert all('policy_subset' not in r for r in rows)
 
 
+def test_filter_uses_actual_corruption_not_best_reverse_label():
+    rows=[
+        {'id':'page/clean','teacher_edits':[],'corruption_edit':None},
+        {'id':'page/t0-s0','teacher_edits':[[1,'width',-.05]],
+         'corruption_edit':[1,'align-items','center']},
+        {'id':'page/t0-s1','teacher_edits':[[1,'height',-.05]],
+         'corruption_edit':[1,'height',.05]},
+    ]
+    assert [r['id'] for r in numeric_rows(rows)]==['page/clean']
+
+
 def test_hierarchical_normalization_gradients_padding_and_reload(tmp_path):
     torch.set_num_threads(2)
     cfg=VisualConfig(size=32,hidden=16,layers=1,heads=2,token_grid=2,
@@ -83,6 +94,32 @@ def test_balanced_hierarchy_uses_visual_difference_for_operation():
     assert net.operation[0].weight.shape[1]==cfg.hidden*4
 
 
+def test_autoregressive_policy_uses_nine_channel_pair_and_token_conditioning(tmp_path):
+    torch.set_num_threads(2);torch.manual_seed(9)
+    cfg=VisualConfig(size=32,hidden=16,layers=1,heads=2,token_grid=2,numeric_only=True,
+                     policy_head='autoregressive',training_scheme='balanced-v1')
+    net=VisualPolicy(cfg,False)
+    assert net.vision.stem[0].in_channels==9
+    tree={'version':1,'nodes':[node('page',None,'page'),node('card','page','card',width=80)]}
+    boxes={'page':[0,0,320,240],'card':[16,20,80,30]}
+    batch=visual_batch([current_features(tree,boxes,[320,240],16)],'cpu')
+    target=torch.randn(1,3,32,32,requires_grad=True)
+    current=torch.randn(1,3,32,32,requires_grad=True)
+    logits,parts=net(batch,target,current,return_components=True)
+    assert set(parts)=={'node','property','delta'}
+    assert torch.allclose(logits.exp().sum(-1),torch.ones(1),atol=1e-5)
+    assert torch.isneginf(logits[0,-1])
+    loss=-(parts['node'][0,1]+parts['property'][0,1,0]+parts['delta'][0,1,0,9])/3
+    loss.backward()
+    assert target.grad.abs().sum()>0 and current.grad.abs().sum()>0
+    assert net.node_query.weight.grad is not None
+    assert net.property_token.weight.grad is not None
+    path=tmp_path/'autoregressive.pt'
+    torch.save({'kind':'visual-policy-v5-no-stop','config':asdict(cfg),'model':net.state_dict()},path)
+    restored,_=load_policy(path,'cpu')
+    with torch.no_grad():assert torch.allclose(logits,restored(batch,target,current))
+
+
 def test_numeric_prepare_train_resume_without_browser(tmp_path):
     from PIL import Image
     from framediff.ir import write_jsonl,read_jsonl
@@ -97,6 +134,7 @@ def test_numeric_prepare_train_resume_without_browser(tmp_path):
     for split in ('train','val','test'):
         base={'group':split,'source_sha':split,'split':split,'contract':CONTRACT,
               'action_contract':ACTION_CONTRACT,'viewport':[320,240],
+              'teacher_strategy':'best-improving-reverse-v1',
               'current':tree,'current_boxes':boxes,'current_html':str(html),
               **{k:str(image) for k in ('target_image','target_abstract','current_image','current_abstract')}}
         rows=[{**base,'id':split+'/clean','teacher_edits':[]}]+[
@@ -123,4 +161,11 @@ def test_numeric_prepare_train_resume_without_browser(tmp_path):
     assert 'false_stop_rate' in metrics
     assert set(metrics['validation_components'])=={'operation','node','property','delta'}
     assert 0<ck['stop_threshold']<1
+    ar=tmp_path/'autoregressive-policy'
+    ar_command=list(command);ar_command[ar_command.index('--out')+1]=str(ar)
+    ar_command[ar_command.index('--policy-head')+1]='autoregressive'
+    main(ar_command+['--steps','1'])
+    ar_ck=torch.load(ar/'last.pt',weights_only=True)
+    assert ar_ck['kind']=='visual-policy-v6-semantic' and ar_ck['config']['policy_head']=='autoregressive'
+    assert ar_ck['config']['observation_contract']=='semantic-mask-pair-diff-v1'
     assert original==(image.read_bytes(),html.read_bytes())

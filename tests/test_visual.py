@@ -68,6 +68,90 @@ def test_abstraction_is_id_free_and_spatial():
     assert not np.array_equal(a,c)
 
 
+def test_semantic_masks_preserve_overlaps_small_objects_and_letterbox():
+    from framediff.visual import semantic_masks,observation_mae
+    items=[{'label':1,'box':[10,10,40,40]}, {'label':4,'box':[0,0,80,50]},
+           {'label':3,'box':[90,20,90.5,20.5]}]
+    masks=semantic_masks(items,[100,50],32)
+    assert masks.shape==(4,32,32) and masks.min()>=0 and masks.max()<=1
+    assert masks[0,5,5]==masks[3,5,5]==1
+    assert masks[2].sum()>0 and masks[2].sum()<1
+    assert masks[:,16:,:].sum()==0
+    assert torch.equal(masks,semantic_masks(list(reversed(items)),[100,50],32))
+    assert observation_mae(masks[None],masks[None],True)==0
+    assert observation_mae(masks[None],torch.zeros_like(masks)[None],True)>0
+
+
+def test_semantic_policy_ce_gradients_and_checkpoint(tmp_path):
+    from framediff.visual import semantic_masks
+    torch.set_num_threads(2)
+    cfg=VisualConfig(size=32,hidden=16,layers=1,heads=2,token_grid=2,numeric_only=True,
+        policy_head='autoregressive',training_scheme='balanced-v1',
+        observation_contract='semantic-mask-pair-diff-v1')
+    net=VisualPolicy(cfg,False)
+    tree,boxes=fixture_tree()
+    batch=visual_batch([current_features(tree,boxes,[320,240],16)],'cpu')
+    target=semantic_masks([{'label':3,'box':[100,20,180,50]}],[320,240],32)[None].requires_grad_()
+    current=semantic_masks(elements(tree,boxes,[320,240]),[320,240],32)[None].requires_grad_()
+    logits,parts=net(batch,target,current,True)
+    assert net.vision.stem[0].in_channels==12 and not hasattr(net,'operation')
+    assert torch.isneginf(logits[0,-1])
+    loss=-(parts['node'][0,1]+parts['property'][0,1,0]+parts['delta'][0,1,0,9])/3
+    loss.backward()
+    assert torch.isfinite(loss) and target.grad.abs().sum()>0 and current.grad.abs().sum()>0
+    path=tmp_path/'semantic.pt'
+    torch.save({'kind':'visual-policy-v6-semantic','config':asdict(cfg),'model':net.state_dict()},path)
+    restored,_=load_policy(path,'cpu')
+    assert torch.allclose(logits,restored(batch,target,current))
+
+
+def test_semantic_training_uses_detector_json_without_rgb_assets(tmp_path,monkeypatch):
+    import random
+    from framediff.visual_train import policy_batch
+    from framediff.ir import write_json
+    tree,boxes=fixture_tree();items=elements(tree,boxes,[320,240])
+    prediction=tmp_path/'predictions.json';write_json(prediction,items)
+    cfg=VisualConfig(size=32,hidden=16,layers=1,heads=2,token_grid=2,numeric_only=True,
+        policy_head='autoregressive',training_scheme='balanced-v1',
+        observation_contract='semantic-mask-pair-diff-v1')
+    net=VisualPolicy(cfg,False)
+    row={'id':'page/edit','current':tree,'current_boxes':boxes,'viewport':[320,240],
+         'target_elements':items,'predicted_target_elements':str(prediction),
+         'teacher_edits':[[1,'width',.05]]}
+    def forbidden(*args,**kwargs):raise AssertionError('Semantic policy opened an RGB image')
+    monkeypatch.setattr(Image,'open',forbidden)
+    for probability in (0.,1.):
+        loss,_,_,_,parts=policy_batch(net,[row],'cpu',random.Random(42),probability)
+        assert torch.isfinite(loss) and set(parts)=={'node','property','delta'}
+
+
+@pytest.mark.browser
+def test_new_modalities_rollout_capture_counts(tmp_path,monkeypatch):
+    from framediff.html_bridge import HtmlBrowser
+    from framediff.plans import dom_tree
+    from framediff.visual import annotate
+    from framediff.visual_experiment import rollout
+    target=tmp_path/'target.png';calls=[]
+    with HtmlBrowser() as browser:
+        snapshot=browser.snapshot(HTML,[320,240],target,max_nodes=16)
+        tree,boxes,_=dom_tree(snapshot);annotate(browser,tree)
+        items=elements(tree,boxes,[320,240])
+        def fake_detect(*args):calls.append(1);return items
+        monkeypatch.setattr('framediff.visual_experiment.detect',fake_detect)
+        for mode in ('screenshot','abstract'):
+            cfg=VisualConfig(mode=mode,size=32,hidden=16,layers=1,heads=2,token_grid=2,numeric_only=True,
+                policy_head='autoregressive',training_scheme='balanced-v1',observation_contract=(
+                    'semantic-mask-pair-diff-v1' if mode=='abstract' else 'rgb-pair-diff-v1'))
+            policy=VisualPolicy(cfg,False).eval()
+            _,stats,_=rollout(browser,snapshot['html'],tree,[320,240],str(target),policy,
+                parser=object(),steps=2)
+            assert stats['actions']==2 and stats['stop_reason']=='steps'
+            assert stats['pair_image_encodings']==2 and stats['dom_queries']==2
+            assert stats['browser_screenshots']==(2 if mode=='screenshot' else 0)
+            assert stats['abstraction_calls']==(0 if mode=='screenshot' else 1)
+        assert len(calls)==1
+
+
 def test_structured_action_contract_is_single_and_normalized():
     assert validate_action((1,'margin-left',.05))==(1,'margin-left',.05)
     assert validate_action((1,'justify-content','space-between'))==(1,'justify-content','space-between')
@@ -231,6 +315,8 @@ def test_visual_data_training_resume_and_preparation(tmp_path,monkeypatch):
     train=list(read_jsonl(tmp_path/'data/policy-train.jsonl'))
     assert len(train)>=2 and train[0]['teacher_edits']==[]
     assert validate_action(train[1]['teacher_edits'][0])
+    assert train[1]['teacher_strategy']=='best-improving-reverse-v1'
+    assert validate_action(train[1]['corruption_edit'])
     common=['--train',str(tmp_path/'data/policy-train.jsonl'),'--val',str(tmp_path/'data/policy-val.jsonl'),
             '--out',str(tmp_path/'policy'),'--mode','abstract','--size','64','--hidden','16','--layers','1',
             '--heads','2','--max-nodes','16','--token-grid','3','--device','cpu','--cpu-threads','2',

@@ -29,10 +29,12 @@ python -m framediff web-prepare "${source_options[@]}" "${vlm_options[@]}" \
 extra=()
 if [[ "${ORACLE_ABLATION:-0}" == 1 ]]; then extra+=(--oracle-ablation); fi
 python -m framediff visual-evaluate --data "$output_root/prepare/prepared.jsonl" \
-  --raw-checkpoint "$train_root/policy-raw/best.pt" --abstract-checkpoint "$train_root/policy-abstract/best.pt" \
-  --detector-checkpoint "$train_root/detector/best.pt" --out "$output_root/repair" \
+  --raw-checkpoint "${RAW_CHECKPOINT:-$train_root/policy-raw/best.pt}" --abstract-checkpoint "${ABSTRACT_CHECKPOINT:-$train_root/policy-abstract/best.pt}" \
+  --detector-checkpoint "${DETECTOR_CHECKPOINT:-$train_root/detector/best.pt}" --out "$output_root/repair" \
   --device "${DEVICE:-cuda}" --steps "${REPAIR_STEPS:-20}" --repeats "${REPEATS:-3}" \
-  --time-budget "${TIME_BUDGET:-0}" --limit "${PAGE_LIMIT:-0}" "${extra[@]}" --resume
+  --time-budget "${TIME_BUDGET:-0}" --goal-threshold "${GOAL_THRESHOLD:--1}" \
+  --abstract-goal-threshold "${ABSTRACT_GOAL_THRESHOLD:--1}" \
+  --limit "${PAGE_LIMIT:-0}" "${extra[@]}" --resume
 metrics=()
 if [[ -n "${OFFICIAL_REPO:-}" && "${WEB_DATASET:-design2code}" != webui ]]; then metrics+=(--official-repo "$OFFICIAL_REPO"); fi
 python -m framediff web-evaluate --data "$output_root/repair/results.jsonl" \

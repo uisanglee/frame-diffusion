@@ -68,7 +68,7 @@ def build(args):
     sources=[{**r,'source_sha':digest(r['html'])} for r in sources];validate_splits(sources)
     if len({r['id'] for r in sources})!=len(sources):raise ValueError('Duplicate source IDs')
     out=Path(args.out).resolve()
-    config={'kind':'visual-data-v3','contract':CONTRACT,'action_contract':ACTION_CONTRACT,
+    config={'kind':'visual-data-v4-best-reverse','contract':CONTRACT,'action_contract':ACTION_CONTRACT,
             'sources':sources,'settings':{k:v for k,v in vars(args).items() if k not in ('out','resume')}}
     guard_run(out,config,args.resume)
     policy=[];detection=[];pages=[];errors=[]
@@ -105,14 +105,38 @@ def build(args):
                 ids=[n['id'] for n in tree['nodes'][1:]];root=tree['nodes'][0]['id']
                 base={k:source[k] for k in ('id','group','split','source_sha')}
                 base.update(contract=CONTRACT,action_contract=ACTION_CONTRACT,viewport=viewport,target_image=str(work/'target.png'),
-                            target_abstract=str(work/'target-abstract.png'))
+                            target_abstract=str(work/'target-abstract.png'),
+                            teacher_strategy='best-improving-reverse-v1',target_elements=target_elements)
                 abstract_image(elements(tree,target_boxes,viewport),viewport,args.abstract_size).save(base['target_abstract'])
                 def observe():
                     boxes=browser.tagged_boxes(ids);boxes[root]=[0,0,*viewport];return boxes
                 def distance(boxes):
                     return sum(abs(boxes[k][a]-target_boxes[k][a])/viewport[a%2]
                                for k in ids for a in range(4))/max(1,4*len(ids))
-                def save_example(name,current_html,boxes,edit):
+                def best_reverse(current_html,boxes,candidates):
+                    """Choose the legal path edit with the largest target-distance decrease.
+
+                    Candidate evaluation is an offline data-construction cost.  It
+                    never runs during policy inference.  Reflow is observed in the
+                    browser, so edits are ranked by their effect on every element,
+                    not only by the declaration that was changed.
+                    """
+                    before=distance(boxes);best=None;best_distance=before
+                    for edit in candidates:
+                        if not action_is_legal(tree,boxes,viewport,edit):continue
+                        i,field,value=edit;nid=tree['nodes'][i]['id']
+                        try:
+                            browser.load(current_html,viewport)
+                            browser.edit_visual_action(current_html,viewport,nid,field,value)
+                            observed=observe();score=distance(observed)
+                        except ValueError:
+                            continue
+                        if score<best_distance-1e-9:
+                            best_distance=score;best=list(edit)
+                    browser.load(current_html,viewport)
+                    if best is None:raise ValueError('No reverse-path edit improves the target distance')
+                    return best,before,best_distance
+                def save_example(name,current_html,boxes,edit,corruption=None):
                     current_tree=refresh_geometry(tree,boxes)
                     screenshot=work/f'{name}.png';browser.page.screenshot(path=str(screenshot),animations='disabled')
                     browser.screenshots+=1
@@ -122,13 +146,14 @@ def build(args):
                     html_path=work/f'{name}.html';html_path.write_text(current_html)
                     record={**base,'id':source['id']+'/'+name,'current':current_tree,'current_boxes':copy.deepcopy(boxes),
                         'current_image':str(screenshot),'current_abstract':str(abstract),'current_html':str(html_path),
-                        'teacher_edits':[] if edit is None else [edit]}
+                        'teacher_edits':[] if edit is None else [edit],
+                        'corruption_edit':corruption}
                     local_policy.append(record)
                     local_detection.append({**base,'id':record['id'],'image':str(screenshot),'elements':labels})
                 browser.load(tagged,viewport);save_example('clean',tagged,target_boxes,None)
                 last_corrupted=None
                 for trajectory in range(args.trajectories):
-                    html=tagged;boxes=target_boxes;used=set()
+                    html=tagged;boxes=target_boxes;used=set();reverse_path=[]
                     for step in range(args.max_noise):
                         accepted=False
                         for attempt in range(30):
@@ -151,8 +176,13 @@ def build(args):
                             # Verify the inverse pixel action in the real browser.
                             browser.edit_visual_action(candidate_html,viewport,nid,*inverse);restored=observe()
                             if max(abs(restored[k][a]-boxes[k][a]) for k in ids for a in range(4))>.15:continue
+                            reverse_path.append(teacher)
+                            best_teacher,before_distance,after_distance=best_reverse(candidate_html,candidate,reverse_path)
                             browser.load(candidate_html,viewport)
-                            save_example(f't{trajectory}-s{step}',candidate_html,candidate,teacher)
+                            save_example(f't{trajectory}-s{step}',candidate_html,candidate,best_teacher,[i,field,value])
+                            local_policy[-1]['teacher_distance_before']=before_distance
+                            local_policy[-1]['teacher_distance_after']=after_distance
+                            local_policy[-1]['teacher_candidate_count']=len(reverse_path)
                             html,boxes=candidate_html,candidate;used.add((i,field));accepted=True
                             last_corrupted=local_policy[-1];break
                         if not accepted:break

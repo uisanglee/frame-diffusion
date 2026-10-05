@@ -57,6 +57,7 @@ else
     --abstract-size "$abs_size" --trajectories "${TRAJECTORIES:-3}" --max-noise "${MAX_NOISE:-4}" \
     --min-elements "${MIN_ELEMENTS:-3}" --max-source-mae "${MAX_SOURCE_MAE:-1.0}" --resume
 fi
+python -m framediff visual-subset-numeric --rendered "$data_dir/rendered" --out "$data_dir/numeric"
 
 train_stage() {
   local command=$1 output=$2 init=$3 lr=$4
@@ -130,7 +131,7 @@ if [[ "$refresh_target_cache" == 1 ]]; then
   done
 fi
 for split in train val; do
-  python -m framediff visual-cache-targets --data "$data_dir/rendered/policy-$split.jsonl" \
+  python -m framediff visual-cache-targets --data "$data_dir/numeric/policy-$split.jsonl" \
     --checkpoint "$run_dir/detector/best.pt" --out "$data_dir/predicted-$split" \
     --device "$device" --size "$abs_size" --resume
 done
@@ -150,10 +151,11 @@ for mode in screenshot abstract; do
   size=$raw_size; label=raw; init=$raw_init
   if [[ "$mode" == abstract ]]; then size=$abs_size; label=abstract; init=$abstract_init; fi
   train_stage visual-train-policy "$run_dir/$label-stage1" "$init" "${POLICY_LR:-0.00003}" \
-    --train "$data_dir/rendered/policy-train.jsonl" --val "$data_dir/rendered/policy-val.jsonl" \
-    --mode "$mode" --size "$size" --steps "${POLICY_STAGE1_STEPS:-3000}" --bf16
-  train_data="$data_dir/rendered/policy-train.jsonl"
-  val_data="$data_dir/rendered/policy-val.jsonl"
+    --train "$data_dir/numeric/policy-train.jsonl" --val "$data_dir/numeric/policy-val.jsonl" \
+    --mode "$mode" --size "$size" --policy-head autoregressive --numeric-only --balanced-policy \
+    --steps "${POLICY_STAGE1_STEPS:-3000}" --bf16
+  train_data="$data_dir/numeric/policy-train.jsonl"
+  val_data="$data_dir/numeric/policy-val.jsonl"
   probability=0
   if [[ "$mode" == abstract ]]; then
     train_data="$data_dir/predicted-train/data.jsonl"
@@ -162,9 +164,10 @@ for mode in screenshot abstract; do
   fi
   train_stage visual-train-policy "$run_dir/policy-$label" "$run_dir/$label-stage1/best.pt" "${POLICY_STAGE2_LR:-0.00001}" \
     --train "$train_data" --val "$val_data" --mode "$mode" --size "$size" \
+    --policy-head autoregressive --numeric-only --balanced-policy \
     --steps "${POLICY_STAGE2_STEPS:-3000}" --prediction-probability "$probability" --bf16
 done
 
 echo "WebUI fine-tuning complete: $run_dir"
-echo "Held-out controlled manifest: $data_dir/rendered/pages-test.jsonl"
+echo "Held-out controlled manifest: $data_dir/numeric/pages-test.jsonl"
 echo "Original WebUI test selection: $data_dir/source/manifest-test.jsonl"

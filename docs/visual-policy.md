@@ -1,7 +1,9 @@
 # Image-conditioned FrameDiff
 
-크기·margin 전용 계층형 policy와 기존 detector/렌더링 재사용 경로는
-[numeric-policy.md](numeric-policy.md)를 참고한다. 아래는 기존 전체 v3 grammar의 설명이다.
+현재 v6는 TUIDE에 semantic mask 12채널, 비교 모델에 실제 screenshot RGB 9채널을
+사용한다. 두 정책 모두 STOP 없는 node/property/delta CE로 학습한다.
+현재 명령어와 detector/렌더링 재사용 방법은 [numeric-policy.md](numeric-policy.md)를
+참고한다. 아래는 기존 경로의 설명이며, RGB 박스 PNG는 v6에서는 시각화 용도다.
 
 이 경로는 **고정 계획/목표 좌표 residual 없이 이미지로 action을 예측**한다.
 기존 box/plan 체크포인트와 호환되지 않으며 새로 학습해야 한다.
@@ -263,3 +265,12 @@ step을 해석한다. 논문 표의 최종 성능은 별도의 held-out evaluati
 
 현재 범위는 동일 DOM에서 위치·크기·정렬·공간 관계 회복이다. DOM reparenting/새 요소 생성,
 responsive CSS 전체 복원, 실제 benchmark 성능 향상은 보장하지 않는다.
+# Current observation contract (v6)
+
+TUIDE's autoregressive abstract policy now consumes 12 semantic mask channels:
+four target planes, four current planes and four absolute-difference planes.
+The screenshot comparison consumes 9 channels from the actual target/current RGB
+screenshots and their difference. Canonical RGB box PNGs are diagnostic previews,
+not the new abstract policy's input. Both policies use node/property/delta CE
+and have no learned STOP. See [numeric-policy.md](numeric-policy.md) for current
+cached-data training and evaluation commands, checkpoint compatibility and timing.
