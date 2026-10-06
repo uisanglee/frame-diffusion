@@ -6,17 +6,64 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
 
-if [[ $# -lt 1 || $# -gt 4 ]]; then
-  echo 'Usage: bash scripts/prepare_numeric_policy_v7.sh OLD_RENDERED [DETECTOR_BEST_PT] [NEW_RENDERED] [SHARED_RUN]' >&2
+if [[ $# -gt 4 ]]; then
+  echo 'Usage: bash scripts/prepare_numeric_policy_v7.sh [OLD_RENDERED] [DETECTOR_BEST_PT] [NEW_RENDERED] [SHARED_RUN]' >&2
   exit 2
 fi
 
-old_rendered=$1
+old_rendered=${1:-}
 detector=${2:-runs/webui-10k-v3-nospacing-fresh-webui/detector/best.pt}
 new_rendered=${3:-data/webui-10k-v7-multipositive/rendered}
 shared_run=${4:-runs/numeric-policy-v7-shared-fresh}
 python_bin=${PYTHON:-python}
 cache_gpu=${CACHE_GPU:-3}
+
+discover_rendered() {
+  "$python_bin" - "$new_rendered" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+excluded=Path(sys.argv[1]).resolve()
+candidates=[]
+for train in Path('data').glob('**/policy-train.jsonl'):
+    folder=train.parent
+    if folder.resolve()==excluded:
+        continue
+    required=[folder/f'{kind}-{split}.jsonl'
+              for split in ('train','val','test')
+              for kind in ('policy','pages','detector')]
+    if not all(path.is_file() for path in required):
+        continue
+    rows=0
+    has_corruption=False
+    try:
+        with train.open() as stream:
+            for line in stream:
+                rows+=1
+                if not has_corruption:
+                    row=json.loads(line)
+                    has_corruption=bool(row.get('corruption_edit'))
+    except (OSError,json.JSONDecodeError):
+        continue
+    if rows and has_corruption:
+        candidates.append((rows,str(folder)))
+if not candidates:
+    raise SystemExit('Could not auto-discover a complete rendered corruption corpus under data/')
+candidates.sort(reverse=True)
+print(candidates[0][1])
+PY
+}
+
+if [[ -z "$old_rendered" || ! -f "$old_rendered/policy-train.jsonl" ]]; then
+  if [[ -n "$old_rendered" ]]; then
+    echo "Supplied source is invalid; auto-discovering instead: $old_rendered" >&2
+  else
+    echo 'Auto-discovering the largest complete rendered corruption corpus under data/ ...' >&2
+  fi
+  old_rendered=$(discover_rendered)
+fi
+echo "Selected source rendered corpus: $old_rendered"
 
 for split in train val test; do
   for kind in policy pages detector; do
@@ -87,4 +134,3 @@ echo 'v7 policy data preparation complete.'
 echo "  rendered: $new_rendered"
 echo "  shared:   $shared_run"
 echo "  detector: $detector"
-

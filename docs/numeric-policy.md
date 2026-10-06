@@ -83,7 +83,7 @@ The recommended v7 workflow is split into one shared preparation job and two
 independent GPU lanes:
 
 ```bash
-bash scripts/prepare_numeric_policy_v7.sh OLD_RENDERED
+bash scripts/prepare_numeric_policy_v7.sh
 
 nohup bash scripts/train_numeric_policy_gpu1.sh > log/policy-v7-screenshot-gpu1.log 2>&1 &
 nohup bash scripts/train_numeric_policy_gpu3.sh > log/policy-v7-abstract-gpu3.log 2>&1 &
@@ -93,6 +93,8 @@ The first command performs browser-verified multi-positive relabeling, creates
 the numeric subset, and caches frozen-detector targets. The GPU 1 script trains
 only the RGB screenshot policy; the GPU 3 script trains only the semantic-mask
 abstract policy. Both read the prepared shared files without modifying them.
+With no arguments, preparation automatically selects the largest complete
+rendered corruption corpus under `data/`; explicit paths remain optional.
 
 If you already have v4 best-reverse data, relabel it once into the multi-positive
 format before creating the numeric subset. The numeric subset
