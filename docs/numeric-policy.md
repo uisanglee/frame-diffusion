@@ -94,7 +94,9 @@ the numeric subset, and caches frozen-detector targets. The GPU 1 script trains
 only the RGB screenshot policy; the GPU 3 script trains only the semantic-mask
 abstract policy. Both read the prepared shared files without modifying them.
 With no arguments, preparation automatically selects the largest complete
-rendered corruption corpus under `data/`; explicit paths remain optional.
+corpus at `data/webui-10k-v5-improvement-distribution` (including its optional
+`rendered/` child). If that default is absent, it falls back to discovering the
+largest complete rendered corruption corpus under `data/` or `runs/`.
 
 If you already have v4 best-reverse data, relabel it once into the multi-positive
 format before creating the numeric subset. The numeric subset

@@ -211,7 +211,8 @@ def test_legacy_policy_relabel_reuses_assets_and_browser_reflow(tmp_path):
                      'id':f'page-{split}/t0-s0'}]
         write_jsonl(source/f'policy-{split}.jsonl',split_rows)
         write_jsonl(source/f'pages-{split}.jsonl',[{'id':f'page-{split}','split':split}])
-        write_jsonl(source/f'detector-{split}.jsonl',[])
+        # Detector annotations are optional: policy relabeling only needs the
+        # cached HTML/boxes and page manifests.
     out=tmp_path/'relabeled';args=SimpleNamespace(rendered=str(source),out=str(out),resume=False)
     result=relabel_best_reverse(args)
     assert result['kept_rows']==6 and result['rejected_rows']==0

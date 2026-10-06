@@ -74,7 +74,9 @@ def relabel_best_reverse(args):
     source=Path(args.rendered).resolve();out=Path(args.out).resolve()
     if out==source or source in out.parents:raise ValueError('Use a separate relabeled output directory')
     paths=[source/f'{kind}-{split}.jsonl' for split in ('train','val','test')
-           for kind in ('policy','pages','detector')]
+           for kind in ('policy','pages')]
+    paths += [path for split in ('train','val','test')
+              if (path:=source/f'detector-{split}.jsonl').exists()]
     config={'kind':'visual-relabel-improvement-distribution-v3','contract':CONTRACT,'action_contract':ACTION_CONTRACT,
             'sources':{str(path):digest(path) for path in paths}}
     guard_run(out,config,args.resume)
@@ -160,7 +162,9 @@ def relabel_best_reverse(args):
             pages=[page for page in read_jsonl(source/f'pages-{split}.jsonl') if page['id'] in successful_pages]
             write_jsonl(out/f'policy-{split}.jsonl',relabeled)
             write_jsonl(out/f'pages-{split}.jsonl',pages)
-            write_jsonl(out/f'detector-{split}.jsonl',read_jsonl(source/f'detector-{split}.jsonl'))
+            detector_path=source/f'detector-{split}.jsonl'
+            if detector_path.exists():
+                write_jsonl(out/f'detector-{split}.jsonl',read_jsonl(detector_path))
             write_json(out/f'relabel-{split}.json',{'pages':len(successful_pages),'rows':len(relabeled),
                                                     'failures':failures})
             totals['pages']+=len(successful_pages);totals['kept_rows']+=len(relabeled)
