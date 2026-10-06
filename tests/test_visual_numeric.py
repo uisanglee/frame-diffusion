@@ -167,59 +167,6 @@ def test_numeric_prepare_train_resume_without_browser(tmp_path):
     ar=tmp_path/'autoregressive-policy'
     ar_command=list(command);ar_command[ar_command.index('--out')+1]=str(ar)
     ar_command[ar_command.index('--policy-head')+1]='autoregressive'
-    main(ar_command+['--steps','1'])
-    ar_ck=torch.load(ar/'last.pt',weights_only=True)
-    assert ar_ck['kind']=='visual-policy-v7-improvement' and ar_ck['config']['policy_head']=='autoregressive'
-    assert ar_ck['config']['observation_contract']=='semantic-mask-pair-diff-v1'
-    ar_metrics=list(read_jsonl(ar/'train.jsonl'))[-1]
-    assert 'improving_action_rate' in ar_metrics
-    assert 'exact_best_action_accuracy' not in ar_metrics
-    assert 'mean_best_distance_reduction' not in ar_metrics
-    assert 'mean_fraction_of_best_improvement' not in ar_metrics
-    assert set(ar_metrics['validation_components'])=={'joint_improvement'}
+    with pytest.raises(ValueError,match='training retired'):
+        main(ar_command+['--steps','1'])
     assert original==(image.read_bytes(),html.read_bytes())
-
-
-@pytest.mark.browser
-def test_legacy_policy_relabel_reuses_assets_and_browser_reflow(tmp_path):
-    from types import SimpleNamespace
-    from framediff.ir import write_jsonl,read_jsonl
-    from framediff.visual_numeric import relabel_best_reverse
-    from framediff.visual import CONTRACT,ACTION_CONTRACT
-    source=tmp_path/'legacy';source.mkdir();assets=tmp_path/'assets';assets.mkdir()
-    target_html=assets/'target.html';target_html.write_text(
-        '<html><body style="margin:0"><div data-fd-id="fd-1" '
-        'style="width:100px;height:20px"></div></body></html>')
-    current_html=assets/'current.html';current_html.write_text(
-        '<html><body style="margin:0"><div data-fd-id="fd-1" '
-        'style="width:120px;height:20px"></div></body></html>')
-    image=assets/'unchanged.png';Image.new('RGB',(400,200),'white').save(image);original=image.read_bytes()
-    tree={'version':1,'nodes':[node('__viewport__',None,'page'),node('fd-1','__viewport__','div',width=100)]}
-    tree['nodes'][1]['visual_class']=4
-    common={'group':'page','source_sha':'page','split':'train','contract':CONTRACT,
-            'action_contract':ACTION_CONTRACT,'viewport':[400,200],'target_image':str(image),
-            'target_abstract':str(image),'current_image':str(image),'current_abstract':str(image),'current':tree}
-    clean={**common,'id':'page/clean','current_boxes':{'__viewport__':[0,0,400,200],'fd-1':[0,0,100,20]},
-           'current_html':str(target_html),'teacher_edits':[]}
-    edit={**common,'id':'page/t0-s0','current_boxes':{'__viewport__':[0,0,400,200],'fd-1':[0,0,120,20]},
-          'current_html':str(current_html),'teacher_edits':[[1,'width',-.05]],
-          'corruption_edit':[1,'width',.05]}
-    for split in ('train','val','test'):
-        split_rows=[{**clean,'split':split,'group':f'page-{split}','source_sha':f'page-{split}',
-                     'id':f'page-{split}/clean'},
-                    {**edit,'split':split,'group':f'page-{split}','source_sha':f'page-{split}',
-                     'id':f'page-{split}/t0-s0'}]
-        write_jsonl(source/f'policy-{split}.jsonl',split_rows)
-        write_jsonl(source/f'pages-{split}.jsonl',[{'id':f'page-{split}','split':split}])
-        # Detector annotations are optional: policy relabeling only needs the
-        # cached HTML/boxes and page manifests.
-    out=tmp_path/'relabeled';args=SimpleNamespace(rendered=str(source),out=str(out),resume=False)
-    result=relabel_best_reverse(args)
-    assert result['kept_rows']==6 and result['rejected_rows']==0
-    rows=list(read_jsonl(out/'policy-train.jsonl'))
-    assert rows[1]['teacher_strategy']=='improvement-distribution-v1'
-    assert rows[1]['teacher_edits']==[[1,'width',-.05]]
-    assert rows[1]['improving_edits'][0]['edit']==[1,'width',-.05]
-    assert rows[1]['improving_edits'][0]['gain']>0
-    assert rows[1]['teacher_distance_after']<rows[1]['teacher_distance_before']
-    assert image.read_bytes()==original

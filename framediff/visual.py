@@ -308,6 +308,7 @@ class SpatialEncoder(nn.Module):
 
 
 class VisualPolicy(nn.Module):
+    """Historical delta heads; current CSS replacement decoder is TreePolicy."""
     def __init__(self,cfg,pretrained=True):
         super().__init__();self.cfg=cfg
         self.vision=SpatialEncoder(cfg.hidden,cfg.token_grid,pretrained,
@@ -470,8 +471,14 @@ def decode_action(index,n):
 
 def load_policy(path,device):
     checkpoint=torch.load(path,map_location='cpu',weights_only=True)
+    from .tree_policy import KIND,TreeConfig,TreePolicy
+    if checkpoint.get('kind')==KIND:
+        model=TreePolicy(TreeConfig(**checkpoint['config']),pretrained=False)
+        model.load_state_dict(checkpoint['model'])
+        return model.to(device).eval(),checkpoint
     if checkpoint.get('kind') not in ('visual-policy-v3','visual-policy-v4','visual-policy-v5-no-stop',
-                                      'visual-policy-v6-semantic','visual-policy-v7-improvement'):
+                                      'visual-policy-v6-semantic','visual-policy-v7-improvement',
+                                      'visual-policy-v8-tree-path'):
         raise ValueError('Requires a supported no-padding/gap visual policy checkpoint')
     model=VisualPolicy(VisualConfig(**checkpoint['config']),pretrained=False)
     model.load_state_dict(checkpoint['model']);model.stop_threshold=float(checkpoint.get('stop_threshold',.5))

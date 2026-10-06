@@ -1,9 +1,9 @@
 # Image-conditioned FrameDiff
 
-현재 v6는 TUIDE에 semantic mask 12채널, 비교 모델에 실제 screenshot RGB 9채널을
-사용한다. 두 정책 모두 STOP 없는 node/property/delta CE로 학습한다.
+현재 declaration-tree policy는 TUIDE에 semantic mask 12채널, 비교 모델에 실제 screenshot RGB 9채널을
+사용한다. 두 정책 모두 STOP 없이 CSS 선언 교체 토큰의 CE로 학습한다.
 현재 명령어와 detector/렌더링 재사용 방법은 [numeric-policy.md](numeric-policy.md)를
-참고한다. 아래는 기존 경로의 설명이며, RGB 박스 PNG는 v6에서는 시각화 용도다.
+참고한다. 아래는 역사적 경로의 설명이다. 새 정책의 action·loss·재사용 명령은 위 문서를 우선한다.
 
 이 경로는 **고정 계획/목표 좌표 residual 없이 이미지로 action을 예측**한다.
 기존 box/plan 체크포인트와 호환되지 않으며 새로 학습해야 한다.

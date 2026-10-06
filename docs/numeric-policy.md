@@ -1,192 +1,160 @@
-# Numeric-only policy recovery
+# CSS declaration-tree policy (current implementation)
 
-The detector is independent and remains frozen. The v6 policy uses 12 semantic
-mask channels for TUIDE and 9 original screenshot RGB channels for its baseline.
-The current policy version uses
-`improvement-distribution-v1` labels, so policy data must be relabeled or rebuilt with the current
-`visual-build-data` command.  Old v3 PNG/HTML assets may be archived, but their
-last-mutation labels must not be used to train the autoregressive policy.  After
-the v4 corpus exists, policy-only training never retrains the detector.  The fixed
-detector runs once per target to cache predicted abstractions.
+This is the current policy-only workflow. Old detector checkpoints and cached
+HTML/PNG observations are reusable. Old delta-policy checkpoints are NOT
+compatible with this replacement decoder: train the policy in a new run.
 
-## Actions and comparison
+## Four separate responsibilities
 
-Only width, height, margin-left, margin-right, margin-top and margin-bottom edits
-are selectable by the autoregressive policy. Each numeric change is one of the ten viewport-normalized
-deltas, bounded by 5%. Existing CSS flex/padding/gap is preserved, not edited.
-This is size/margin repair, **not general structural reconstruction**.
+| Layer | Implementation | What it does NOT decide |
+|---|---|---|
+| Grammar legality | tree_edits.EditTokenizer / validate_edit | Whether the rendered result improves |
+| Teacher construction | tree_edits.repair_path | Pixel/box gain or reversed corruption history |
+| Learning | tree_policy.TreePolicy.loss | Set probability, reward weighting, STOP |
+| Execution evaluation | visual_experiment.rollout + web-evaluate | Exact equality with a teacher action |
 
-Four comparisons can use the same numeric dataset:
+Reference inspected: [revalo/tree-diffusion at e8b29f2](https://github.com/revalo/tree-diffusion/tree/e8b29f27d6bd5e9fbf4679da49603df946b95eb1).
+In td/samplers/mutator.py, a Mutation replaces source text; reverse stores the
+original substring. find_path compares programs, not screenshots. Training in
+scripts/train.py uses masked ordinary next-token cross-entropy. Constrained
+decoding masks grammar-invalid continuations. Image goal checking is separate.
 
-1. Flat head + joint argmax: existing STOP-versus-individual-edit baseline.
-2. The exact same flat checkpoint + aggregate decoding: compare STOP probability
-   against the sum of all edit probabilities, then select the best edit.
-3. Hierarchical head: P(operation) P(node|edit) P(property|node,edit)
-   P(delta|property,node,edit). Greedy decoding follows that hierarchy. Training
-   uses separately normalized operation, node, property, and delta losses.
-   There is no forced minimum edit count.
-4. Autoregressive head (default): jointly encodes
-   `[target,current,abs(target-current)]`, points to a current LayoutIR
-   node, and conditions property on that node and delta on both previous tokens.
-   Its objective is a joint soft cross-entropy over every browser-verified
-   distance-reducing action. Target probability is proportional to whole-page
-   distance reduction; node, property and delta are not supervised as three
-   independent labels. It has
-   no learned STOP head or clean/STOP training examples. Rollout ends when the
-   step/time budget is exhausted. Optional external image goal tests are configured
-   separately with `--goal-threshold` (RGB) and `--abstract-goal-threshold` (masks).
-   Both default to -1 (disabled) for equal-step comparisons; calibrate thresholds
-   using validation pages only, never assume their numeric values are equivalent.
+This implementation transfers those distinctions to a RESTRICTED fixed-DOM CSS
+tree. It is not a byte-for-byte reproduction of TinySVG or full HTML synthesis.
 
-Screenshot feedback uses the original rendered RGB images (9 channels with pair
-and difference), not color-coded box previews. Abstract feedback uses four
-occupancy planes: text, image, control, painted-region (12 channels with pair and
-difference). Box edges use fractional pixel coverage to retain tiny elements;
-different classes can overlap. Masks use [0,1] values with no ImageNet RGB
-normalization. RGB previews are for inspection only.
+## Scope and action
 
-The detector processes the target once per rollout. Current masks come from the
-current DOM geometry; browser layout/reflow is still required, but screenshot
-capture is skipped. The paired encoder processes both masks at each step: only
-the target abstraction is cached, not its jointly conditioned encoder features.
-Timing reports distinguish pair encoding, policy decoding, DOM queries, layout,
-and screenshot capture, and include actual model parameter counts.
+Editable declarations: width, height, margin-left, margin-right, margin-top,
+margin-bottom. Padding, gap, flex, DOM insertion/removal, text and image content
+are not edited. They remain in the page and participate in browser reflow.
 
-Policy labels are not simply the inverse of the most recent corruption. During
-data construction, all legal reverse-path edits accumulated so far are tried in
-the browser. Every edit whose observed whole-page reflow reduces normalized
-target box distance is retained. If gains are `g(a)`, the supervision is
-`q(a)=g(a)/sum(g)`, and training minimizes `-sum_a q(a) log p(a|state)` over joint
-`(node, property, delta)` actions. Thus different valid repair orders are not
-marked wrong. Candidate rendering is an offline supervision cost and is not part
-of inference.
+An edit is:
+  node position → property → SET value + priority / REMOVE → EOS
 
-`improving_action_rate` means that the predicted action belongs to this
-browser-verified improvement set. `mean_distance_reduction`,
-`mean_improving_actions`, and final rollout IoU/MAE measure progress without
-reporting or requiring one prescribed reverse sequence.
+Examples: replace width:213px!important with width:50%; delete an inline
+height override to restore stylesheet/auto behavior; replace margin-left:-12px.
+EOS ends one edit, NOT the rollout. No learned STOP token exists.
+A mutation edits exactly ONE declaration. Unlike the retired policy, this
+restricts subtree size but does not bound a numeric delta to 5% of the viewport.
 
-For the autoregressive head, balanced-v1 samples the six edit properties uniformly
-instead of in corpus-frequency proportion. Legacy flat/hierarchical baselines keep
-their earlier balanced STOP/EDIT sampling and calibration solely for ablation.
+The finite CSS grammar supports decimal lengths, percentages, common units,
+auto, CSS-wide keywords, and intrinsic size keywords. It does not support
+arbitrary calc()/var() replacement expressions. Unsupported TARGET replacements
+and differences outside the editable tree are rejected with explicit reports,
+not approximated to pixels. Unchanged arbitrary CSS stays in the source.
+Overlapping inline logical-size/margin and all declarations are rejected because
+their ordering can affect the physical-property cascade outside this grammar.
 
-The legacy 81-slot indexing is retained for checkpoint/action interoperability;
-the 21 categorical slots are masked out, leaving 60 legal candidate slots per
-eligible node. Width/height positivity and DOM legality masks still apply.
-Old checkpoints remain loadable; new policy training starts with an ImageNet
-image backbone and new policy weights, not the collapsed old policy. Detector
-weights are independent and unchanged. Do not resume old policy output folders.
+CSSOM parses cached inline styles, including margin shorthands and priorities.
+Teacher generation diffs actual current and target declarations. Repeated
+corruption of one declaration is one difference, not several inverse actions.
+A shuffled sequence of direct replacements must reach the exact target
+declaration state. One next replacement is the teacher for each cached state.
 
-## Train (from the repository root)
+Loss is ordinary teacher-forced token CE, averaged over non-padding output
+tokens. No gain-weighted CE, log-sum-exp positive set, STOP objective, or
+best-action accuracy is used. Validation CE diagnoses imitation, NOT successful
+page repair. A different predicted edit can produce an equally correct image.
 
-The recommended v7 workflow is split into one shared preparation job and two
-independent GPU lanes:
+## Image conditioning
 
-```bash
-bash scripts/prepare_numeric_policy_v7.sh
+- Screenshot baseline: target RGB + current rendered RGB + absolute difference
+  = 9 channels. Current screenshot is captured after each edit.
+- Abstract policy: target/current four-class occupancy masks + difference
+  = 12 channels. Target detector runs once per rollout; current masks come from
+  current DOM geometry after layout/reflow. No current RGB capture is required.
 
-nohup bash scripts/train_numeric_policy_gpu1.sh > log/policy-v7-screenshot-gpu1.log 2>&1 &
-nohup bash scripts/train_numeric_policy_gpu3.sh > log/policy-v7-abstract-gpu3.log 2>&1 &
-```
+Both encode their paired observation each step and decode a replacement token
+sequence conditioned on current DOM geometry and current CSS declarations.
+Target HTML/declarations and target boxes are teacher/evaluation information,
+never inputs to rollout decisions. The optional abstract-oracle experiment is
+explicitly privileged. Browser layout is still required; abstraction does not
+mean CSS reflow is free.
 
-The first command performs browser-verified multi-positive relabeling, creates
-the numeric subset, and caches frozen-detector targets. The GPU 1 script trains
-only the RGB screenshot policy; the GPU 3 script trains only the semantic-mask
-abstract policy. Both read the prepared shared files without modifying them.
-With no arguments, preparation automatically selects the largest complete
-corpus at `data/webui-10k-v5-improvement-distribution` (including its optional
-`rendered/` child). If that default is absent, it falls back to discovering the
-largest complete rendered corruption corpus under `data/` or `runs/`.
+## Reuse existing data and detector
 
-If you already have v4 best-reverse data, relabel it once into the multi-positive
-format before creating the numeric subset. The numeric subset
-command derives target elements from cached clean DOM boxes without a browser.
-Cached detector prediction JSONs can also be reused by `visual-cache-targets`.
-The mask representation change alone requires no HTML rerendering.
+From repository root, using the existing Python environment:
 
-For legacy inverse-label data, relabel the cached trajectories in place by
-reference. This runs candidate CSS edits through Chromium to observe reflow, but
-does not regenerate or copy screenshots, HTML states, corruptions or detector data:
+~~~bash
+# One-time NEW label view; defaults to the existing v5 cached corpus.
+# Accepts either the corpus root or its rendered/ subdirectory.
+CACHE_GPU=4 bash scripts/prepare_numeric_policy_tree.sh
+~~~
 
-```bash
-python -m framediff visual-relabel-best-reverse \
-  --rendered data/webui-10k-v3-nospacing-fresh-webui/rendered \
-  --out data/webui-10k-v5-improvement-distribution/rendered \
-  --resume
-```
+Defaults:
+- Source: data/webui-10k-v5-improvement-distribution
+- Frozen detector: runs/webui-10k-v3-nospacing-fresh-webui/detector/best.pt
+- New label view: data/webui-css-tree-v1
+- Predicted target cache: runs/css-tree-v1-shared
 
-Use the new output as `EXISTING_RENDERED_DIR`. Per-page progress is resumable;
-`relabel-report.json` and `relabel-{train,val,test}.json` record exclusions.
+Supply these four paths as positional arguments if yours differ.
+No dataset deletion, detector training, HTML screenshot recapture, or blanket
+rerender occurs. Chromium is used only as an inert CSS parser during relabeling.
+The frozen detector cache is created once for this view and reused on reruns.
+Parsed-page caches avoid reparsing unchanged HTML. Missing source files cause a
+clear error; the script does not silently switch to another corpus.
 
-If you only have older last-mutation supervision, first create v4 policy supervision
-in a new directory. This rerenders candidate
-edits for labels but does not require retraining an existing detector:
+Inspect prepare-report.json and rejections-*.jsonl before full training. Each
+split must remain nonempty. Rejected pages can reduce test count; report the
+actual count. Test initial_html is selected from a retained repairable state.
 
-```bash
-python -m framediff visual-build-data \
-  --manifest data/webui-10k-v3-nospacing-fresh-webui/source/manifest.jsonl \
-  --out data/webui-10k-v4-autoregressive/rendered \
-  --abstract-size 384 --trajectories 3 --max-noise 4 --resume
-```
+## Two GPUs
 
-Then train the new policies with the frozen detector:
+~~~bash
+mkdir -p log
+nohup bash scripts/train_numeric_policy_gpu1.sh > log/css-tree-screenshot.log 2>&1 &
+nohup bash scripts/train_numeric_policy_gpu3.sh > log/css-tree-abstract.log 2>&1 &
+~~~
 
-```bash
-source .venv/bin/activate
+GPU 1: screenshot baseline. GPU 3: abstract policy.
+Both default to 30,000 stage-1 / 15,000 stage-2 maximum steps with early stopping.
+Stage 1 uses exact DOM target abstractions; stage 2 uses frozen detector outputs
+for the abstract model. Screenshot training keeps RGB for both stages.
+Each wrapper accepts the same four optional paths as documented in its usage.
+
+Existing last.pt resumes only matching data/configuration. Stage 2 initializes
+from the new stage-1 best.pt. Do not point these runs to old delta-policy output
+directories. Detector training is never called by these scripts.
+
+## Evaluate the same held-out controlled pages
+
+~~~bash
 CUDA_VISIBLE_DEVICES=1 \
-BATCH_SIZE=2 ACCUMULATION=4 VAL_SAMPLES=2000 EVAL_EVERY=500 \
-POLICY_STAGE1_STEPS=30000 POLICY_STAGE2_STEPS=15000 \
-bash scripts/train_numeric_policy.sh \
-  data/webui-10k-v4-autoregressive/rendered \
-  runs/webui-10k-v3-nospacing-fresh-webui/detector/best.pt \
-  runs/numeric-policy-v6-semantic
-```
-
-Use the actual existing detector path if different. The default now trains only
-the autoregressive head in screenshot/abstract modalities and two stages.
-`POLICY_HEADS="flat hierarchical autoregressive"` runs all architecture ablations.
-Stage 1 uses stored ground-truth abstractions; stage 2 uses frozen detector
-predictions for target abstractions. Screenshot stages use stored RGB images.
-`POLICY_MODES=abstract` or `POLICY_MODES=screenshot` trains only one modality.
-`PREPARE_DATA=0` may be used by parallel lanes after one process has completed
-subset/cache preparation. Identical arguments resume each stage from last.pt. Changed settings or source
-manifests require a new output directory. No source assets are regenerated.
-Set `POLICY_RUN_DIR` to write new balanced checkpoints separately while reusing
-the third argument's existing subset and predicted-target cache.
-New training records an explicit observation contract and checkpoint kind
-`visual-policy-v7-improvement`. Use a new policy output directory. Existing detectors
-remain compatible; old policy checkpoints remain loadable for legacy evaluation
-but cannot resume the new training contract.
-
-The subset retains clean samples and complete numeric-only trajectory prefixes.
-It drops categorical teacher edits **and all their descendants**, including ones
-with numeric labels. Missing predecessor rows are conservatively excluded.
-`subset/subset-report.json` records counts; `subset/pages-test.jsonl` selects a
-remaining numeric-corrupted initial HTML per test page. Thus the filtered test
-set is a new controlled evaluation, not directly comparable to old mixed-action
-results. It is not a screenshot-to-HTML end-to-end benchmark.
-
-## Paired held-out evaluation
-
-```bash
-CUDA_VISIBLE_DEVICES=1 \
-PAGE_MANIFEST=runs/numeric-policy-v6-semantic/subset/pages-test.jsonl \
-RAW_CHECKPOINT=runs/numeric-policy-v6-semantic/autoregressive/raw-stage2/best.pt \
-ABSTRACT_CHECKPOINT=runs/numeric-policy-v6-semantic/autoregressive/abstract-stage2/best.pt \
+PAGE_MANIFEST=data/webui-css-tree-v1/pages-test.jsonl \
+RAW_CHECKPOINT=runs/css-tree-v1-screenshot/replacement/raw-stage2/best.pt \
+ABSTRACT_CHECKPOINT=runs/css-tree-v1-abstract/replacement/abstract-stage2/best.pt \
 DETECTOR_CHECKPOINT=runs/webui-10k-v3-nospacing-fresh-webui/detector/best.pt \
 PAGE_LIMIT=0 REPEATS=3 REPAIR_STEPS=20 ORACLE_ABLATION=1 \
-bash scripts/run_visual_web.sh data/raw/webui/test \
-  runs/eval-numeric-policy-v6 runs/numeric-policy-v6-semantic
-```
+bash scripts/run_visual_web.sh data/raw/webui/test runs/eval-css-tree-v1 runs/css-tree-v1-shared
+~~~
 
-For comparison 1 use both `flat/...` checkpoints, `--decoding joint`, and a new
-`--out .../eval-flat-joint`. For comparison 2 reuse those same checkpoints with
-`--decoding aggregate` and `--out .../eval-flat-aggregate`. Never select a decoding
-threshold on test results. Keep pages, steps, seeds and repeat counts identical.
+Use a new evaluation directory. Final geometry/pixel metrics and per-step
+diagnostic traces measure execution outcomes. No exact teacher-action success
+rate is reported for the replacement model. Geometry IoU is not the official
+Design2Code metric. Count independent pages separately from repeat trials.
 
-For the autoregressive policy, monitor node accuracy,
-`property_accuracy_given_correct_node`, `delta_accuracy_given_correct_node_property`,
-per-token losses, goal MAE, and final rollout improvement. STOP-related metrics
-apply only to legacy ablations. This change does not guarantee recovery:
-corruption coverage, ambiguous reverse labels and real-image distribution shift
-remain empirical issues.
+Fixed step/time budgets terminate rollout by default. Optional RGB/mask MAE
+goal thresholds are external and must be calibrated separately on validation
+data. They do not rank candidates or supervise teacher selection.
+
+## Important differences and limits
+
+- TinySVG can replace grammar subtrees; we currently replace six CSS declaration
+  types on a fixed DOM. Missing/wrong elements from a VLM are outside this scope.
+- The reference samples online grammar corruption and intermediate path states.
+  Cached-data adaptation uses existing corrupted states and samples a first edge
+  of their exact declaration-repair path. It does not fabricate reverse-path
+  screenshots or claim the same training distribution.
+  Reusing an old distance-filtered corpus also preserves that selection bias;
+  relabeling alone cannot change the original corruption distribution.
+- New visual-build-data samples executable numeric CSS corruption without a
+  target-distance acceptance filter. It writes unlabeled observations; run
+  visual-tree-prepare to obtain replacement supervision.
+- train_visual.sh / finetune_visual_webui.sh use the same replacement teacher
+  and trainer for newly built corpora. Use fresh output/data-view directories.
+- Historical flat/hierarchical baseline code and old checkpoint readers remain
+  for reproducibility. Gain/set-loss relabel commands and v7 preparation script
+  are removed; old autoregressive delta training fails with a migration message.
+- Existing corruption distribution may contain mostly inline overrides whose
+  repair is REMOVE. The preparation report is not evidence of generalization;
+  evaluate real VLM initial HTML separately from same-DOM controlled corruption.

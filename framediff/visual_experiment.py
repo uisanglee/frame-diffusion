@@ -53,7 +53,7 @@ def rollout(browser,html,tree,viewport,target_path,policy,parser=None,threshold=
         with Image.open(target_path) as image:target=image.convert('RGB')
     target_tensor=(semantic_masks(items,viewport,cfg.size) if cfg.semantic else image_tensor(target,cfg.size))[None].to(device)
     target_tokens=None
-    if cfg.policy_head!='autoregressive':
+    if cfg.policy_head not in ('autoregressive','replacement'):
         t=time.perf_counter()
         with torch.inference_mode():target_tokens,_=policy.encode_image(target_tensor)
         sync(device);stats['target_encoding_seconds']=time.perf_counter()-t;stats['target_image_encodings']=1
@@ -74,19 +74,31 @@ def rollout(browser,html,tree,viewport,target_path,policy,parser=None,threshold=
         stats['current_render_seconds']+=time.perf_counter()-t
         t=time.perf_counter()
         current_tensor=(current_image if cfg.semantic else image_tensor(current_image,cfg.size))[None].to(device)
-        if cfg.policy_head=='autoregressive':
+        if cfg.policy_head in ('autoregressive','replacement'):
             goal_mae=observation_mae(target_tensor,current_tensor,cfg.semantic)
             if goal_threshold>=0 and goal_mae<=goal_threshold:
                 stats['history'].append({'step':step,'action':None,'boxes':boxes,
                     'goal_mae':goal_mae,'elapsed_seconds':time.perf_counter()-start})
                 stats['stop_reason']='goal';break
-        if cfg.policy_head!='autoregressive':
+        if cfg.policy_head not in ('autoregressive','replacement'):
             with torch.inference_mode():current_tokens,current_map=policy.encode_image(current_tensor)
         sync(device);stats['current_encoding_seconds']+=time.perf_counter()-t;stats['current_image_encodings']+=1
         t=time.perf_counter()
-        batch=visual_batch([current_features(current_tree,boxes,viewport,cfg.max_nodes)],device)
+        if cfg.policy_head=='replacement':
+            from .tree_policy import tree_batch
+            batch=tree_batch([{'current':current_tree,'current_boxes':boxes,'viewport':viewport}],device,cfg.max_nodes)
+        else:batch=visual_batch([current_features(current_tree,boxes,viewport,cfg.max_nodes)],device)
         with torch.inference_mode():
-            if cfg.policy_head=='autoregressive':
+            if cfg.policy_head=='replacement':
+                from .tree_edits import current_state
+                state=current_state(browser,current_tree)
+                sync(device);pair_start=time.perf_counter()
+                pair=policy.encode_pair(target_tensor,current_tensor)
+                sync(device);pair_elapsed=time.perf_counter()-pair_start
+                stats['pair_encoding_seconds']+=pair_elapsed
+                action=policy.predict(batch,target_tensor,current_tensor,[state],pair)
+                stats['pair_image_encodings']+=1;stats['target_image_encodings']+=1
+            elif cfg.policy_head=='autoregressive':
                 sync(device);pair_start=time.perf_counter()
                 tokens,feature_map=policy.encode_pair(target_tensor,current_tensor)
                 sync(device);pair_elapsed=time.perf_counter()-pair_start
@@ -94,14 +106,20 @@ def rollout(browser,html,tree,viewport,target_path,policy,parser=None,threshold=
                 logits=policy.decode(batch,tokens,None,feature_map)[0]
                 stats['target_image_encodings']+=1
             else:logits=policy.decode(batch,target_tokens,current_tokens,current_map)[0]
-            action=decode_action(int(policy.select(logits)),len(current_tree['nodes']))
-        sync(device);stats['policy_seconds']+=time.perf_counter()-t-(pair_elapsed if cfg.policy_head=='autoregressive' else 0.)
+            if cfg.policy_head!='replacement':
+                action=decode_action(int(policy.select(logits)),len(current_tree['nodes']))
+        sync(device);stats['policy_seconds']+=time.perf_counter()-t-(pair_elapsed if cfg.policy_head in ('autoregressive','replacement') else 0.)
         history={'step':step,'action':action,'boxes':boxes,'elapsed_seconds':time.perf_counter()-start}
         stats['history'].append(history)
         if action is None:stats['stop_reason']='policy_stop';break
         if time_budget and time.perf_counter()-start>=time_budget:stats['stop_reason']='time_budget';break
-        i,field,delta=action;t=time.perf_counter()
-        browser.edit_visual_action(current_html,viewport,current_tree['nodes'][i]['id'],field,delta)
+        t=time.perf_counter()
+        if cfg.policy_head=='replacement':
+            from .tree_edits import execute
+            execute(browser,current_tree,action)
+        else:
+            i,field,delta=action
+            browser.edit_visual_action(current_html,viewport,current_tree['nodes'][i]['id'],field,delta)
         current_html=browser.page.content();stats['layout_seconds']+=time.perf_counter()-t;stats['actions']+=1
     sync(device);stats['seconds']=time.perf_counter()-start
     stats['browser_executions']=browser.executions-before;stats['browser_screenshots']=browser.screenshots-shots
@@ -149,7 +167,7 @@ def evaluate(args):
         with torch.inference_mode():
             for policy in (raw,abstract):
                 blank=torch.zeros(1,4 if policy.cfg.semantic else 3,policy.cfg.size,policy.cfg.size,device=device)
-                if policy.cfg.policy_head=='autoregressive':policy.encode_pair(blank,blank)
+                if policy.cfg.policy_head in ('autoregressive','replacement'):policy.encode_pair(blank,blank)
                 else:policy.encode_image(blank)
             parser([torch.zeros(3,parser_ck['config']['min_size'],parser_ck['config']['min_size'],device=device)])
         sync(device)

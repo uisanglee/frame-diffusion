@@ -105,33 +105,6 @@ def test_semantic_policy_ce_gradients_and_checkpoint(tmp_path):
     assert torch.allclose(logits,restored(batch,target,current))
 
 
-def test_semantic_training_uses_detector_json_without_rgb_assets(tmp_path,monkeypatch):
-    import random
-    from framediff.visual_train import policy_batch
-    from framediff.ir import write_json
-    tree,boxes=fixture_tree();items=elements(tree,boxes,[320,240])
-    prediction=tmp_path/'predictions.json';write_json(prediction,items)
-    cfg=VisualConfig(size=32,hidden=16,layers=1,heads=2,token_grid=2,numeric_only=True,
-        policy_head='autoregressive',training_scheme='balanced-v1',
-        observation_contract='semantic-mask-pair-diff-v1')
-    net=VisualPolicy(cfg,False)
-    row={'id':'page/edit','current':tree,'current_boxes':boxes,'viewport':[320,240],
-         'target_elements':items,'predicted_target_elements':str(prediction),
-         'teacher_edits':[[1,'width',.05]],
-         'improving_edits':[{'edit':[1,'width',.05],'gain':.2},
-                            {'edit':[1,'height',.025],'gain':.1}]}
-    def forbidden(*args,**kwargs):raise AssertionError('Semantic policy opened an RGB image')
-    monkeypatch.setattr(Image,'open',forbidden)
-    for probability in (0.,1.):
-        loss,logits,labels,n,parts=policy_batch(net,[row],'cpu',random.Random(42),probability)
-        assert torch.isfinite(loss) and set(parts)=={'joint_improvement'}
-        expected_indices=[action_index((1,'width',.05),n),action_index((1,'height',.025),n)]
-        assert labels==[expected_indices]
-        logp=torch.log_softmax(logits,dim=-1)
-        expected=-(logp[0,expected_indices[0]]*2/3+logp[0,expected_indices[1]]/3)
-        assert torch.allclose(loss,expected)
-
-
 @pytest.mark.browser
 def test_new_modalities_rollout_capture_counts(tmp_path,monkeypatch):
     from framediff.html_bridge import HtmlBrowser
@@ -320,19 +293,18 @@ def test_visual_data_training_resume_and_preparation(tmp_path,monkeypatch):
     build(SimpleNamespace(manifest=str(manifest),out=str(tmp_path/'data'),resume=False,
         trajectories=1,max_noise=2,seed=17,max_nodes=16,abstract_size=64))
     train=list(read_jsonl(tmp_path/'data/policy-train.jsonl'))
-    assert len(train)>=2 and train[0]['teacher_edits']==[]
-    assert validate_action(train[1]['teacher_edits'][0])
-    assert train[1]['teacher_strategy']=='improvement-distribution-v1'
-    assert train[1]['improving_edits'] and all(item['gain']>0 for item in train[1]['improving_edits'])
+    assert len(train)>=2 and 'teacher_edits' not in train[0]
+    assert train[1]['teacher_strategy']=='unlabeled-css-corruption-v1'
     assert validate_action(train[1]['corruption_edit'])
-    common=['--train',str(tmp_path/'data/policy-train.jsonl'),'--val',str(tmp_path/'data/policy-val.jsonl'),
+    main(['visual-tree-prepare','--rendered',str(tmp_path/'data'),'--out',str(tmp_path/'tree')])
+    common=['--train',str(tmp_path/'tree/policy-train.jsonl'),'--val',str(tmp_path/'tree/policy-val.jsonl'),
             '--out',str(tmp_path/'policy'),'--mode','abstract','--size','64','--hidden','16','--layers','1',
             '--heads','2','--max-nodes','16','--token-grid','3','--device','cpu','--cpu-threads','2',
             '--batch-size','1','--accumulation','1','--val-samples','1','--eval-every','1','--no-pretrained']
-    main(['visual-train-policy',*common,'--steps','1'])
-    policy_log=list(read_jsonl(tmp_path/'policy/train.jsonl'))
-    assert policy_log[-1]['validation_n']==1 and 'action_accuracy' in policy_log[-1]
-    main(['visual-train-policy',*common,'--steps','2','--resume',str(tmp_path/'policy/last.pt')])
+    main(['visual-tree-train',*common,'--steps','1'])
+    policy_log=list(read_jsonl(tmp_path/'policy/validation.jsonl'))
+    assert policy_log[-1]['validation_n']==1 and 'action_accuracy' not in policy_log[-1]
+    main(['visual-tree-train',*common,'--steps','2','--resume',str(tmp_path/'policy/last.pt')])
     _,ck=load_policy(tmp_path/'policy/last.pt','cpu');assert ck['step']==2
     # Existing initial HTML -> no VLM call, no plan, no target-box extraction.
     def unexpected(*a,**kw):raise AssertionError('VLM must not run for supplied initial HTML')
@@ -353,16 +325,16 @@ def test_visual_data_training_resume_and_preparation(tmp_path,monkeypatch):
     detector_log=list(read_jsonl(tmp_path/'detector/train.jsonl'))
     assert 'detector_recall_iou50' in detector_log[-1] and 'validation_components' in detector_log[-1]
     for split in ('train','val'):
-        main(['visual-cache-targets','--data',str(tmp_path/f'data/policy-{split}.jsonl'),
+        main(['visual-cache-targets','--data',str(tmp_path/f'tree/policy-{split}.jsonl'),
               '--checkpoint',str(tmp_path/'detector/best.pt'),'--out',str(tmp_path/f'cached-{split}'),
               '--device','cpu','--cpu-threads','2','--size','64','--threshold','0'])
     fine=list(common)
     for flag,value in [('--train','cached-train/data.jsonl'),('--val','cached-val/data.jsonl'),('--out','fine')]:
         fine[fine.index(flag)+1]=str(tmp_path/value)
-    main(['visual-train-policy',*fine,'--steps','1','--init-checkpoint',str(tmp_path/'policy/best.pt'),
-          '--prediction-probability','1'])
+    main(['visual-tree-train',*fine,'--steps','1','--init-checkpoint',str(tmp_path/'policy/best.pt'),
+          '--predicted-targets'])
     raw=list(common);raw[raw.index('--mode')+1]='screenshot';raw[raw.index('--out')+1]=str(tmp_path/'raw')
-    main(['visual-train-policy',*raw,'--steps','1'])
+    main(['visual-tree-train',*raw,'--steps','1'])
     main(['visual-evaluate','--data',str(tmp_path/'prepared/prepared.jsonl'),
           '--raw-checkpoint',str(tmp_path/'raw/best.pt'),'--abstract-checkpoint',str(tmp_path/'fine/best.pt'),
           '--detector-checkpoint',str(tmp_path/'detector/best.pt'),'--out',str(tmp_path/'comparison'),

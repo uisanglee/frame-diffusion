@@ -10,6 +10,10 @@
 
 ## 최신: 이미지 조건 반복 복구
 
+현재 학습 경로는 **CSS 선언 교체 → 단일 교사 토큰 CE → 실행 이미지 평가**를 분리한
+declaration-tree policy입니다. [최신 코드 구분·기존 데이터 재사용·GPU 1/3 명령어](docs/numeric-policy.md)를
+참고하세요. detector는 재사용하며, 이전 delta-policy는 새 정책으로 재학습해야 합니다.
+
 **목표 screenshot → 전용 검출기로 한 번 추상화 → 현재 DOM 추상화 이미지와 비교해 매 스텝 CSS action 예측**을 지원합니다.
 고정 VLM 계획이나 목표 box residual을 사용하지 않습니다. 매번 실제 screenshot을 사용하는 별도 정책과
 동일 action 예산으로 비교하고 최종 실제 화면 accuracy/시간을 평가합니다.

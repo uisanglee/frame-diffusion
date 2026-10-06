@@ -10,16 +10,15 @@ if [[ $# -gt 4 ]]; then
   exit 2
 fi
 
-rendered=${1:-data/webui-10k-v7-multipositive/rendered}
+rendered=${1:-data/webui-css-tree-v1}
 detector=${2:-runs/webui-10k-v3-nospacing-fresh-webui/detector/best.pt}
-shared_run=${3:-runs/numeric-policy-v7-shared-fresh}
-policy_run=${4:-runs/numeric-policy-v7-abstract}
+shared_run=${3:-runs/css-tree-v1-shared}
+policy_run=${4:-runs/css-tree-v1-abstract}
 
-for required in subset/policy-train.jsonl subset/policy-val.jsonl \
-                predicted-train/data.jsonl predicted-val/data.jsonl; do
+for required in predicted-train/data.jsonl predicted-val/data.jsonl; do
   [[ -s "$shared_run/$required" ]] || {
     echo "Missing prepared input: $shared_run/$required" >&2
-    echo 'Run scripts/prepare_numeric_policy_v7.sh first.' >&2
+    echo 'Run scripts/prepare_numeric_policy_tree.sh first.' >&2
     exit 2
   }
 done
@@ -28,7 +27,7 @@ done
 export CUDA_VISIBLE_DEVICES=3
 export DEVICE=cuda
 export PREPARE_DATA=0
-export POLICY_HEADS=autoregressive
+export POLICY_HEADS=replacement
 export POLICY_MODES=abstract
 export POLICY_RUN_DIR=$policy_run
 export POLICY_STAGE1_STEPS=${POLICY_STAGE1_STEPS:-30000}
@@ -43,4 +42,3 @@ export EARLY_STOP_PATIENCE=${EARLY_STOP_PATIENCE:-10}
 
 echo "Training abstract policy on physical GPU 3 -> $policy_run"
 exec bash scripts/train_numeric_policy.sh "$rendered" "$detector" "$shared_run"
-

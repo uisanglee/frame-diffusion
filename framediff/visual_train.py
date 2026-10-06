@@ -1,4 +1,7 @@
-"""Train the screenshot parser and the two image-conditioned edit policies."""
+"""Detector training/cache and historical flat/hierarchical baseline support.
+
+The current replacement policy is trained exclusively in tree_policy.py.
+"""
 import contextlib
 from collections import defaultdict
 from dataclasses import asdict
@@ -60,31 +63,10 @@ def detection_losses(net,rows,device):
 def detection_loss(net,rows,device):return sum(detection_losses(net,rows,device).values())
 
 
-def improvement_targets(row,n):
-    """Return browser-verified improving joint actions and normalized gains.
-
-    Multiple edits can be valid reverse transitions from the same corrupted
-    state.  The target is therefore a distribution over every candidate that
-    reduced whole-page box distance, not one arbitrarily chosen edit sequence.
-    """
-    items=row.get('improving_edits')
-    if not items:raise ValueError(f'Missing improvement distribution: row={row.get("id")}; rerun visual-relabel-best-reverse')
-    by_index={}
-    for item in items:
-        edit=item.get('edit') if isinstance(item,dict) else None
-        gain=item.get('gain') if isinstance(item,dict) else None
-        if edit is None or not isinstance(gain,(int,float)) or not math_isfinite(gain) or gain<=0:
-            raise ValueError(f'Invalid improving edit: row={row.get("id")} item={item}')
-        if not action_is_legal(row['current'],row['current_boxes'],row['viewport'],edit):
-            raise ValueError(f'Illegal improving edit: row={row.get("id")} edit={edit}')
-        index=action_index(edit,n);by_index[index]=max(float(gain),by_index.get(index,0.))
-    indices=sorted(by_index,key=lambda index:(-by_index[index],index))
-    gains=torch.tensor([by_index[index] for index in indices],dtype=torch.float32)
-    return indices,gains/gains.sum()
-
-
 def policy_batch(net,rows,device,rng,prediction_probability):
     cfg=net.cfg
+    if cfg.policy_head=='autoregressive':
+        raise ValueError('Delta/gain/set-loss training retired; use visual-tree-prepare and visual-tree-train')
     batch=visual_batch([current_features(r['current'],r['current_boxes'],r['viewport'],cfg.max_nodes) for r in rows],device)
     target=[];current=[]
     for row in rows:
@@ -113,9 +95,7 @@ def policy_batch(net,rows,device,rng,prediction_probability):
     logp=F.log_softmax(logits,dim=-1);n=batch['mask'].shape[1];losses=[];labels=[]
     factor={'operation':[],'node':[],'property':[],'delta':[]};joint=[]
     for i,row in enumerate(rows):
-        if net.cfg.policy_head=='autoregressive':
-            valid,weights=improvement_targets(row,n);weights=weights.to(logits.device)
-        else:valid=[action_index(e,n) for e in row['teacher_edits']] or [action_index(None,n)]
+        valid=[action_index(e,n) for e in row['teacher_edits']] or [action_index(None,n)]
         illegal=[e for e in row['teacher_edits'] if not action_is_legal(
             row['current'],row['current_boxes'],row['viewport'],e)]
         if illegal:raise ValueError(f'Illegal teacher edit: row={row.get("id")} edits={illegal}')
@@ -123,13 +103,7 @@ def policy_batch(net,rows,device,rng,prediction_probability):
             values=logits[i,valid].detach().float().cpu().tolist()
             raise RuntimeError(f'Non-finite policy logits: row={row.get("id")} target_logits={values}')
         labels.append(valid)
-        if net.cfg.policy_head=='autoregressive' and net.cfg.training_scheme=='balanced-v1':
-            # Soft cross-entropy on the JOINT action distribution. Every
-            # browser-verified distance-reducing action is positive, weighted
-            # by how much it improves the state. This does not prescribe an
-            # arbitrary reverse order and does not factor labels independently.
-            joint.append(-(weights*logp[i,valid]).sum())
-        elif net.cfg.policy_head=='hierarchical' and net.cfg.training_scheme=='balanced-v1':
+        if net.cfg.policy_head=='hierarchical' and net.cfg.training_scheme=='balanced-v1':
             is_edit=bool(row['teacher_edits']);factor['operation'].append(-components['operation'][i,int(is_edit)])
             if is_edit:
                 if len(row['teacher_edits'])!=1:raise ValueError('Balanced hierarchy requires one teacher edit per row')
@@ -139,11 +113,8 @@ def policy_batch(net,rows,device,rng,prediction_probability):
                 factor['property'].append(-components['property'][i,node,prop])
                 factor['delta'].append(-components['delta'][i,node,prop,delta])
         else:losses.append(-torch.logsumexp(logp[i,valid],0))
-    if net.cfg.policy_head in ('hierarchical','autoregressive') and net.cfg.training_scheme=='balanced-v1':
-        if net.cfg.policy_head=='autoregressive':
-            parts={'joint_improvement':torch.stack(joint).mean()};loss=parts['joint_improvement']
-        else:
-            parts={key:torch.stack(values).mean() for key,values in factor.items() if values};loss=sum(parts.values())
+    if net.cfg.policy_head=='hierarchical' and net.cfg.training_scheme=='balanced-v1':
+        parts={key:torch.stack(values).mean() for key,values in factor.items() if values};loss=sum(parts.values())
     else:parts={'joint':torch.stack(losses).mean()};loss=parts['joint']
     return loss,logits,labels,n,parts
 
@@ -195,11 +166,8 @@ def policy_validation_metrics(net,rows,device,rng,prediction_probability,batch_s
         scores=torch.sigmoid(logits[:,-1].float()-torch.logsumexp(logits[:,:-1].float(),-1)).cpu().tolist()
         for row,prediction,valid,edit_prediction,score in zip(batch_rows,predictions,labels,edit_predictions,scores):
             predicted=decode_action(prediction,n);targets=[decode_action(label,n) for label in valid];target=targets[0]
-            gain_by_index={action_index(item['edit'],n):float(item['gain']) for item in row.get('improving_edits',[])}
-            selected_gain=gain_by_index.get(prediction,0.)
             operation_scores.append(score);operation_targets.append(target is None)
             totals['n']+=1;totals['correct']+=prediction in valid
-            totals['selected_gain']+=selected_gain
             totals['positive_count']+=len(valid)
             totals['predicted_stop']+=predicted is None
             if target is None:
@@ -247,11 +215,7 @@ def policy_validation_metrics(net,rows,device,rng,prediction_probability,batch_s
             'stop_accuracy':div('stop_correct','stop_n'),'non_stop_accuracy':div('non_stop_correct','non_stop_n'),
             'validation_n':totals['n'],'stop_n':totals['stop_n'],'non_stop_n':totals['non_stop_n'],
             'per_property':{field:{'n':v['n'],'accuracy':v['correct']/v['n']} for field,v in sorted(per_property.items())}}
-    if net.cfg.policy_head=='autoregressive':
-        result.update(improving_action_rate=div('correct','n'),
-                      mean_distance_reduction=div('selected_gain','n'),
-                      mean_improving_actions=div('positive_count','n'))
-    else:result['action_accuracy']=div('correct','n')
+    result['action_accuracy']=div('correct','n')
     return result
 
 
@@ -311,16 +275,9 @@ def train(args):
                                 observation_contract=('semantic-mask-pair-diff-v1' if args.mode=='abstract' and
                                     getattr(args,'policy_head','flat')=='autoregressive' else 'rgb-pair-diff-v1'),
                                 training_scheme='balanced-v1' if getattr(args,'balanced_policy',False) else 'legacy'))
-        kind='visual-policy-v7-improvement' if cfg['policy_head']=='autoregressive' else 'visual-policy-v3'
-        if cfg['policy_head']=='autoregressive' and any(
-                r.get('teacher_strategy')!='improvement-distribution-v1' or
-                (r.get('teacher_edits') and not r.get('improving_edits')) for r in train_rows+val_rows):
-            raise ValueError('Autoregressive policy requires multi-positive improvement distributions; '
-                             'rerun visual-relabel-best-reverse and visual-subset-numeric')
         if cfg['policy_head']=='autoregressive':
-            train_rows=[r for r in train_rows if r['teacher_edits']]
-            val_rows=[r for r in val_rows if r['teacher_edits']]
-            if not train_rows or not val_rows:raise ValueError('Autoregressive policy requires nonempty EDIT rows')
+            raise ValueError('Delta/gain/set-loss training retired; use visual-tree-prepare and visual-tree-train')
+        kind='visual-policy-v3'
         if cfg['numeric_only'] and any(r.get('policy_subset')!='numeric-prefix-v1' for r in train_rows+val_rows):
             raise ValueError('Use visual-subset-numeric first: remove categorical corruption ancestry, not just labels')
     if args.resume and args.init_checkpoint:raise ValueError('Choose resume or init-checkpoint')
@@ -334,15 +291,10 @@ def train(args):
     if ck:
         checkpoint_config=ck['config']
         if not is_detector and ck.get('kind') in ('visual-policy-v3','visual-policy-v4','visual-policy-v5-no-stop',
-                                                  'visual-policy-v6-semantic','visual-policy-v7-improvement'):
+                                                  'visual-policy-v6-semantic','visual-policy-v7-improvement',
+                                                  'visual-policy-v8-tree-path'):
             checkpoint_config=asdict(VisualConfig(**checkpoint_config))
         if ck.get('kind')==kind and checkpoint_config==cfg:pass
-        elif (args.init_checkpoint and kind=='visual-policy-v7-improvement' and
-              ck.get('kind') in ('visual-policy-v5-no-stop','visual-policy-v6-semantic') and
-              checkpoint_config==cfg):
-            # Architecture-compatible warm start only. Resume is forbidden
-            # because the old checkpoint optimized a single-action objective.
-            pass
         elif (args.init_checkpoint and not is_detector and ck.get('kind')=='visual-policy-v1' and
               cfg['policy_head']=='flat' and not cfg['numeric_only'] and cfg['decoding']=='joint' and
               ck.get('config')=={k:v for k,v in cfg.items() if k not in ('action_contract','policy_head','numeric_only','decoding','training_scheme')}):
@@ -507,6 +459,7 @@ def filter_legal_policy_rows(rows):
     for row in rows:
         supervised=list(row.get('teacher_edits',[]))+[
             item.get('edit') for item in row.get('improving_edits',[]) if isinstance(item,dict) and item.get('edit')]
+        supervised+=list(row.get('tree_path_edits',[]))
         illegal=[edit for edit in supervised if not action_is_legal(
             row['current'],row['current_boxes'],row['viewport'],edit)]
         if illegal:rejected.append({'id':row.get('id'),'edits':illegal})

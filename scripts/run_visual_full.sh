@@ -38,7 +38,7 @@ bash scripts/finetune_visual_webui.sh "$webui_root" "$ft_data" "$ft_run" "$pre_r
 
 echo '[3/4] Controlled test on usable held-out pages (no VLM generation)'
 echo "Selected/excluded/usable counts: $ft_data/rendered/report.json"
-PAGE_MANIFEST="$ft_data/numeric/pages-test.jsonl" WEB_DATASET=webui \
+PAGE_MANIFEST="$ft_data/tree/pages-test.jsonl" WEB_DATASET=webui \
 PAGE_LIMIT=0 REPEATS=${REPEATS:-3} REPAIR_STEPS=${REPAIR_STEPS:-20} \
 ORACLE_ABLATION=1 SELF_REVISION_PROTOCOL=none \
 bash scripts/run_visual_web.sh "$webui_root" "$eval_run" "$ft_run"
