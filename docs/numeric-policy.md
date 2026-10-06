@@ -3,7 +3,7 @@
 The detector is independent and remains frozen. The v6 policy uses 12 semantic
 mask channels for TUIDE and 9 original screenshot RGB channels for its baseline.
 The current policy version uses
-`best-improving-reverse-v1` labels, so policy data must be rebuilt with the current
+`improvement-distribution-v1` labels, so policy data must be relabeled or rebuilt with the current
 `visual-build-data` command.  Old v3 PNG/HTML assets may be archived, but their
 last-mutation labels must not be used to train the autoregressive policy.  After
 the v4 corpus exists, policy-only training never retrains the detector.  The fixed
@@ -28,7 +28,10 @@ Four comparisons can use the same numeric dataset:
 4. Autoregressive head (default): jointly encodes
    `[target,current,abs(target-current)]`, points to a current LayoutIR
    node, and conditions property on that node and delta on both previous tokens.
-   Its objective is the mean masked NLL of node, property and delta tokens. It has
+   Its objective is a joint soft cross-entropy over every browser-verified
+   distance-reducing action. Target probability is proportional to whole-page
+   distance reduction; node, property and delta are not supervised as three
+   independent labels. It has
    no learned STOP head or clean/STOP training examples. Rollout ends when the
    step/time budget is exhausted. Optional external image goal tests are configured
    separately with `--goal-threshold` (RGB) and `--abstract-goal-threshold` (masks).
@@ -49,11 +52,19 @@ the target abstraction is cached, not its jointly conditioned encoder features.
 Timing reports distinguish pair encoding, policy decoding, DOM queries, layout,
 and screenshot capture, and include actual model parameter counts.
 
-Policy labels are not simply the inverse of the most recent corruption.  During
+Policy labels are not simply the inverse of the most recent corruption. During
 data construction, all legal reverse-path edits accumulated so far are tried in
-the browser.  The label is the edit whose observed whole-page reflow most reduces
-normalized target box distance.  Candidate rendering is an offline supervision
-cost and is not part of inference.
+the browser. Every edit whose observed whole-page reflow reduces normalized
+target box distance is retained. If gains are `g(a)`, the supervision is
+`q(a)=g(a)/sum(g)`, and training minimizes `-sum_a q(a) log p(a|state)` over joint
+`(node, property, delta)` actions. Thus different valid repair orders are not
+marked wrong. Candidate rendering is an offline supervision cost and is not part
+of inference.
+
+`improving_action_rate` means that the predicted action belongs to this
+browser-verified improvement set. `mean_distance_reduction`,
+`mean_improving_actions`, and final rollout IoU/MAE measure progress without
+reporting or requiring one prescribed reverse sequence.
 
 For the autoregressive head, balanced-v1 samples the six edit properties uniformly
 instead of in corpus-frequency proportion. Legacy flat/hierarchical baselines keep
@@ -68,7 +79,8 @@ weights are independent and unchanged. Do not resume old policy output folders.
 
 ## Train (from the repository root)
 
-If you already have v4 best-reverse data, reuse it directly: the numeric subset
+If you already have v4 best-reverse data, relabel it once into the multi-positive
+format before creating the numeric subset. The numeric subset
 command derives target elements from cached clean DOM boxes without a browser.
 Cached detector prediction JSONs can also be reused by `visual-cache-targets`.
 The mask representation change alone requires no HTML rerendering.
@@ -80,7 +92,7 @@ does not regenerate or copy screenshots, HTML states, corruptions or detector da
 ```bash
 python -m framediff visual-relabel-best-reverse \
   --rendered data/webui-10k-v3-nospacing-fresh-webui/rendered \
-  --out data/webui-10k-v4-best-reverse-v2/rendered \
+  --out data/webui-10k-v5-improvement-distribution/rendered \
   --resume
 ```
 
@@ -123,7 +135,7 @@ manifests require a new output directory. No source assets are regenerated.
 Set `POLICY_RUN_DIR` to write new balanced checkpoints separately while reusing
 the third argument's existing subset and predicted-target cache.
 New training records an explicit observation contract and checkpoint kind
-`visual-policy-v6-semantic`. Use a new policy output directory. Existing detectors
+`visual-policy-v7-improvement`. Use a new policy output directory. Existing detectors
 remain compatible; old policy checkpoints remain loadable for legacy evaluation
 but cannot resume the new training contract.
 

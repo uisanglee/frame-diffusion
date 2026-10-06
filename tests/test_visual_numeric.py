@@ -136,11 +136,12 @@ def test_numeric_prepare_train_resume_without_browser(tmp_path):
     for split in ('train','val','test'):
         base={'group':split,'source_sha':split,'split':split,'contract':CONTRACT,
               'action_contract':ACTION_CONTRACT,'viewport':[320,240],
-              'teacher_strategy':'best-improving-reverse-v1',
+              'teacher_strategy':'improvement-distribution-v1',
               'current':tree,'current_boxes':boxes,'current_html':str(html),
               **{k:str(image) for k in ('target_image','target_abstract','current_image','current_abstract')}}
-        rows=[{**base,'id':split+'/clean','teacher_edits':[]}]+[
-              {**base,'id':f'{split}/t0-s{i}','teacher_edits':[[1,field,.05]]}
+        rows=[{**base,'id':split+'/clean','teacher_edits':[],'improving_edits':[]}]+[
+              {**base,'id':f'{split}/t0-s{i}','teacher_edits':[[1,field,.05]],
+               'improving_edits':[{'edit':[1,field,.05],'gain':.1}]}
               for i,field in enumerate(NUMERIC_FIELDS)]
         write_jsonl(source/f'policy-{split}.jsonl',rows)
         write_jsonl(source/f'pages-{split}.jsonl',[{'id':split,'split':split,'html':str(html)}])
@@ -168,8 +169,14 @@ def test_numeric_prepare_train_resume_without_browser(tmp_path):
     ar_command[ar_command.index('--policy-head')+1]='autoregressive'
     main(ar_command+['--steps','1'])
     ar_ck=torch.load(ar/'last.pt',weights_only=True)
-    assert ar_ck['kind']=='visual-policy-v6-semantic' and ar_ck['config']['policy_head']=='autoregressive'
+    assert ar_ck['kind']=='visual-policy-v7-improvement' and ar_ck['config']['policy_head']=='autoregressive'
     assert ar_ck['config']['observation_contract']=='semantic-mask-pair-diff-v1'
+    ar_metrics=list(read_jsonl(ar/'train.jsonl'))[-1]
+    assert 'improving_action_rate' in ar_metrics
+    assert 'exact_best_action_accuracy' not in ar_metrics
+    assert 'mean_best_distance_reduction' not in ar_metrics
+    assert 'mean_fraction_of_best_improvement' not in ar_metrics
+    assert set(ar_metrics['validation_components'])=={'joint_improvement'}
     assert original==(image.read_bytes(),html.read_bytes())
 
 
@@ -209,7 +216,9 @@ def test_legacy_policy_relabel_reuses_assets_and_browser_reflow(tmp_path):
     result=relabel_best_reverse(args)
     assert result['kept_rows']==6 and result['rejected_rows']==0
     rows=list(read_jsonl(out/'policy-train.jsonl'))
-    assert rows[1]['teacher_strategy']=='best-improving-reverse-v1'
+    assert rows[1]['teacher_strategy']=='improvement-distribution-v1'
     assert rows[1]['teacher_edits']==[[1,'width',-.05]]
+    assert rows[1]['improving_edits'][0]['edit']==[1,'width',-.05]
+    assert rows[1]['improving_edits'][0]['gain']>0
     assert rows[1]['teacher_distance_after']<rows[1]['teacher_distance_before']
     assert image.read_bytes()==original

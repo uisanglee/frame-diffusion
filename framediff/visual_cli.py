@@ -5,7 +5,7 @@ def add_parsers(sub):
     p=sub.add_parser('visual-subset-numeric',help='Filter cached trajectories without rendering or changing source assets')
     p.add_argument('--rendered',required=True);p.add_argument('--out',required=True)
     p=sub.add_parser('visual-relabel-best-reverse',
-        help='Recompute best-improving teachers from cached HTML/boxes without regenerating assets')
+        help='Score all improving reverse-path actions from cached HTML/boxes without regenerating assets')
     p.add_argument('--rendered',required=True);p.add_argument('--out',required=True);p.add_argument('--resume',action='store_true')
     p=sub.add_parser('visual-import-webui',help='Build domain-disjoint WebUI manifests and optional native AX detector labels')
     p.add_argument('--root',required=True);p.add_argument('--out',required=True);p.add_argument('--view',default='default_1280-720')

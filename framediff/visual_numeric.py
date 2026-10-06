@@ -65,7 +65,7 @@ def _page_prefix(row):return row['id'].rsplit('/',1)[0]
 
 
 def relabel_best_reverse(args):
-    """Upgrade legacy inverse labels using cached HTML and real browser reflow.
+    """Build improvement distributions using cached HTML and real browser reflow.
 
     Existing screenshots, abstractions, DOM trees and HTML states are referenced
     in place. Only candidate CSS edits are executed; no assets or corruptions are
@@ -75,7 +75,7 @@ def relabel_best_reverse(args):
     if out==source or source in out.parents:raise ValueError('Use a separate relabeled output directory')
     paths=[source/f'{kind}-{split}.jsonl' for split in ('train','val','test')
            for kind in ('policy','pages','detector')]
-    config={'kind':'visual-relabel-best-reverse-v2','contract':CONTRACT,'action_contract':ACTION_CONTRACT,
+    config={'kind':'visual-relabel-improvement-distribution-v3','contract':CONTRACT,'action_contract':ACTION_CONTRACT,
             'sources':{str(path):digest(path) for path in paths}}
     guard_run(out,config,args.resume)
     totals={'pages':0,'input_rows':0,'kept_rows':0,'rejected_rows':0,'failed_pages':0}
@@ -100,8 +100,8 @@ def relabel_best_reverse(args):
                     clean=clean[0];tree=clean['current'];target_boxes=clean['current_boxes'];viewport=clean['viewport']
                     root=tree['nodes'][0]['id'];ids=[node['id'] for node in tree['nodes'][1:]]
                     target_items=clean.get('target_elements') or elements(tree,target_boxes,viewport)
-                    clean_copy={**clean,'teacher_strategy':'best-improving-reverse-v1',
-                                'target_elements':target_items}
+                    clean_copy={**clean,'teacher_strategy':'improvement-distribution-v1',
+                                'target_elements':target_items,'improving_edits':[]}
                     local.append(clean_copy)
                     trajectories={}
                     for row in page_rows:
@@ -114,11 +114,16 @@ def relabel_best_reverse(args):
                         candidates=[];broken=False
                         for step,row in sorted(states):
                             if broken:continue
-                            if len(row.get('teacher_edits',[]))!=1:
-                                page_failures.append({'id':row['id'],'error':'Expected one legacy inverse edit'})
+                            corruption=row.get('corruption_edit')
+                            if corruption and corruption[1] in NUMERIC_FIELDS and isinstance(corruption[2],(int,float)):
+                                candidate=[corruption[0],corruption[1],-corruption[2]]
+                            elif len(row.get('teacher_edits',[]))==1:
+                                candidate=copy.deepcopy(row['teacher_edits'][0])
+                            else:
+                                page_failures.append({'id':row['id'],'error':'Cannot recover reverse candidate'})
                                 broken=True;continue
-                            candidates.append(copy.deepcopy(row['teacher_edits'][0]))
-                            before=distance(row['current_boxes']);best=None;best_distance=before
+                            if candidate not in candidates:candidates.append(candidate)
+                            before=distance(row['current_boxes']);improving=[]
                             for edit in candidates:
                                 if not action_is_legal(row['current'],row['current_boxes'],viewport,edit):continue
                                 node,field,value=edit;node_id=row['current']['nodes'][node]['id']
@@ -131,13 +136,18 @@ def relabel_best_reverse(args):
                                     score=distance(observed)
                                 except Exception:
                                     continue
-                                if score<best_distance-1e-9:best,best_distance=copy.deepcopy(edit),score
-                            if best is None:
+                                gain=before-score
+                                if gain>1e-9:
+                                    improving.append({'edit':copy.deepcopy(edit),'distance_after':score,'gain':gain})
+                            if not improving:
                                 page_failures.append({'id':row['id'],'error':'No legal candidate improves target distance'})
                                 broken=True;continue
-                            local.append({**row,'teacher_edits':[best],
-                                'teacher_strategy':'best-improving-reverse-v1','target_elements':target_items,
-                                'teacher_distance_before':before,'teacher_distance_after':best_distance,
+                            improving.sort(key=lambda item:(-item['gain'],item['edit']))
+                            best=improving[0]
+                            local.append({**row,'teacher_edits':[best['edit']],
+                                'teacher_strategy':'improvement-distribution-v1','target_elements':target_items,
+                                'improving_edits':improving,
+                                'teacher_distance_before':before,'teacher_distance_after':best['distance_after'],
                                 'teacher_candidate_count':len(candidates)})
                     usable=any(row['teacher_edits'] for row in local)
                     if usable:successful_pages.add(page_id)

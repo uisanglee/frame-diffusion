@@ -68,7 +68,7 @@ def build(args):
     sources=[{**r,'source_sha':digest(r['html'])} for r in sources];validate_splits(sources)
     if len({r['id'] for r in sources})!=len(sources):raise ValueError('Duplicate source IDs')
     out=Path(args.out).resolve()
-    config={'kind':'visual-data-v4-best-reverse','contract':CONTRACT,'action_contract':ACTION_CONTRACT,
+    config={'kind':'visual-data-v5-improvement-distribution','contract':CONTRACT,'action_contract':ACTION_CONTRACT,
             'sources':sources,'settings':{k:v for k,v in vars(args).items() if k not in ('out','resume')}}
     guard_run(out,config,args.resume)
     policy=[];detection=[];pages=[];errors=[]
@@ -106,22 +106,22 @@ def build(args):
                 base={k:source[k] for k in ('id','group','split','source_sha')}
                 base.update(contract=CONTRACT,action_contract=ACTION_CONTRACT,viewport=viewport,target_image=str(work/'target.png'),
                             target_abstract=str(work/'target-abstract.png'),
-                            teacher_strategy='best-improving-reverse-v1',target_elements=target_elements)
+                            teacher_strategy='improvement-distribution-v1',target_elements=target_elements)
                 abstract_image(elements(tree,target_boxes,viewport),viewport,args.abstract_size).save(base['target_abstract'])
                 def observe():
                     boxes=browser.tagged_boxes(ids);boxes[root]=[0,0,*viewport];return boxes
                 def distance(boxes):
                     return sum(abs(boxes[k][a]-target_boxes[k][a])/viewport[a%2]
                                for k in ids for a in range(4))/max(1,4*len(ids))
-                def best_reverse(current_html,boxes,candidates):
-                    """Choose the legal path edit with the largest target-distance decrease.
+                def improving_reverse(current_html,boxes,candidates):
+                    """Score every legal reverse-path edit that decreases target distance.
 
                     Candidate evaluation is an offline data-construction cost.  It
                     never runs during policy inference.  Reflow is observed in the
                     browser, so edits are ranked by their effect on every element,
                     not only by the declaration that was changed.
                     """
-                    before=distance(boxes);best=None;best_distance=before
+                    before=distance(boxes);improving=[]
                     for edit in candidates:
                         if not action_is_legal(tree,boxes,viewport,edit):continue
                         i,field,value=edit;nid=tree['nodes'][i]['id']
@@ -131,12 +131,14 @@ def build(args):
                             observed=observe();score=distance(observed)
                         except ValueError:
                             continue
-                        if score<best_distance-1e-9:
-                            best_distance=score;best=list(edit)
+                        gain=before-score
+                        if gain>1e-9:
+                            improving.append({'edit':list(edit),'distance_after':score,'gain':gain})
                     browser.load(current_html,viewport)
-                    if best is None:raise ValueError('No reverse-path edit improves the target distance')
-                    return best,before,best_distance
-                def save_example(name,current_html,boxes,edit,corruption=None):
+                    if not improving:raise ValueError('No reverse-path edit improves the target distance')
+                    improving.sort(key=lambda item:(-item['gain'],item['edit']))
+                    return improving,before
+                def save_example(name,current_html,boxes,edit,corruption=None,improving=None):
                     current_tree=refresh_geometry(tree,boxes)
                     screenshot=work/f'{name}.png';browser.page.screenshot(path=str(screenshot),animations='disabled')
                     browser.screenshots+=1
@@ -147,7 +149,7 @@ def build(args):
                     record={**base,'id':source['id']+'/'+name,'current':current_tree,'current_boxes':copy.deepcopy(boxes),
                         'current_image':str(screenshot),'current_abstract':str(abstract),'current_html':str(html_path),
                         'teacher_edits':[] if edit is None else [edit],
-                        'corruption_edit':corruption}
+                        'corruption_edit':corruption,'improving_edits':improving or []}
                     local_policy.append(record)
                     local_detection.append({**base,'id':record['id'],'image':str(screenshot),'elements':labels})
                 browser.load(tagged,viewport);save_example('clean',tagged,target_boxes,None)
@@ -177,9 +179,11 @@ def build(args):
                             browser.edit_visual_action(candidate_html,viewport,nid,*inverse);restored=observe()
                             if max(abs(restored[k][a]-boxes[k][a]) for k in ids for a in range(4))>.15:continue
                             reverse_path.append(teacher)
-                            best_teacher,before_distance,after_distance=best_reverse(candidate_html,candidate,reverse_path)
+                            improving,before_distance=improving_reverse(candidate_html,candidate,reverse_path)
+                            best_teacher=improving[0]['edit'];after_distance=improving[0]['distance_after']
                             browser.load(candidate_html,viewport)
-                            save_example(f't{trajectory}-s{step}',candidate_html,candidate,best_teacher,[i,field,value])
+                            save_example(f't{trajectory}-s{step}',candidate_html,candidate,best_teacher,
+                                         [i,field,value],improving)
                             local_policy[-1]['teacher_distance_before']=before_distance
                             local_policy[-1]['teacher_distance_after']=after_distance
                             local_policy[-1]['teacher_candidate_count']=len(reverse_path)

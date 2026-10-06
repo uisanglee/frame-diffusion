@@ -117,12 +117,19 @@ def test_semantic_training_uses_detector_json_without_rgb_assets(tmp_path,monkey
     net=VisualPolicy(cfg,False)
     row={'id':'page/edit','current':tree,'current_boxes':boxes,'viewport':[320,240],
          'target_elements':items,'predicted_target_elements':str(prediction),
-         'teacher_edits':[[1,'width',.05]]}
+         'teacher_edits':[[1,'width',.05]],
+         'improving_edits':[{'edit':[1,'width',.05],'gain':.2},
+                            {'edit':[1,'height',.025],'gain':.1}]}
     def forbidden(*args,**kwargs):raise AssertionError('Semantic policy opened an RGB image')
     monkeypatch.setattr(Image,'open',forbidden)
     for probability in (0.,1.):
-        loss,_,_,_,parts=policy_batch(net,[row],'cpu',random.Random(42),probability)
-        assert torch.isfinite(loss) and set(parts)=={'node','property','delta'}
+        loss,logits,labels,n,parts=policy_batch(net,[row],'cpu',random.Random(42),probability)
+        assert torch.isfinite(loss) and set(parts)=={'joint_improvement'}
+        expected_indices=[action_index((1,'width',.05),n),action_index((1,'height',.025),n)]
+        assert labels==[expected_indices]
+        logp=torch.log_softmax(logits,dim=-1)
+        expected=-(logp[0,expected_indices[0]]*2/3+logp[0,expected_indices[1]]/3)
+        assert torch.allclose(loss,expected)
 
 
 @pytest.mark.browser
@@ -315,7 +322,8 @@ def test_visual_data_training_resume_and_preparation(tmp_path,monkeypatch):
     train=list(read_jsonl(tmp_path/'data/policy-train.jsonl'))
     assert len(train)>=2 and train[0]['teacher_edits']==[]
     assert validate_action(train[1]['teacher_edits'][0])
-    assert train[1]['teacher_strategy']=='best-improving-reverse-v1'
+    assert train[1]['teacher_strategy']=='improvement-distribution-v1'
+    assert train[1]['improving_edits'] and all(item['gain']>0 for item in train[1]['improving_edits'])
     assert validate_action(train[1]['corruption_edit'])
     common=['--train',str(tmp_path/'data/policy-train.jsonl'),'--val',str(tmp_path/'data/policy-val.jsonl'),
             '--out',str(tmp_path/'policy'),'--mode','abstract','--size','64','--hidden','16','--layers','1',
@@ -377,7 +385,7 @@ def test_publication_figures_from_persisted_metrics(tmp_path):
               {'step':50,'validation_loss':1.5,'best':1.5,'detector_precision_iou50':.6,
                'detector_recall_iou50':.5,'detector_small_recall_iou50':.3}]
     policy=[{'step':50,'loss':4.},
-            {'step':50,'validation_loss':3.5,'best':3.5,'action_accuracy':.4,'node_accuracy':.7,
+            {'step':50,'validation_loss':3.5,'best':3.5,'improving_action_rate':.4,'node_accuracy':.7,
              'property_accuracy':.6,'value_accuracy':.5,
              'per_property':{'width':{'n':3,'accuracy':2/3}}}]
     write_jsonl(run/'detector/train.jsonl',detector)

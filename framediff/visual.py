@@ -470,7 +470,8 @@ def decode_action(index,n):
 
 def load_policy(path,device):
     checkpoint=torch.load(path,map_location='cpu',weights_only=True)
-    if checkpoint.get('kind') not in ('visual-policy-v3','visual-policy-v4','visual-policy-v5-no-stop','visual-policy-v6-semantic'):
+    if checkpoint.get('kind') not in ('visual-policy-v3','visual-policy-v4','visual-policy-v5-no-stop',
+                                      'visual-policy-v6-semantic','visual-policy-v7-improvement'):
         raise ValueError('Requires a supported no-padding/gap visual policy checkpoint')
     model=VisualPolicy(VisualConfig(**checkpoint['config']),pretrained=False)
     model.load_state_dict(checkpoint['model']);model.stop_threshold=float(checkpoint.get('stop_threshold',.5))

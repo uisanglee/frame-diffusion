@@ -60,6 +60,29 @@ def detection_losses(net,rows,device):
 def detection_loss(net,rows,device):return sum(detection_losses(net,rows,device).values())
 
 
+def improvement_targets(row,n):
+    """Return browser-verified improving joint actions and normalized gains.
+
+    Multiple edits can be valid reverse transitions from the same corrupted
+    state.  The target is therefore a distribution over every candidate that
+    reduced whole-page box distance, not one arbitrarily chosen edit sequence.
+    """
+    items=row.get('improving_edits')
+    if not items:raise ValueError(f'Missing improvement distribution: row={row.get("id")}; rerun visual-relabel-best-reverse')
+    by_index={}
+    for item in items:
+        edit=item.get('edit') if isinstance(item,dict) else None
+        gain=item.get('gain') if isinstance(item,dict) else None
+        if edit is None or not isinstance(gain,(int,float)) or not math_isfinite(gain) or gain<=0:
+            raise ValueError(f'Invalid improving edit: row={row.get("id")} item={item}')
+        if not action_is_legal(row['current'],row['current_boxes'],row['viewport'],edit):
+            raise ValueError(f'Illegal improving edit: row={row.get("id")} edit={edit}')
+        index=action_index(edit,n);by_index[index]=max(float(gain),by_index.get(index,0.))
+    indices=sorted(by_index,key=lambda index:(-by_index[index],index))
+    gains=torch.tensor([by_index[index] for index in indices],dtype=torch.float32)
+    return indices,gains/gains.sum()
+
+
 def policy_batch(net,rows,device,rng,prediction_probability):
     cfg=net.cfg
     batch=visual_batch([current_features(r['current'],r['current_boxes'],r['viewport'],cfg.max_nodes) for r in rows],device)
@@ -88,9 +111,11 @@ def policy_batch(net,rows,device,rng,prediction_probability):
     logits,components=net(batch,torch.stack(target).to(device),torch.stack(current).to(device),
                           return_components=True)
     logp=F.log_softmax(logits,dim=-1);n=batch['mask'].shape[1];losses=[];labels=[]
-    factor={'operation':[],'node':[],'property':[],'delta':[]}
+    factor={'operation':[],'node':[],'property':[],'delta':[]};joint=[]
     for i,row in enumerate(rows):
-        valid=[action_index(e,n) for e in row['teacher_edits']] or [action_index(None,n)]
+        if net.cfg.policy_head=='autoregressive':
+            valid,weights=improvement_targets(row,n);weights=weights.to(logits.device)
+        else:valid=[action_index(e,n) for e in row['teacher_edits']] or [action_index(None,n)]
         illegal=[e for e in row['teacher_edits'] if not action_is_legal(
             row['current'],row['current_boxes'],row['viewport'],e)]
         if illegal:raise ValueError(f'Illegal teacher edit: row={row.get("id")} edits={illegal}')
@@ -99,13 +124,11 @@ def policy_batch(net,rows,device,rng,prediction_probability):
             raise RuntimeError(f'Non-finite policy logits: row={row.get("id")} target_logits={values}')
         labels.append(valid)
         if net.cfg.policy_head=='autoregressive' and net.cfg.training_scheme=='balanced-v1':
-            if not row['teacher_edits']:raise ValueError('Autoregressive policy has no learned STOP examples')
-            if len(row['teacher_edits'])!=1:raise ValueError('Autoregressive policy requires one teacher edit per row')
-            node,field,value=row['teacher_edits'][0]
-            prop=NUMERIC_FIELDS.index(field);delta=NORMALIZED_DELTAS.index(value)
-            factor['node'].append(-components['node'][i,node])
-            factor['property'].append(-components['property'][i,node,prop])
-            factor['delta'].append(-components['delta'][i,node,prop,delta])
+            # Soft cross-entropy on the JOINT action distribution. Every
+            # browser-verified distance-reducing action is positive, weighted
+            # by how much it improves the state. This does not prescribe an
+            # arbitrary reverse order and does not factor labels independently.
+            joint.append(-(weights*logp[i,valid]).sum())
         elif net.cfg.policy_head=='hierarchical' and net.cfg.training_scheme=='balanced-v1':
             is_edit=bool(row['teacher_edits']);factor['operation'].append(-components['operation'][i,int(is_edit)])
             if is_edit:
@@ -117,12 +140,10 @@ def policy_batch(net,rows,device,rng,prediction_probability):
                 factor['delta'].append(-components['delta'][i,node,prop,delta])
         else:losses.append(-torch.logsumexp(logp[i,valid],0))
     if net.cfg.policy_head in ('hierarchical','autoregressive') and net.cfg.training_scheme=='balanced-v1':
-        parts={key:torch.stack(values).mean() for key,values in factor.items() if values}
         if net.cfg.policy_head=='autoregressive':
-            # Mean CE over node, property and delta; no STOP token.
-            token_losses=[loss for values in factor.values() for loss in values]
-            loss=torch.stack(token_losses).mean()
-        else:loss=sum(parts.values())
+            parts={'joint_improvement':torch.stack(joint).mean()};loss=parts['joint_improvement']
+        else:
+            parts={key:torch.stack(values).mean() for key,values in factor.items() if values};loss=sum(parts.values())
     else:parts={'joint':torch.stack(losses).mean()};loss=parts['joint']
     return loss,logits,labels,n,parts
 
@@ -163,7 +184,8 @@ def policy_validation_metrics(net,rows,device,rng,prediction_probability,batch_s
     totals={'n':0,'correct':0,'stop_n':0,'stop_correct':0,'non_stop_n':0,'non_stop_correct':0,
             'node_correct':0,'property_correct':0,'value_correct':0,'predicted_stop':0,'false_stop':0,
             'edit_only_correct':0,'property_given_node_n':0,'property_given_node_correct':0,
-            'delta_given_node_property_n':0,'delta_given_node_property_correct':0}
+            'delta_given_node_property_n':0,'delta_given_node_property_correct':0,
+            'selected_gain':0.,'positive_count':0}
     per_property={};operation_scores=[];operation_targets=[]
     for offset in range(0,len(rows),batch_size):
         batch_rows=rows[offset:offset+batch_size]
@@ -171,10 +193,14 @@ def policy_validation_metrics(net,rows,device,rng,prediction_probability,batch_s
         predictions=net.select(logits).cpu().tolist()
         edit_predictions=logits[:,:-1].argmax(-1).cpu().tolist()
         scores=torch.sigmoid(logits[:,-1].float()-torch.logsumexp(logits[:,:-1].float(),-1)).cpu().tolist()
-        for prediction,valid,edit_prediction,score in zip(predictions,labels,edit_predictions,scores):
+        for row,prediction,valid,edit_prediction,score in zip(batch_rows,predictions,labels,edit_predictions,scores):
             predicted=decode_action(prediction,n);targets=[decode_action(label,n) for label in valid];target=targets[0]
+            gain_by_index={action_index(item['edit'],n):float(item['gain']) for item in row.get('improving_edits',[])}
+            selected_gain=gain_by_index.get(prediction,0.)
             operation_scores.append(score);operation_targets.append(target is None)
             totals['n']+=1;totals['correct']+=prediction in valid
+            totals['selected_gain']+=selected_gain
+            totals['positive_count']+=len(valid)
             totals['predicted_stop']+=predicted is None
             if target is None:
                 totals['stop_n']+=1;totals['stop_correct']+=predicted is None
@@ -182,8 +208,10 @@ def policy_validation_metrics(net,rows,device,rng,prediction_probability,batch_s
             totals['non_stop_n']+=1;totals['non_stop_correct']+=prediction in valid
             totals['false_stop']+=predicted is None
             totals['edit_only_correct']+=edit_prediction in valid
-            fields={item[1] for item in targets};field=target[1]
-            entry=per_property.setdefault(field,{'n':0,'correct':0});entry['n']+=1;entry['correct']+=prediction in valid
+            fields={item[1] for item in targets}
+            for field in fields:
+                entry=per_property.setdefault(field,{'n':0,'correct':0})
+                entry['n']+=1;entry['correct']+=prediction in valid
             if predicted is not None:
                 node_ok=any(predicted[0]==item[0] for item in targets)
                 totals['node_correct']+=node_ok
@@ -207,7 +235,7 @@ def policy_validation_metrics(net,rows,device,rng,prediction_probability,batch_s
         return (stop_hits/totals['stop_n']+edit_hits/totals['non_stop_n'])/2
     recommended=(max(candidates,key=lambda t:(threshold_score(t),-abs(t-.5)))
                  if totals['stop_n'] and totals['non_stop_n'] else .5)
-    return {'action_accuracy':div('correct','n'),'node_accuracy':div('node_correct','non_stop_n'),
+    result={'node_accuracy':div('node_correct','non_stop_n'),
             'predicted_stop_rate':div('predicted_stop','n'),'false_stop_rate':div('false_stop','non_stop_n'),
             'edit_recall':edit_recall,'operation_balanced_accuracy':balanced,
             'recommended_stop_threshold':recommended,
@@ -219,6 +247,12 @@ def policy_validation_metrics(net,rows,device,rng,prediction_probability,batch_s
             'stop_accuracy':div('stop_correct','stop_n'),'non_stop_accuracy':div('non_stop_correct','non_stop_n'),
             'validation_n':totals['n'],'stop_n':totals['stop_n'],'non_stop_n':totals['non_stop_n'],
             'per_property':{field:{'n':v['n'],'accuracy':v['correct']/v['n']} for field,v in sorted(per_property.items())}}
+    if net.cfg.policy_head=='autoregressive':
+        result.update(improving_action_rate=div('correct','n'),
+                      mean_distance_reduction=div('selected_gain','n'),
+                      mean_improving_actions=div('positive_count','n'))
+    else:result['action_accuracy']=div('correct','n')
+    return result
 
 
 def detector_quality(net,rows,device,threshold=.4):
@@ -277,10 +311,12 @@ def train(args):
                                 observation_contract=('semantic-mask-pair-diff-v1' if args.mode=='abstract' and
                                     getattr(args,'policy_head','flat')=='autoregressive' else 'rgb-pair-diff-v1'),
                                 training_scheme='balanced-v1' if getattr(args,'balanced_policy',False) else 'legacy'))
-        kind='visual-policy-v6-semantic' if cfg['policy_head']=='autoregressive' else 'visual-policy-v3'
+        kind='visual-policy-v7-improvement' if cfg['policy_head']=='autoregressive' else 'visual-policy-v3'
         if cfg['policy_head']=='autoregressive' and any(
-                r.get('teacher_strategy')!='best-improving-reverse-v1' for r in train_rows+val_rows):
-            raise ValueError('Autoregressive policy requires best-improving reverse labels; rebuild visual data')
+                r.get('teacher_strategy')!='improvement-distribution-v1' or
+                (r.get('teacher_edits') and not r.get('improving_edits')) for r in train_rows+val_rows):
+            raise ValueError('Autoregressive policy requires multi-positive improvement distributions; '
+                             'rerun visual-relabel-best-reverse and visual-subset-numeric')
         if cfg['policy_head']=='autoregressive':
             train_rows=[r for r in train_rows if r['teacher_edits']]
             val_rows=[r for r in val_rows if r['teacher_edits']]
@@ -297,9 +333,16 @@ def train(args):
     legacy_policy_init=False
     if ck:
         checkpoint_config=ck['config']
-        if not is_detector and ck.get('kind') in ('visual-policy-v3','visual-policy-v4','visual-policy-v5-no-stop','visual-policy-v6-semantic'):
+        if not is_detector and ck.get('kind') in ('visual-policy-v3','visual-policy-v4','visual-policy-v5-no-stop',
+                                                  'visual-policy-v6-semantic','visual-policy-v7-improvement'):
             checkpoint_config=asdict(VisualConfig(**checkpoint_config))
         if ck.get('kind')==kind and checkpoint_config==cfg:pass
+        elif (args.init_checkpoint and kind=='visual-policy-v7-improvement' and
+              ck.get('kind') in ('visual-policy-v5-no-stop','visual-policy-v6-semantic') and
+              checkpoint_config==cfg):
+            # Architecture-compatible warm start only. Resume is forbidden
+            # because the old checkpoint optimized a single-action objective.
+            pass
         elif (args.init_checkpoint and not is_detector and ck.get('kind')=='visual-policy-v1' and
               cfg['policy_head']=='flat' and not cfg['numeric_only'] and cfg['decoding']=='joint' and
               ck.get('config')=={k:v for k,v in cfg.items() if k not in ('action_contract','policy_head','numeric_only','decoding','training_scheme')}):
@@ -462,7 +505,9 @@ def filter_legal_policy_rows(rows):
     """
     kept=[];rejected=[]
     for row in rows:
-        illegal=[edit for edit in row.get('teacher_edits',[]) if not action_is_legal(
+        supervised=list(row.get('teacher_edits',[]))+[
+            item.get('edit') for item in row.get('improving_edits',[]) if isinstance(item,dict) and item.get('edit')]
+        illegal=[edit for edit in supervised if not action_is_legal(
             row['current'],row['current_boxes'],row['viewport'],edit)]
         if illegal:rejected.append({'id':row.get('id'),'edits':illegal})
         else:kept.append(row)

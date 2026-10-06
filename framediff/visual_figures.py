@@ -12,7 +12,7 @@ from .ir import read_jsonl,write_json
 
 STAGES=(('detector','Detector'),('raw-stage1','Screenshot Stage 1'),('policy-raw','Screenshot Stage 2'),
         ('abstract-stage1','Abstract Stage 1'),('policy-abstract','Abstract Stage 2'))
-ACCURACY_KEYS=(('action_accuracy','Full action'),('node_accuracy','Node'),
+ACCURACY_KEYS=(('improving_action_rate','Improving action'),('node_accuracy','Node'),
                ('property_accuracy','Property'),('value_accuracy','Value'))
 
 
@@ -62,7 +62,7 @@ def action_accuracy(run_root,out):
     plt=pyplot();selected=[]
     for folder,title in STAGES[1:]:
         best=best_validation(rows(Path(run_root)/folder/'train.jsonl'))
-        if best and 'action_accuracy' in best:selected.append((folder,title,best))
+        if best and 'improving_action_rate' in best:selected.append((folder,title,best))
     if not selected:return
     import numpy as np
     x=np.arange(len(selected));width=.18;fig,axis=plt.subplots(figsize=(10,4.8))
