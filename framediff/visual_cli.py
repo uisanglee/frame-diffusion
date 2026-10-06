@@ -8,6 +8,12 @@ def add_parsers(sub):
         help='Parse cached current/target HTML and construct exact CSS declaration replacement paths; no rerendering')
     p.add_argument('--rendered',required=True);p.add_argument('--out',required=True);p.add_argument('--resume',action='store_true')
     p.add_argument('--seed',type=int,default=42)
+    p.add_argument('--stylesheets',action='store_true',help='Address inline declarations and embedded stylesheet rules')
+    p.add_argument('--max-css-owners',type=int,default=512,help='Reject pages exceeding owner capacity in stylesheet mode')
+    p=sub.add_parser('visual-tree-freeze',help='Render fixed inline+stylesheet val/test corruption, keeping target assets')
+    p.add_argument('--rendered',required=True);p.add_argument('--out',required=True)
+    p.add_argument('--resume',action='store_true');p.add_argument('--seed',type=int,default=90210)
+    p.add_argument('--max-noise',type=int,default=4);p.add_argument('--samples-per-page',type=int,default=1)
     p=sub.add_parser('visual-import-webui',help='Build domain-disjoint WebUI manifests and optional native AX detector labels')
     p.add_argument('--root',required=True);p.add_argument('--out',required=True);p.add_argument('--view',default='default_1280-720')
     p.add_argument('--train-count',type=int,default=600);p.add_argument('--val-count',type=int,default=200)
@@ -39,6 +45,7 @@ def add_parsers(sub):
         else:
             p.add_argument('--mode',choices=['screenshot','abstract'],required=True)
             if name=='visual-tree-train':
+                p.add_argument('--stylesheets',action='store_true',help='Train CSS owner decoder; requires v2 prepared labels')
                 p.add_argument('--predicted-targets',action='store_true',help='Use frozen detector cache rather than DOM target masks')
                 p.add_argument('--online-corruption',action='store_true',help='Generate fresh CPU-browser corruption/path states during training only')
                 p.add_argument('--online-targets',help='Training pages manifest containing clean tagged HTML; not initial_html')
@@ -52,6 +59,7 @@ def add_parsers(sub):
                 p.add_argument('--decoding',choices=['joint','aggregate'],default='joint')
             for k,v in [('size',384),('hidden',128),('layers',3),('heads',4),('max-nodes',128),('token-grid',12)]:p.add_argument('--'+k,type=int,default=v)
     p=sub.add_parser('visual-cache-targets',help='Run frozen detector once per target for policy fine-tuning')
+    p.add_argument('--reuse-cache',help='Reuse image-hash cache after verifying detector/threshold/size identity')
     for k in ('data','checkpoint','out'):p.add_argument('--'+k,required=True)
     p.add_argument('--device',default='auto');p.add_argument('--threshold',type=float,default=.4)
     p.add_argument('--size',type=int,default=384);p.add_argument('--cpu-threads',type=int,default=4);p.add_argument('--resume',action='store_true')
@@ -78,6 +86,9 @@ def add_parsers(sub):
 
 
 def run(args):
+    if args.command=='visual-tree-freeze':
+        from .tree_freeze import freeze
+        return freeze(args)
     if args.command=='visual-subset-numeric':
         from .visual_numeric import prepare
         return prepare(args)

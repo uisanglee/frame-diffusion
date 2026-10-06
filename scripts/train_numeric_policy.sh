@@ -10,6 +10,12 @@ detector=$2
 run=$3
 policy_run=${POLICY_RUN_DIR:-$run}
 online=()
+owner_options=()
+case "${CSS_STYLESHEETS:-0}" in
+  1) owner_options=(--stylesheets --max-nodes "${MAX_CSS_OWNERS:-512}") ;;
+  0) ;;
+  *) echo 'CSS_STYLESHEETS must be 0 or 1' >&2; exit 2 ;;
+esac
 case "${ONLINE_CORRUPTION:-1}" in
   1) online=(--online-corruption --online-targets "$rendered/pages-train.jsonl"
         --online-workers "${ONLINE_WORKERS:-2}" --online-prefetch "${ONLINE_PREFETCH:-4}"
@@ -52,7 +58,7 @@ for head in ${POLICY_HEADS:-replacement}; do
       fi
       if [[ -f "$output/last.pt" ]]; then options=(--resume "$output/last.pt"); fi
       python -m framediff visual-tree-train --train "$train" --val "$val" --out "$output" \
-        --mode "$mode" --device "${DEVICE:-cuda}" \
+        --mode "$mode" --device "${DEVICE:-cuda}" "${owner_options[@]}" \
         --steps "$steps" --lr "$lr" "${condition[@]}" "${online[@]}" \
         --batch-size "${BATCH_SIZE:-2}" --accumulation "${ACCUMULATION:-4}" \
         --val-samples "${VAL_SAMPLES:-2000}" --eval-every "${EVAL_EVERY:-500}" \

@@ -154,9 +154,16 @@ def prepare(args):
     from .html_bridge import HtmlBrowser
     from .visual_data import validate_splits
     source, out = Path(args.rendered).resolve(), Path(args.out).resolve()
+    stylesheets=getattr(args,'stylesheets',False)
+    from . import css_owners
+    contract=css_owners.CONTRACT if stylesheets else CONTRACT
+    def parse(browser,html,tree):
+        return css_owners.read(browser,tree,html,fixed=True) if stylesheets else extract(browser,html,tree)
     if source == out or source in out.parents: raise ValueError('Use a separate output directory')
     files = [source/f'{kind}-{split}.jsonl' for split in ('train','val','test') for kind in ('policy','pages')]
-    guard_run(out, {'kind':CONTRACT, 'sources':{str(p):digest(p) for p in files}, 'seed':args.seed}, args.resume)
+    config={'kind':contract, 'sources':{str(p):digest(p) for p in files}, 'seed':args.seed}
+    if stylesheets:config['max_css_owners']=getattr(args,'max_css_owners',512)
+    guard_run(out, config, args.resume)
     report = {}; all_rows = []
     with HtmlBrowser() as browser:
         for split in ('train','val','test'):
@@ -179,7 +186,9 @@ def prepare(args):
                 if clean is None:
                     failures.append({'id':page_id,'error':'Missing clean cached HTML state'}); continue
                 try:
-                    target = extract(browser, Path(clean['current_html']).read_text(), clean['current'])
+                    target = parse(browser, Path(clean['current_html']).read_text(), clean['current'])
+                    if stylesheets and len(target['owners'])>config['max_css_owners']:
+                        raise ValueError(f"CSS owner count {len(target['owners'])} exceeds max_css_owners={config['max_css_owners']}")
                     asset_hashes[clean['current_html']] = digest(clean['current_html'])
                     target_elements = elements(clean['current'], clean['current_boxes'], clean['viewport'])
                 except Exception as exc:
@@ -193,7 +202,8 @@ def prepare(args):
                             # Geometry-derived props legitimately vary; IDs/parents/roles must not.
                             identity = lambda r:[(n['id'],n.get('parent'),n.get('role')) for n in r['current']['nodes']]
                             if identity(row) != identity(clean): raise ValueError('DOM topology changed')
-                        current = extract(browser, Path(row['current_html']).read_text(), row['current'])
+                        current = parse(browser, Path(row['current_html']).read_text(), row['current'])
+                        if stylesheets and current['owners']!=target['owners']: raise ValueError('CSS owner topology changed')
                         asset_hashes[row['current_html']] = digest(row['current_html'])
                         if current['fixed'] != target['fixed']: raise ValueError('Noneditable DOM/CSS differs')
                         seed = int(hashlib.sha256(f'{args.seed}:{row["id"]}'.encode()).hexdigest()[:16],16)
@@ -203,8 +213,10 @@ def prepare(args):
                         new = {k:v for k,v in row.items() if k not in (
                             'teacher_edits','improving_edits','tree_path_edits','tree_edit_distance',
                             'teacher_strategy','corruption_edit','policy_subset')}
-                        new.update(teacher_strategy=CONTRACT, declaration_state=current['state'],
+                        new.update(teacher_strategy=contract, declaration_state=current['state'],
                                    replacement_edit=path[0], symbolic_distance=len(path), target_elements=target_elements)
+                        if stylesheets:
+                            new.update(css_owners=current['owners'],target_html=clean['current_html'])
                         kept.append(new); counts['edit_rows'] += 1
                         counts['remove_edits' if not path[0][2] else 'set_edits'] += 1
                         counts['property/'+path[0][1]] += 1
@@ -218,7 +230,7 @@ def prepare(args):
                 temporary.replace(cache)
             by_page={r['id'].rsplit('/',1)[0]:r for r in kept}
             pages = [{**p,'initial_html':by_page[p['id']]['current_html'],
-                      'policy_subset':CONTRACT} for p in read_jsonl(source/f'pages-{split}.jsonl') if p['id'] in by_page]
+                      'policy_subset':contract} for p in read_jsonl(source/f'pages-{split}.jsonl') if p['id'] in by_page]
             write_jsonl(out/f'policy-{split}.jsonl', kept); write_jsonl(out/f'pages-{split}.jsonl', pages)
             write_jsonl(out/f'rejections-{split}.jsonl', failures)
             write_json(out/f'html-signatures-{split}.json', asset_hashes)

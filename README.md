@@ -10,6 +10,10 @@
 
 ## 최신: 이미지 조건 반복 복구
 
+Inline과 `<style>` 규칙을 함께 훼손·복구하는 `css-owner-tree-v2` 경로를 추가했습니다.
+[Stylesheet 정책 준비·GPU 1/3 학습·평가](docs/stylesheet-policy.md)를 참고하세요.
+기존 detector와 목표 이미지 캐시를 재사용하며, 새 정책과 고정 val/test 훼손 상태는 별도 경로에 생성합니다.
+
 현재 학습 경로는 **CSS 선언 교체 → 단일 교사 토큰 CE → 실행 이미지 평가**를 분리한
 declaration-tree policy입니다. [최신 코드 구분·기존 데이터 재사용·GPU 1/3 명령어](docs/numeric-policy.md)를
 참고하세요. detector는 재사용하며, 이전 delta-policy는 새 정책으로 재학습해야 합니다.

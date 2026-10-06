@@ -42,7 +42,7 @@ def target_pool(rows, manifest=None):
                 raise ValueError(f'Online target identity mismatch: {page_id} {key}')
         target = {k:copy.deepcopy(row[k]) for k in ('group','split','source_sha','viewport','current',
                   'target_image','target_elements')}
-        for key in ('predicted_target_elements','parser_provenance','parser_sha'):
+        for key in ('predicted_target_elements','parser_provenance','parser_sha','css_owners'):
             if key in row: target[key] = row[key]
         target.update(id=page_id,target_html=str(Path(html).resolve()))
         targets[page_id] = target
@@ -97,6 +97,9 @@ class OnlineSampler:
     @lru_cache(maxsize=64)
     def clean_state(self,page_id):
         target=self.by_id[page_id]
+        if 'css_owners' in target:
+            from .css_owners import read
+            return read(self.browser,target['current'],self.html(target['target_html']))['state']
         return extract(self.browser,self.html(target['target_html']),target['current'])['state']
 
     def close(self):
@@ -116,28 +119,52 @@ class OnlineSampler:
                 html=self.html(target['target_html'])
                 clean=self.clean_state(target['id'])
                 browser.load(html,viewport)
-                state=current_state(browser,tree);noise=[]
+                from . import css_owners
+                owner_mode='css_owners' in target
+                owners=css_owners.read(browser,tree)['owners'] if owner_mode else None
+                if owner_mode and owners!=target['css_owners']: raise ValueError('CSS owner identity changed')
+                def state_now():
+                    return css_owners.read(browser,tree)['state'] if owner_mode else current_state(browser,tree)
+                def apply(edit):
+                    return css_owners.execute(browser,owners,edit) if owner_mode else execute(browser,tree,edit)
+                def geometry():return browser.tagged_boxes([n['id'] for n in tree['nodes'][1:]])
+                clean_boxes=geometry() if owner_mode else None
+                state=state_now();noise=[];probe_rejections=0
                 for _ in range(rng.randint(1,self.max_noise)):
                     if self.stop is not None and self.stop.is_set(): raise RuntimeError('Online producer stopped')
-                    mutation=sample_mutation(state,viewport,rng)
-                    execute(browser,tree,mutation);state=current_state(browser,tree);noise.append(mutation)
+                    for trial in range(24 if owner_mode else 1):
+                        mutation=sample_mutation(state,viewport,rng)
+                        if owner_mode:
+                            # Preserve cascade priority when mutating an existing
+                            # declaration. Do not promote a shadowed rule to winner.
+                            old=state[mutation[0]][FIELDS.index(mutation[1])]
+                            if mutation[2]: mutation[3]=old[1]
+                            before_values=css_owners.computed(browser,owners,mutation);before_boxes=geometry()
+                        apply(mutation)
+                        if owner_mode and (before_values==css_owners.computed(browser,owners,mutation) or before_boxes==geometry()):
+                            apply([mutation[0],mutation[1],*old]);probe_rejections+=1;continue
+                        state=state_now();noise.append(mutation);break
                 path=repair_path(state,clean,rng.getrandbits(64))
                 if not path: raise ValueError('Corruption returned to clean program')
                 # Select an intermediate reverse-path state, not only the
                 # fully corrupted endpoint and not history in reverse order.
                 depth=rng.randrange(len(path))
-                for edit in path[:depth]: execute(browser,tree,edit)
-                state=current_state(browser,tree)
+                for edit in path[:depth]: apply(edit)
+                state=state_now()
                 remaining=path[depth:]
                 if sorted(remaining)!=sorted(repair_path(state,clean)):
                     raise ValueError('CSS execution changed the symbolic repair path')
                 if not remaining: raise ValueError('Sampled clean state has no next edit')
                 boxes=browser.tagged_boxes([n['id'] for n in tree['nodes'][1:]])
+                if owner_mode and boxes==clean_boxes:raise ValueError('Remaining CSS differences have no visible geometry effect')
                 boxes[tree['nodes'][0]['id']]=[0,0,*viewport]
                 result={**target,'id':target['id']+f'/online-{index}',
                         'current':refresh_geometry(tree,boxes),'current_boxes':boxes,
                         'declaration_state':state,'replacement_edit':remaining[0],
-                        'teacher_strategy':CONTRACT,'symbolic_distance':len(remaining)}
+                        'teacher_strategy':css_owners.CONTRACT if owner_mode else CONTRACT,'symbolic_distance':len(remaining)}
+                if owner_mode:
+                    result['css_owners']=owners
+                    result['current_html_text']=browser.page.content()
                 if self.mode=='screenshot':
                     # Bytes travel through a bounded queue, never thousands of
                     # transient files on disk. Target images are never recaptured.
@@ -146,6 +173,10 @@ class OnlineSampler:
                                   'corruptions':noise,'reverse_prefix':depth,'path_length':len(path),
                                   'screenshot_captures':int(self.mode=='screenshot'),
                                   'seconds':time.perf_counter()-started,'errors':errors}
+                if owner_mode:
+                    result['online'].update(probe_rejections=probe_rejections,
+                        teacher_owner=owners[remaining[0][0]]['kind'],
+                        rule_mutations=sum(owners[e[0]]['kind']=='rule' for e in noise))
                 return result
             except Exception as exc:
                 errors.append({'page':target['id'],'error':str(exc)})

@@ -484,12 +484,19 @@ def validation_sample(rows,limit,seed=90210):
 
 
 def cache_targets(args):
+    from .ir import read_json
     device=select_device(args.device)
     if device=='cpu':torch.set_num_threads(args.cpu_threads)
     model,ck=load_detector(args.checkpoint,device);rows=list(read_jsonl(args.data))
     out=Path(args.out).resolve();guard_run(out,{'kind':'visual-cache-v1','data':digest(args.data),
         'checkpoint':digest(args.checkpoint),'threshold':args.threshold,'size':args.size},args.resume)
     provenance=out/'parser-provenance.json';parser_sha=digest(args.checkpoint)
+    reuse=Path(args.reuse_cache).resolve() if getattr(args,'reuse_cache',None) else None
+    if reuse:
+        config=read_json(reuse/'config.json')
+        if any(config.get(k)!=v for k,v in dict(kind='visual-cache-v1',checkpoint=parser_sha,
+                                              threshold=args.threshold,size=args.size).items()):
+            raise ValueError('Reuse cache detector/threshold/size mismatch')
     write_json(provenance,{'parser_sha':parser_sha,'parser_training_groups':ck['training_groups'],'parser_training_hashes':ck['training_hashes']})
     seen={};result=[]
     for r in rows:
@@ -497,13 +504,18 @@ def cache_targets(args):
             raise ValueError('Parser training overlaps held-out target')
         key=digest(r['target_image']);path=out/f'{key}.png'
         if key not in seen:
-            if not (args.resume and path.exists() and path.with_suffix('.json').exists()):
+            if reuse and (reuse/f'{key}.png').exists() and (reuse/f'{key}.json').exists():
+                # References preserve existing detector outputs without a GPU
+                # forward pass or duplicated image files.
+                path=reuse/f'{key}.png'
+            cached=path.exists() and path.with_suffix('.json').exists()
+            if not (cached and (args.resume or path.parent==reuse)):
                 predictions=detect(model,detector_input(r['target_image']),args.threshold)
                 abstract_image(predictions,r['viewport'],args.size).save(path)
                 write_json(out/f'{key}.json',predictions)
             seen[key]=str(path)
         result.append({**r,'predicted_target_abstract':seen[key],
-            'predicted_target_elements':str(path.with_suffix('.json')),
+            'predicted_target_elements':str(Path(seen[key]).with_suffix('.json')),
             'parser_sha':parser_sha,'parser_provenance':str(provenance)})
     write_jsonl(out/'data.jsonl',result)
     return result

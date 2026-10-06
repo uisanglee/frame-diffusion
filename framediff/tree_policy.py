@@ -37,9 +37,11 @@ class TreeConfig:
     policy_head: str = 'replacement'
     numeric_only: bool = True
     action_contract: str = CONTRACT
+    stylesheets: bool = False
 
     def __post_init__(self):
-        if self.mode not in ('abstract','screenshot') or self.action_contract != CONTRACT or self.policy_head != 'replacement':
+        from .css_owners import CONTRACT as OWNER_CONTRACT
+        if self.mode not in ('abstract','screenshot') or self.action_contract != (OWNER_CONTRACT if self.stylesheets else CONTRACT) or self.policy_head != 'replacement':
             raise ValueError('Replacement policy contract mismatch')
         if self.size < 32 or min(self.hidden,self.layers,self.heads,self.max_nodes,self.token_grid)<1 or self.hidden%self.heads:
             raise ValueError('Invalid model dimensions')
@@ -59,6 +61,7 @@ class TreePolicy(nn.Module):
         self.byte=nn.Embedding(257,cfg.hidden,padding_idx=0)
         self.css_encoder=nn.GRU(cfg.hidden,cfg.hidden,batch_first=True)
         self.css_projection=nn.Linear(6*cfg.hidden,cfg.hidden)
+        if cfg.stylesheets:self.owner_type=nn.Embedding(3,cfg.hidden)
         self.geometry=nn.Linear(4,cfg.hidden)
         self.node=nn.Embedding(cfg.max_nodes,cfg.hidden)
         self.blocks=nn.ModuleList(Block(ModelConfig(hidden=cfg.hidden,layers=cfg.layers,heads=cfg.heads,dropout=0.)) for _ in range(cfg.layers))
@@ -88,6 +91,12 @@ class TreePolicy(nn.Module):
         encoded,_=self.css_encoder(self.byte(flat))
         embedded=encoded[torch.arange(flat.shape[0],device=device),lengths-1]
         css=self.css_projection(embedded.reshape(b,n,-1))
+        if self.cfg.stylesheets:
+            # Current selector/path context and inline/rule type, not target CSS.
+            context=batch['owner_text'];flat=context.flatten(0,1)
+            lengths=(flat!=0).sum(-1).clamp_min(1)
+            text,_=self.css_encoder(self.byte(flat))
+            css=css+text[torch.arange(b*n,device=device),lengths-1].reshape(b,n,-1)+self.owner_type(batch['owner_type'])
         local=roi_align(feature,[r*feature.shape[-1] for r in batch['roi']],output_size=3,aligned=True).mean((-1,-2)).reshape(b,n,-1)
         x=self.node(torch.arange(n,device=device))[None]+css+self.geometry(batch['roi'])+local
         x=x+self.cross(x,spatial,spatial,need_weights=False)[0]
@@ -130,13 +139,33 @@ class TreePolicy(nn.Module):
 
 def tree_batch(rows,device,max_nodes):
     """Current tree/geometry only; no retired numeric-delta legality mask."""
-    features=[encode(r['current'],[{'viewport':r['viewport'],'target':{}}],max_nodes,[r['current_boxes']]) for r in rows]
-    batch=collate(features,device);b,n=batch['mask'].shape
+    from .css_owners import context_tree
+    contexts=[context_tree(r['current'],r['current_boxes'],r['css_owners']) if 'css_owners' in r
+              else (r['current'],r['current_boxes']) for r in rows]
+    b=len(rows);n=max(len(t['nodes']) for t,_ in contexts)
+    if n>max_nodes:raise ValueError(f'{n} CSS/DOM owners exceeds max_nodes={max_nodes}; increase --max-nodes')
+    batch={'mask':torch.zeros(b,n,dtype=torch.bool,device=device),
+           'relation':torch.zeros(b,n,n,dtype=torch.long,device=device),
+           'owner_type':torch.zeros(b,n,dtype=torch.long,device=device),
+           'owner_text':torch.zeros(b,n,256,dtype=torch.long,device=device)}
     rois=torch.zeros(b,n,4,device=device)
-    for i,row in enumerate(rows):
+    for i,(row,(tree,boxes)) in enumerate(zip(rows,contexts)):
         values=[];scale=max(row['viewport'])
-        for node in row['current']['nodes']:
-            x,y,w,h=row['current_boxes'][node['id']];values.append([x/scale,y/scale,(x+w)/scale,(y+h)/scale])
+        nodes=tree['nodes'];ids={a['id']:j for j,a in enumerate(nodes)}
+        parents=[ids.get(a.get('parent'),-1) for a in nodes]
+        m=len(nodes);batch['mask'][i,:m]=True
+        relation=[[1 if j==k else 2 if parents[k]==j else 3 if parents[j]==k else 4 if parents[j]==parents[k] else 0
+                   for k in range(m)] for j in range(m)]
+        for j,owner in enumerate(row.get('css_owners',[])):
+            batch['owner_type'][i,j]={'root':0,'inline':1,'rule':2}[owner['kind']]
+            text=json.dumps({k:v for k,v in owner.items() if k!='matches'},sort_keys=True).encode()[:256]
+            batch['owner_text'][i,j,:len(text)]=torch.tensor([v+1 for v in text],device=device)
+            if owner['kind']=='rule':
+                for member in owner['matches']:
+                    if member in ids:relation[j][ids[member]]=2;relation[ids[member]][j]=3
+        batch['relation'][i,:m,:m]=torch.tensor(relation,device=device)
+        for node in nodes:
+            x,y,w,h=boxes[node['id']];values.append([x/scale,y/scale,(x+w)/scale,(y+h)/scale])
         rois[i,:len(values)]=torch.tensor(values,device=device).clamp(0,1)
     batch['roi']=rois
     return batch
@@ -171,12 +200,16 @@ def train(args):
     validate_splits(training+validation)
     if any(r['split']!='train' for r in training) or any(r['split']!='val' for r in validation): raise ValueError('Wrong split files')
     cfg=TreeConfig(**{k:getattr(args,k) for k in ('mode','size','hidden','layers','heads','max_nodes','token_grid')})
+    if getattr(args,'stylesheets',False):
+        from .css_owners import CONTRACT as OWNER_CONTRACT
+        cfg.stylesheets=True;cfg.action_contract=OWNER_CONTRACT;cfg.__post_init__()
     tok=EditTokenizer(cfg.max_nodes)
     for row in training+validation:
-        if row.get('teacher_strategy')!=CONTRACT: raise ValueError('Run visual-tree-prepare; legacy labels are not declaration replacements')
-        if len(row['declaration_state'])!=len(row['current']['nodes']) or len(row['current']['nodes'])>cfg.max_nodes:
+        if row.get('teacher_strategy')!=cfg.action_contract: raise ValueError('Run visual-tree-prepare with matching --stylesheets setting')
+        node_count=len(row['css_owners']) if cfg.stylesheets else len(row['current']['nodes'])
+        if len(row['declaration_state'])!=node_count or node_count>cfg.max_nodes:
             raise ValueError('Invalid declaration state node count')
-        tok.encode(row['replacement_edit'],len(row['current']['nodes']))
+        tok.encode(row['replacement_edit'],node_count)
     signatures={'train':digest(args.train),'val':digest(args.val)}
     online=getattr(args,'online_corruption',False);targets=None
     if online:
@@ -186,12 +219,15 @@ def train(args):
         targets=target_pool(training,args.online_targets)
         signatures['online']={'contract':ONLINE_CONTRACT,'assets':asset_signatures(targets)}
     out=Path(args.out).resolve();settings={k:v for k,v in vars(args).items() if k not in ('out','steps','resume','init_checkpoint')}
+    config=asdict(cfg)
+    if not cfg.stylesheets:
+        config.pop('stylesheets');settings.pop('stylesheets',None)
     # Resource tuning does not change the index-seeded sample stream.
     settings={k:v for k,v in settings.items() if k not in ('online_workers','online_prefetch','online_timeout')}
     if not online: settings={k:v for k,v in settings.items() if not k.startswith('online_')}
-    guard_run(out,{'kind':KIND,'config':asdict(cfg),'data':signatures,'settings':settings},bool(args.resume))
+    guard_run(out,{'kind':KIND,'config':config,'data':signatures,'settings':settings},bool(args.resume))
     ck=torch.load(args.resume or args.init_checkpoint,map_location='cpu',weights_only=True) if args.resume or args.init_checkpoint else None
-    if ck and (ck.get('kind')!=KIND or ck['config']!=asdict(cfg)): raise ValueError('Incompatible policy checkpoint; detector reuse is separate')
+    if ck and (ck.get('kind')!=KIND or TreeConfig(**ck['config'])!=cfg): raise ValueError('Incompatible policy checkpoint; detector reuse is separate')
     groups={r['group'] for r in training};hashes={r['source_sha'] for r in training}
     parser_groups=set();parser_hashes=set();provenance={}
     if args.predicted_targets:
@@ -238,6 +274,7 @@ def train(args):
             stream=stack.enter_context(OnlineStream(targets,cfg.mode,args.seed,args.online_max_noise,
                 args.online_workers,args.online_prefetch,args.online_attempts,args.online_timeout,cursor))
         wait_seconds=0.;producer_seconds=0.;sample_count=0;retry_count=0;remove_count=0;remaining_total=0;recent_errors=[]
+        rule_count=0;probe_rejections=0
         started=time.perf_counter()
         for step in range(start+1,args.steps+1):
             net.train();optimizer.zero_grad(set_to_none=True);total=0.
@@ -252,6 +289,8 @@ def train(args):
                         remaining_total+=row['symbolic_distance']
                         producer_seconds+=info['seconds']
                         recent_errors=(recent_errors+info['errors'])[-5:]
+                        rule_count+=info.get('teacher_owner')=='rule'
+                        probe_rejections+=info.get('probe_rejections',0)
                 with amp(): value,_=loss(rows)
                 if not torch.isfinite(value): raise RuntimeError('Nonfinite token CE')
                 (value/args.accumulation).backward();total+=float(value.detach())/args.accumulation
@@ -264,20 +303,35 @@ def train(args):
                         online_teacher_remove_rate=remove_count/max(1,sample_count),
                         online_mean_remaining_edits=remaining_total/max(1,sample_count),
                         online_recent_errors=recent_errors)
+                    if cfg.stylesheets:metrics.update(online_teacher_rule_rate=rule_count/max(1,sample_count),
+                        online_probe_rejections=probe_rejections)
                 log('train.jsonl',metrics)
             if step%args.eval_every==0 or step==args.steps:
                 net.eval();weighted=0.;count=0
+                cohorts={'all':selected}
+                if cfg.stylesheets:
+                    cohorts={}
+                    for row in selected:
+                        edit=row['replacement_edit']
+                        key=row['css_owners'][edit[0]]['kind']+'/'+('SET' if edit[2] else 'REMOVE')
+                        cohorts.setdefault(key,[]).append(row)
+                breakdown={}
                 with torch.no_grad():
-                    for offset in range(0,len(selected),args.batch_size):
-                        with amp(): value,n=loss(selected[offset:offset+args.batch_size])
-                        weighted+=float(value)*n;count+=n
+                    for key,cohort in cohorts.items():
+                        subtotal=0.;tokens=0
+                        for offset in range(0,len(cohort),args.batch_size):
+                            with amp(): value,n=loss(cohort[offset:offset+args.batch_size])
+                            subtotal+=float(value)*n;tokens+=n
+                        weighted+=subtotal;count+=tokens
+                        breakdown[key]={'n':len(cohort),'tokens':tokens,'token_ce':subtotal/tokens}
                 val=weighted/count;improved=val<best;best=min(best,val)
                 early=update_early_stopping(early,val,args.early_stop_patience,args.early_stop_min_delta)
                 metrics={'step':step,'validation_loss':val,'validation_tokens':count,
                          'validation_n':len(selected),'best':best,'early_stopping':early}
+                if cfg.stylesheets:metrics['validation_by_teacher']=breakdown
                 log('train.jsonl',metrics)
                 with (out/'validation.jsonl').open('a') as validation_file: validation_file.write(json.dumps(metrics)+'\n')
-                state={'kind':KIND,'config':asdict(cfg),'model':net.state_dict(),'optimizer':optimizer.state_dict(),
+                state={'kind':KIND,'config':config,'model':net.state_dict(),'optimizer':optimizer.state_dict(),
                        'step':step,'best':best,'early_stopping':early,'data_signature':signatures,
                        'online_cursor':stream.cursor if stream else None,
                        'rng':rng.getstate(),'torch_rng':torch.get_rng_state(),

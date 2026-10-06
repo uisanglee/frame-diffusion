@@ -86,12 +86,17 @@ def rollout(browser,html,tree,viewport,target_path,policy,parser=None,threshold=
         t=time.perf_counter()
         if cfg.policy_head=='replacement':
             from .tree_policy import tree_batch
-            batch=tree_batch([{'current':current_tree,'current_boxes':boxes,'viewport':viewport}],device,cfg.max_nodes)
+            context={'current':current_tree,'current_boxes':boxes,'viewport':viewport}
+            if getattr(cfg,'stylesheets',False):
+                from . import css_owners
+                owner_state=css_owners.read(browser,current_tree)
+                context['css_owners']=owner_state['owners']
+            batch=tree_batch([context],device,cfg.max_nodes)
         else:batch=visual_batch([current_features(current_tree,boxes,viewport,cfg.max_nodes)],device)
         with torch.inference_mode():
             if cfg.policy_head=='replacement':
                 from .tree_edits import current_state
-                state=current_state(browser,current_tree)
+                state=owner_state['state'] if getattr(cfg,'stylesheets',False) else current_state(browser,current_tree)
                 sync(device);pair_start=time.perf_counter()
                 pair=policy.encode_pair(target_tensor,current_tensor)
                 sync(device);pair_elapsed=time.perf_counter()-pair_start
@@ -110,13 +115,16 @@ def rollout(browser,html,tree,viewport,target_path,policy,parser=None,threshold=
                 action=decode_action(int(policy.select(logits)),len(current_tree['nodes']))
         sync(device);stats['policy_seconds']+=time.perf_counter()-t-(pair_elapsed if cfg.policy_head in ('autoregressive','replacement') else 0.)
         history={'step':step,'action':action,'boxes':boxes,'elapsed_seconds':time.perf_counter()-start}
+        if cfg.policy_head=='replacement' and getattr(cfg,'stylesheets',False) and action:
+            history['css_owner']=owner_state['owners'][action[0]]
         stats['history'].append(history)
         if action is None:stats['stop_reason']='policy_stop';break
         if time_budget and time.perf_counter()-start>=time_budget:stats['stop_reason']='time_budget';break
         t=time.perf_counter()
         if cfg.policy_head=='replacement':
             from .tree_edits import execute
-            execute(browser,current_tree,action)
+            if getattr(cfg,'stylesheets',False):css_owners.execute(browser,owner_state['owners'],action)
+            else:execute(browser,current_tree,action)
         else:
             i,field,delta=action
             browser.edit_visual_action(current_html,viewport,current_tree['nodes'][i]['id'],field,delta)
@@ -146,8 +154,8 @@ def evaluate(args):
         raw.cfg.decoding=args.decoding;abstract.cfg.decoding=args.decoding
     parser,parser_ck=load_detector(args.detector_checkpoint,device)
     if raw.cfg.mode!='screenshot' or abstract.cfg.mode!='abstract':raise ValueError('Policy modality mismatch')
-    for key in ('hidden','layers','heads','max_nodes','token_grid','policy_head','numeric_only'):
-        if getattr(raw.cfg,key)!=getattr(abstract.cfg,key):raise ValueError('Matched policies must share tree/policy architecture')
+    for key in ('hidden','layers','heads','max_nodes','token_grid','policy_head','numeric_only','stylesheets'):
+        if getattr(raw.cfg,key,False)!=getattr(abstract.cfg,key,False):raise ValueError('Matched policies must share tree/policy architecture')
     rows=list(read_jsonl(args.data));rows=rows[:args.limit] if args.limit else rows
     if not rows:raise ValueError('No prepared evaluation pages')
     if args.repeats<1 or args.time_budget<0:raise ValueError('Invalid repeats/time budget')

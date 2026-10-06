@@ -1,5 +1,8 @@
 # CSS declaration-tree policy (current implementation)
 
+For the new inline + embedded stylesheet policy, use [stylesheet-policy.md](stylesheet-policy.md).
+The commands below preserve the inline-only v1 experiment.
+
 This is the current policy-only workflow. Old detector checkpoints and cached
 HTML/PNG observations are reusable. Old delta-policy checkpoints are NOT
 compatible with this replacement decoder: train the policy in a new run.
