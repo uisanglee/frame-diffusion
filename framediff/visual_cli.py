@@ -40,6 +40,11 @@ def add_parsers(sub):
             p.add_argument('--mode',choices=['screenshot','abstract'],required=True)
             if name=='visual-tree-train':
                 p.add_argument('--predicted-targets',action='store_true',help='Use frozen detector cache rather than DOM target masks')
+                p.add_argument('--online-corruption',action='store_true',help='Generate fresh CPU-browser corruption/path states during training only')
+                p.add_argument('--online-targets',help='Training pages manifest containing clean tagged HTML; not initial_html')
+                for key,default in [('online-workers',2),('online-prefetch',4),('online-max-noise',4),('online-attempts',8)]:
+                    p.add_argument('--'+key,type=int,default=default)
+                p.add_argument('--online-timeout',type=float,default=180.)
             else:
                 p.add_argument('--policy-head',choices=['flat','hierarchical','autoregressive'],default='flat')
                 p.add_argument('--numeric-only',action='store_true')

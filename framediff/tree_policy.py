@@ -178,7 +178,17 @@ def train(args):
             raise ValueError('Invalid declaration state node count')
         tok.encode(row['replacement_edit'],len(row['current']['nodes']))
     signatures={'train':digest(args.train),'val':digest(args.val)}
+    online=getattr(args,'online_corruption',False);targets=None
+    if online:
+        from .tree_online import ONLINE_CONTRACT,target_pool,asset_signatures
+        if min(args.online_workers,args.online_prefetch,args.online_max_noise,args.online_attempts,args.online_timeout)<1:
+            raise ValueError('Online worker, queue, retry and noise settings must be positive')
+        targets=target_pool(training,args.online_targets)
+        signatures['online']={'contract':ONLINE_CONTRACT,'assets':asset_signatures(targets)}
     out=Path(args.out).resolve();settings={k:v for k,v in vars(args).items() if k not in ('out','steps','resume','init_checkpoint')}
+    # Resource tuning does not change the index-seeded sample stream.
+    settings={k:v for k,v in settings.items() if k not in ('online_workers','online_prefetch','online_timeout')}
+    if not online: settings={k:v for k,v in settings.items() if not k.startswith('online_')}
     guard_run(out,{'kind':KIND,'config':asdict(cfg),'data':signatures,'settings':settings},bool(args.resume))
     ck=torch.load(args.resume or args.init_checkpoint,map_location='cpu',weights_only=True) if args.resume or args.init_checkpoint else None
     if ck and (ck.get('kind')!=KIND or ck['config']!=asdict(cfg)): raise ValueError('Incompatible policy checkpoint; detector reuse is separate')
@@ -209,43 +219,71 @@ def train(args):
         if device.startswith('cuda') and ck.get('cuda_rng'): torch.cuda.set_rng_state_all(ck['cuda_rng'])
         start=ck['step'];best=ck['best'];early=ck['early_stopping']
         if early['stopped']: print('Early stopping already completed; keeping best.pt',flush=True);return
+        if start>=args.steps: print(f'Already completed {start} steps; no online workers started',flush=True);return
     selected=validation_sample(validation,args.val_samples)
     write_json(out/'manifest.json',{'kind':KIND,'config':asdict(cfg),'settings':vars(args),'data':signatures,
-                                 'parameters':sum(p.numel() for p in net.parameters())})
+                                 'parameters':sum(p.numel() for p in net.parameters()),
+                                 'online_target_pages':len(targets) if targets else 0})
     def amp(): return torch.autocast('cuda',dtype=torch.bfloat16) if device.startswith('cuda') and args.bf16 else contextlib.nullcontext()
     def loss(rows): return net.loss(*batch_inputs(net,rows,device,args.predicted_targets),[r['replacement_edit'] for r in rows])
     def log(name,row):
         with (out/name).open('a') as stream: stream.write(json.dumps(row)+'\n')
         print(row,flush=True)
-    started=time.perf_counter()
-    for step in range(start+1,args.steps+1):
-        net.train();optimizer.zero_grad(set_to_none=True);total=0.
-        for _ in range(args.accumulation):
-            rows=[rng.choice(training) for _ in range(args.batch_size)]
-            with amp(): value,_=loss(rows)
-            if not torch.isfinite(value): raise RuntimeError('Nonfinite token CE')
-            (value/args.accumulation).backward();total+=float(value.detach())/args.accumulation
-        nn.utils.clip_grad_norm_(net.parameters(),1.);optimizer.step()
-        if step%args.log_every==0 or step==args.steps:
-            log('train.jsonl',{'step':step,'loss':total,'token_ce':total,'elapsed_s':time.perf_counter()-started})
-        if step%args.eval_every==0 or step==args.steps:
-            net.eval();weighted=0.;count=0
-            with torch.no_grad():
-                for offset in range(0,len(selected),args.batch_size):
-                    with amp(): value,n=loss(selected[offset:offset+args.batch_size])
-                    weighted+=float(value)*n;count+=n
-            val=weighted/count;improved=val<best;best=min(best,val)
-            early=update_early_stopping(early,val,args.early_stop_patience,args.early_stop_min_delta)
-            metrics={'step':step,'validation_loss':val,'validation_tokens':count,
-                     'validation_n':len(selected),'best':best,'early_stopping':early}
-            log('train.jsonl',metrics)
-            with (out/'validation.jsonl').open('a') as stream: stream.write(json.dumps(metrics)+'\n')
-            state={'kind':KIND,'config':asdict(cfg),'model':net.state_dict(),'optimizer':optimizer.state_dict(),
-                   'step':step,'best':best,'early_stopping':early,'data_signature':signatures,
-                   'rng':rng.getstate(),'torch_rng':torch.get_rng_state(),
-                   'cuda_rng':torch.cuda.get_rng_state_all() if device.startswith('cuda') else None,
-                   'training_groups':sorted(groups),'training_hashes':sorted(hashes),
-                   'parser_training_groups':sorted(parser_groups),'parser_training_hashes':sorted(parser_hashes)}
-            for name in (['last.pt','best.pt'] if improved else ['last.pt']):
-                temporary=out/(name+'.tmp');torch.save(state,temporary);temporary.replace(out/name)
-            if early['stopped']: break
+    with contextlib.ExitStack() as stack:
+        stream=None
+        if online:
+            from .tree_online import OnlineStream
+            cursor=ck.get('online_cursor') if args.resume else 0
+            if cursor is None: raise ValueError('Online resume requires a saved sample cursor')
+            stream=stack.enter_context(OnlineStream(targets,cfg.mode,args.seed,args.online_max_noise,
+                args.online_workers,args.online_prefetch,args.online_attempts,args.online_timeout,cursor))
+        wait_seconds=0.;producer_seconds=0.;sample_count=0;retry_count=0;remove_count=0;remaining_total=0;recent_errors=[]
+        started=time.perf_counter()
+        for step in range(start+1,args.steps+1):
+            net.train();optimizer.zero_grad(set_to_none=True);total=0.
+            for _ in range(args.accumulation):
+                wait_start=time.perf_counter()
+                rows=stream.take(args.batch_size) if stream else [rng.choice(training) for _ in range(args.batch_size)]
+                wait_seconds+=time.perf_counter()-wait_start
+                if stream:
+                    for row in rows:
+                        info=row['online'];sample_count+=1;retry_count+=info['retries']
+                        remove_count+=not row['replacement_edit'][2]
+                        remaining_total+=row['symbolic_distance']
+                        producer_seconds+=info['seconds']
+                        recent_errors=(recent_errors+info['errors'])[-5:]
+                with amp(): value,_=loss(rows)
+                if not torch.isfinite(value): raise RuntimeError('Nonfinite token CE')
+                (value/args.accumulation).backward();total+=float(value.detach())/args.accumulation
+            nn.utils.clip_grad_norm_(net.parameters(),1.);optimizer.step()
+            if step%args.log_every==0 or step==args.steps:
+                metrics={'step':step,'loss':total,'token_ce':total,'elapsed_s':time.perf_counter()-started}
+                if stream:
+                    metrics.update(online_samples=stream.cursor,data_wait_s=wait_seconds,
+                        producer_seconds=producer_seconds,online_retries=retry_count,
+                        online_teacher_remove_rate=remove_count/max(1,sample_count),
+                        online_mean_remaining_edits=remaining_total/max(1,sample_count),
+                        online_recent_errors=recent_errors)
+                log('train.jsonl',metrics)
+            if step%args.eval_every==0 or step==args.steps:
+                net.eval();weighted=0.;count=0
+                with torch.no_grad():
+                    for offset in range(0,len(selected),args.batch_size):
+                        with amp(): value,n=loss(selected[offset:offset+args.batch_size])
+                        weighted+=float(value)*n;count+=n
+                val=weighted/count;improved=val<best;best=min(best,val)
+                early=update_early_stopping(early,val,args.early_stop_patience,args.early_stop_min_delta)
+                metrics={'step':step,'validation_loss':val,'validation_tokens':count,
+                         'validation_n':len(selected),'best':best,'early_stopping':early}
+                log('train.jsonl',metrics)
+                with (out/'validation.jsonl').open('a') as validation_file: validation_file.write(json.dumps(metrics)+'\n')
+                state={'kind':KIND,'config':asdict(cfg),'model':net.state_dict(),'optimizer':optimizer.state_dict(),
+                       'step':step,'best':best,'early_stopping':early,'data_signature':signatures,
+                       'online_cursor':stream.cursor if stream else None,
+                       'rng':rng.getstate(),'torch_rng':torch.get_rng_state(),
+                       'cuda_rng':torch.cuda.get_rng_state_all() if device.startswith('cuda') else None,
+                       'training_groups':sorted(groups),'training_hashes':sorted(hashes),
+                       'parser_training_groups':sorted(parser_groups),'parser_training_hashes':sorted(parser_hashes)}
+                for name in (['last.pt','best.pt'] if improved else ['last.pt']):
+                    temporary=out/(name+'.tmp');torch.save(state,temporary);temporary.replace(out/name)
+                if early['stopped']: break

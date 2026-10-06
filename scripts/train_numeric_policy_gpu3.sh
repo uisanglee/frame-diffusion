@@ -13,7 +13,7 @@ fi
 rendered=${1:-data/webui-css-tree-v1}
 detector=${2:-runs/webui-10k-v3-nospacing-fresh-webui/detector/best.pt}
 shared_run=${3:-runs/css-tree-v1-shared}
-policy_run=${4:-runs/css-tree-v1-abstract}
+policy_run=${4:-runs/css-tree-online-v1-abstract}
 
 for required in predicted-train/data.jsonl predicted-val/data.jsonl; do
   [[ -s "$shared_run/$required" ]] || {

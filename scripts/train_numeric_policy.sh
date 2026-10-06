@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Never renders HTML, trains a detector, or modifies the original data/run.
+# Online workers render new CURRENT states; detector and source assets stay frozen.
 set -euo pipefail
 if [[ $# != 3 ]]; then
   echo 'Usage: bash scripts/train_numeric_policy.sh EXISTING_RENDERED_DIR DETECTOR_BEST_PT NEW_RUN_DIR' >&2
@@ -9,6 +9,14 @@ rendered=$1
 detector=$2
 run=$3
 policy_run=${POLICY_RUN_DIR:-$run}
+online=()
+case "${ONLINE_CORRUPTION:-1}" in
+  1) online=(--online-corruption --online-targets "$rendered/pages-train.jsonl"
+        --online-workers "${ONLINE_WORKERS:-2}" --online-prefetch "${ONLINE_PREFETCH:-4}"
+        --online-max-noise "${ONLINE_MAX_NOISE:-4}" --online-timeout "${ONLINE_TIMEOUT:-180}") ;;
+  0) ;;
+  *) echo 'ONLINE_CORRUPTION must be 0 or 1' >&2; exit 2 ;;
+esac
 [[ -f "$detector" ]] || { echo "Missing detector: $detector" >&2; exit 2; }
 prepare=${PREPARE_DATA:-1}
 if [[ "$prepare" == 1 ]]; then
@@ -45,7 +53,7 @@ for head in ${POLICY_HEADS:-replacement}; do
       if [[ -f "$output/last.pt" ]]; then options=(--resume "$output/last.pt"); fi
       python -m framediff visual-tree-train --train "$train" --val "$val" --out "$output" \
         --mode "$mode" --device "${DEVICE:-cuda}" \
-        --steps "$steps" --lr "$lr" "${condition[@]}" \
+        --steps "$steps" --lr "$lr" "${condition[@]}" "${online[@]}" \
         --batch-size "${BATCH_SIZE:-2}" --accumulation "${ACCUMULATION:-4}" \
         --val-samples "${VAL_SAMPLES:-2000}" --eval-every "${EVAL_EVERY:-500}" \
         --early-stop-patience "${EARLY_STOP_PATIENCE:-10}" --bf16 "${options[@]}"

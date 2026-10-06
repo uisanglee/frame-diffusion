@@ -9,6 +9,7 @@ webui_root=$1
 data_dir=$2
 run_dir=$3
 base_run=$4
+case "${ONLINE_CORRUPTION:-1}" in 0|1) ;; *) echo 'ONLINE_CORRUPTION must be 0 or 1' >&2; exit 2 ;; esac
 device=${DEVICE:-cuda}
 abs_size=${ABS_SIZE:-384}
 raw_size=${RAW_SIZE:-384}
@@ -62,6 +63,12 @@ python -m framediff visual-tree-prepare --rendered "$data_dir/rendered" --out "$
 train_stage() {
   local command=$1 output=$2 init=$3 lr=$4
   shift 4
+  local online=()
+  if [[ "$command" == visual-tree-train && "${ONLINE_CORRUPTION:-1}" == 1 ]]; then
+    online=(--online-corruption --online-targets "$data_dir/tree/pages-train.jsonl"
+      --online-workers "${ONLINE_WORKERS:-2}" --online-prefetch "${ONLINE_PREFETCH:-4}"
+      --online-max-noise "${ONLINE_MAX_NOISE:-4}")
+  fi
   local checkpoint_options=()
   if [[ -f "$output/last.pt" ]]; then checkpoint_options=(--resume "$output/last.pt")
   elif [[ -f "$output/best.pt" ]]; then checkpoint_options=(--resume "$output/best.pt")
@@ -75,7 +82,7 @@ train_stage() {
     --batch-size "${BATCH_SIZE:-2}" --accumulation "${ACCUMULATION:-4}" --lr "$lr" \
     --val-samples "${VAL_SAMPLES:-512}" --eval-every "${EVAL_EVERY:-500}" \
     --early-stop-patience "${EARLY_STOP_PATIENCE:-10}" --early-stop-min-delta "${EARLY_STOP_MIN_DELTA:-0}" \
-    "${checkpoint_options[@]}" "$@"
+    "${checkpoint_options[@]}" "${online[@]}" "$@"
 }
 
 detector_train="$data_dir/rendered/detector-train.jsonl"

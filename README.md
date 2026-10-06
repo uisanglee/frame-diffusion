@@ -13,6 +13,9 @@
 현재 학습 경로는 **CSS 선언 교체 → 단일 교사 토큰 CE → 실행 이미지 평가**를 분리한
 declaration-tree policy입니다. [최신 코드 구분·기존 데이터 재사용·GPU 1/3 명령어](docs/numeric-policy.md)를
 참고하세요. detector는 재사용하며, 이전 delta-policy는 새 정책으로 재학습해야 합니다.
+학습 스크립트는 기본적으로 CPU 브라우저 worker의 **online corruption**을 사용합니다.
+목표 이미지·detector는 재사용하고 검증·테스트는 고정합니다. `ONLINE_CORRUPTION=0`으로
+오프라인 비교가 가능하며, 두 실험은 별도 출력 디렉터리를 사용해야 합니다.
 
 **목표 screenshot → 전용 검출기로 한 번 추상화 → 현재 DOM 추상화 이미지와 비교해 매 스텝 CSS action 예측**을 지원합니다.
 고정 VLM 계획이나 목표 box residual을 사용하지 않습니다. 매번 실제 screenshot을 사용하는 별도 정책과
