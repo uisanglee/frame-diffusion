@@ -65,8 +65,9 @@ def observe(browser, row, mode):
     tree = row['current']
     boxes = browser.tagged_boxes([n['id'] for n in tree['nodes'][1:]])
     boxes[tree['nodes'][0]['id']] = [0, 0, *row['viewport']]
-    result = {**row, 'current':refresh_geometry(tree, boxes), 'current_boxes':boxes,
-              'declaration_state':css_owners.read(browser, tree)['state']}
+    parsed=css_owners.read(browser, tree)
+    result = {**reconcile_owners(row,parsed['owners']), 'current':refresh_geometry(tree, boxes), 'current_boxes':boxes,
+              'declaration_state':parsed['state']}
     if mode == 'screenshot':
         result['current_image'] = browser.page.screenshot(animations='disabled')
     return result
@@ -135,29 +136,30 @@ def normalized_owner_key(owner):
 def reconcile_owners(row, actual):
     """Remap old pre-canonical owner indices to the quantized target HTML.
 
-    The mapping is one-to-one and occurrence ordered within an exact semantic
-    key. It never accepts changed selectors, conditions, or matched DOM IDs.
+    Only unused rule owners may disappear (for example an unfocused :focus
+    rule). Edited declarations retain semantic identity and slot order.
     """
     expected=row['css_owners']
-    if owner_topology(expected)==owner_topology(actual):
+    if expected==actual:
         return {**row,'css_owners':actual}
     expected_groups={};actual_groups={}
     for index,owner in enumerate(expected):expected_groups.setdefault(normalized_owner_key(owner),[]).append(index)
     for index,owner in enumerate(actual):actual_groups.setdefault(normalized_owner_key(owner),[]).append(index)
-    if len(expected)!=len(actual) or set(expected_groups)!=set(actual_groups):
-        used=sorted({slot['owner'] for slot in row['diffusion_slots']})
-        missing=list(set(expected_groups)-set(actual_groups))[:3]
-        added=list(set(actual_groups)-set(expected_groups))[:3]
-        raise ValueError(f'CSS owner topology changed after preparation; expected_count={len(expected)} '
-                         f'actual_count={len(actual)} missing={missing!r} added={added!r} used_owners={used}')
+    if ([normalized_owner_key(o) for o in expected if o['kind']!='rule'] !=
+            [normalized_owner_key(o) for o in actual if o['kind']!='rule']):
+        raise ValueError('CSS owner topology changed after preparation; DOM owners changed')
     mapping={}
-    for key,old_indices in expected_groups.items():
+    for old in {s['owner'] for s in row['diffusion_slots']}:
+        key=normalized_owner_key(expected[old])
+        old_indices=expected_groups[key]
         new_indices=actual_groups.get(key,[])
-        if len(old_indices)!=len(new_indices):
-            used=sorted({slot['owner'] for slot in row['diffusion_slots']})
-            raise ValueError(f'CSS owner topology changed after preparation; unmapped key={key!r}; '
-                             f'expected={len(old_indices)} actual={len(new_indices)} used_owners={used}')
-        mapping.update(zip(old_indices,new_indices))
+        if len(old_indices)==len(new_indices)==1:
+            mapping[old]=new_indices[0]
+        elif (len(old_indices)==len(new_indices) and
+              [expected[i].get('path') for i in old_indices]==[actual[i].get('path') for i in new_indices]):
+            mapping[old]=new_indices[old_indices.index(old)]
+        else:
+            raise ValueError(f'CSS owner topology changed after preparation; edited owner missing or ambiguous: {key!r}')
     slots=[]
     for slot in row['diffusion_slots']:
         if slot['owner'] not in mapping:raise ValueError('Diffusion owner disappeared after CSS serialization')
@@ -226,7 +228,7 @@ def prepare(args):
                     apply_values(browser, record, x0)
                     # CSSOM serialization can normalize selector/condition text.
                     # Store the exact owner representation of the quantized HTML.
-                    record['css_owners']=canonical_owners(record['css_owners'],css_owners.read(browser,row['current'])['owners'])
+                    record=reconcile_owners(record,css_owners.read(browser,row['current'])['owners'])
                     record = observe(browser, record, 'abstract')
                     record['target_html'] = str(folder/'target.html')
                     record['target_image'] = str(folder/'target.png')
@@ -433,12 +435,12 @@ def evaluate(args):
                 logits=net([current],[t],device,sig['settings']['target_source']=='detector')[0]
                 probabilities=kernel.reverse(logits,xt,t)
                 nxt=torch.multinomial(probabilities,1,generator=generator).squeeze(-1)
-                apply_values(browser,row,nxt.tolist());current=observe(browser,row,cfg.mode)
+                apply_values(browser,current,nxt.tolist());current=observe(browser,current,cfg.mode)
                 score=error(current)
                 changes=[{'owner':s['owner'],'property':FIELDS[s['property']],
                           'before':slot_edit(s,int(old),FIELDS,row['bins'])[2],
                           'after':slot_edit(s,int(new),FIELDS,row['bins'])[2]}
-                         for s,old,new in zip(row['diffusion_slots'],xt.tolist(),nxt.tolist()) if old!=new]
+                         for s,old,new in zip(current['diffusion_slots'],xt.tolist(),nxt.tolist()) if old!=new]
                 trace.append({'t':t,'next_t':t-1,'changed_slots':len(changes),'changes':changes,
                               'abstract_error':score,'mean_bin_error':float((nxt-x0).abs().float().mean())})
                 xt=nxt

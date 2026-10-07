@@ -66,6 +66,37 @@ def test_owner_normalization_accepts_text_only_and_rejects_topology():
 
 
 @pytest.mark.browser
+def test_unused_focus_rule_disappearance_remaps_slots(tmp_path):
+    from framediff import css_owners
+    from framediff.html_bridge import HtmlBrowser
+    from framediff.plans import dom_tree
+    from framediff.visual import annotate
+    from framediff.css_diffusion_experiment import materialize,apply_values,observe,reconcile_owners
+    with HtmlBrowser() as browser:
+        html='<html><head><style>input:focus{outline:none}.card{width:300px;height:64px}</style></head><body><input><div class="card">Hello</div></body></html>'
+        dom=browser.snapshot(html,[500,300],max_nodes=16)
+        tree,_,_=dom_tree(dom);annotate(browser,tree)
+        browser.page.evaluate("document.querySelector('input').focus()")
+        parsed=css_owners.read(browser,tree)
+        focus=next(i for i,o in enumerate(parsed['owners']) if o.get('selector')=='input:focus')
+        slots,x0,_=numeric_slots(parsed['state'],FIELDS,129)
+        assert slots and all(s['owner']!=focus for s in slots)
+        target=tmp_path/'target.html';target.write_text(browser.page.content())
+        row=dict(current=tree,viewport=[500,300],target_html=str(target),
+                 css_owners=parsed['owners'],diffusion_slots=slots,bins=129)
+        current=materialize(browser,row,x0,'abstract')
+        assert len(current['css_owners'])==len(parsed['owners'])-1
+        assert all(a['owner']==b['owner']-1 for a,b in zip(current['diffusion_slots'],slots))
+        assert len(current['declaration_state'])==len(current['css_owners'])
+        # Subsequent rollout updates must use the live remapped record.
+        apply_values(browser,current,x0)
+        current=observe(browser,current,'abstract')
+        bad={**row,'diffusion_slots':[{'owner':focus,'property':0}]}
+        with pytest.raises(ValueError,match='edited owner missing'):
+            reconcile_owners(bad,current['css_owners'])
+
+
+@pytest.mark.browser
 def test_prepare_train_resume_and_reverse_rollout(tmp_path, monkeypatch):
     from framediff.html_bridge import HtmlBrowser
     from framediff.plans import dom_tree
