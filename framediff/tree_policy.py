@@ -330,12 +330,12 @@ def train(args):
     signatures={'train':digest(args.train),'val':digest(args.val)}
     online=getattr(args,'online_corruption',False);targets=None
     if online:
-        from .tree_online import ONLINE_CONTRACT,target_pool,asset_signatures
+        from .tree_online import ONLINE_CONTRACT,SAMPLING_CONTRACT,target_pool,asset_signatures
         if min(args.online_workers,args.online_prefetch,args.online_max_noise,args.online_attempts,args.online_timeout)<1:
             raise ValueError('Online worker, queue, retry and noise settings must be positive')
         cache_root=Path(args.online_targets or args.train).resolve().parent/'.online-target-cache'
         targets=target_pool(training,args.online_targets,cache_dir=cache_root,observation_size=cfg.size)
-        signatures['online']={'contract':ONLINE_CONTRACT,'assets':asset_signatures(targets)}
+        signatures['online']={'contract':ONLINE_CONTRACT,'sampling':SAMPLING_CONTRACT,'assets':asset_signatures(targets)}
         if cfg.stylesheets and any(r.get('corruption_contract')!=ONLINE_CONTRACT for r in validation):
             raise ValueError('Validation uses old corruption; rerun prepare_stylesheet_policy.sh in a new output directory (reuse target assets/cache)')
     out=Path(args.out).resolve();settings={k:v for k,v in vars(args).items() if k not in ('out','steps','resume','init_checkpoint','policy_scale')}
@@ -437,6 +437,7 @@ def train(args):
                 if device.startswith('cuda'):metrics['peak_cuda_bytes']=torch.cuda.max_memory_allocated(device)
                 if stream:
                     metrics.update(online_corruption_contract=ONLINE_CONTRACT,
+                        online_sampling_contract=SAMPLING_CONTRACT,
                         online_samples=stream.cursor,data_wait_s=wait_seconds,
                         producer_seconds=producer_seconds,online_retries=retry_count,
                         online_teacher_remove_rate=remove_count/max(1,sample_count),

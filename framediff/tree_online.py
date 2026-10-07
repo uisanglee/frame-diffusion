@@ -28,6 +28,7 @@ from .tree_edits import FIELDS, CONTRACT, current_state, execute, extract, repai
 from .web_experiment import digest
 
 ONLINE_CONTRACT = 'online-css-visible-values-v5'
+SAMPLING_CONTRACT = 'property-first-owner-uniform-v1'
 # Bump when eligibility semantics change; old syntax-only caches are invalid.
 INSPECTION_LOGIC_VERSION = 'visible-candidates-v1-four-probes'
 PROBES_PER_SITE = 4
@@ -250,16 +251,31 @@ def task_seed(seed, index):
     return int(hashlib.sha256(f'{ONLINE_CONTRACT}:{seed}:{index}'.encode()).hexdigest()[:16],16)
 
 
+def choose_mutation_site(sites, rng):
+    """Uniform property, then uniform owner, then a witness for that owner.
+
+    Group witnesses too: multiple cached values must not increase an owner's
+    selection probability. Single-property/site probes retain their RNG order.
+    """
+    if not sites: raise ValueError('No supported existing CSS values to corrupt')
+    fields=list(dict.fromkeys(site[1] for site in sites))
+    field=fields[0] if len(fields)==1 else rng.choice(fields)
+    candidates=[site for site in sites if site[1]==field]
+    owners=list(dict.fromkeys(site[0] for site in candidates))
+    owner=owners[0] if len(owners)==1 else rng.choice(owners)
+    return rng.choice([site for site in candidates if site[0]==owner])
+
+
 def sample_mutation(state, viewport, rng, explicit=False, sites=None):
     """Replace an existing value in place, preserving its owner and priority.
 
-    Sample uniformly over supported, present owner/property pairs. Absent fields
+    Sample a present property uniformly, then an eligible owner uniformly. Absent fields
     are not mutation sites: inserting an override would teach its removal.
     Browser probes subsequently reject shadowed or geometrically inert edits.
     """
     existing=mutation_sites(state) if sites is None else sites
     if not existing: raise ValueError('No supported existing CSS values to corrupt')
-    node,field,old,priority=rng.choice(existing)
+    node,field,old,priority=choose_mutation_site(existing,rng)
     axis=viewport[0 if field in ('width','margin-left','margin-right','column-gap') else 1]
     if field in ('row-gap','column-gap'):
         value=f'{round(rng.uniform(0,.15)*axis,3):g}px'
@@ -343,7 +359,7 @@ class OnlineSampler:
                         # Witness edits ensure even a narrow responsive range
                         # gets tried; their effect is rechecked in this state.
                         if trial>=12:
-                            mutation=list(rng.choice(target['visible_candidates']))
+                            mutation=list(choose_mutation_site(target['visible_candidates'],rng))
                         old=state[mutation[0]][FIELDS.index(mutation[1])]
                         if owner_mode:
                             # Preserve cascade priority when mutating an existing
