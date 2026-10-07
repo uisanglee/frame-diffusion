@@ -2,6 +2,8 @@
 
 
 def add_parsers(sub):
+    from .composition import add_parsers as add_composition_parsers
+    add_composition_parsers(sub)
     p=sub.add_parser('visual-subset-numeric',help='Filter cached trajectories without rendering or changing source assets')
     p.add_argument('--rendered',required=True);p.add_argument('--out',required=True)
     p=sub.add_parser('visual-tree-prepare',
@@ -92,6 +94,9 @@ def add_parsers(sub):
 
 
 def run(args):
+    if args.command in ('visual-composition-build', 'visual-composition-evaluate'):
+        from .composition import build, evaluate
+        return (build if args.command.endswith('build') else evaluate)(args)
     if args.command=='visual-tree-freeze':
         from .tree_freeze import freeze
         return freeze(args)

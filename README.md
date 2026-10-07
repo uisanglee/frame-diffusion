@@ -1,5 +1,7 @@
 # FrameDiff — 웹 컴포넌트 위치·크기 보정 연구 코드
 
+W/H/X/Y의 15개 손상 조합별 CSS 복구 실험은 [Synthetic Action Composition Benchmark](docs/composition-benchmark.md)를 참고하세요.
+
 [![CI](https://github.com/uisanglee/frame-diffusion/actions/workflows/ci.yml/badge.svg)](https://github.com/uisanglee/frame-diffusion/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.11–3.14](https://img.shields.io/badge/python-3.11--3.14-blue.svg)](pyproject.toml)
