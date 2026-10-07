@@ -20,7 +20,7 @@ def add_parser(sub):
     p = sub.add_parser('web-oracle-prepare',
         help='Build controlled same-DOM corruptions with VLM and oracle target boxes')
     p.add_argument('--root',required=True); p.add_argument('--out',required=True)
-    p.add_argument('--backend',choices=['qwen','openai-compatible'],default='qwen')
+    p.add_argument('--backend',choices=['qwen','hf','openai-compatible'],default='qwen')
     p.add_argument('--model',default='Qwen/Qwen3-VL-8B-Instruct'); p.add_argument('--revision',default='main')
     p.add_argument('--endpoint',default='http://localhost:8000/v1/chat/completions')
     p.add_argument('--api-key-env',default='VLM_API_KEY'); p.add_argument('--four-bit',action='store_true')
@@ -134,7 +134,8 @@ def prepare_oracle(args):
                 call_args=SimpleArgs(args,'extract-frames',work/'initial-ir.json',[target_png,named_frame])
                 def generate(attempt,feedback):
                     nonlocal runtime
-                    if args.backend=='qwen' and runtime is None: runtime=vlm.load_qwen_runtime(args)
+                    if args.backend in ('qwen','hf') and runtime is None:
+                        runtime=(vlm.load_qwen_runtime if args.backend=='qwen' else vlm.load_hf_runtime)(args)
                     label='vlm-target' if attempt==0 else f'vlm-target.retry-{attempt}'
                     prompt=extra+base+feedback;write_json(work/f'{label}.prompt.json',{'prompt':prompt})
                     record['vlm_attempts']['vlm-target']=record['vlm_attempts'].get('vlm-target',0)+1

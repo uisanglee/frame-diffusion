@@ -19,7 +19,8 @@ QUALITY = {
     'official_block': 1, 'official_position': 1, 'official_clip': 1,
 }
 COST = ('pipeline_seconds', 'repair_seconds', 'repair_browser_executions',
-        'repair_browser_screenshots', 'repair_actions')
+        'repair_browser_screenshots', 'repair_actions', 'repair_vlm_calls',
+        'repair_input_tokens', 'repair_output_tokens')
 
 
 def finite(value):

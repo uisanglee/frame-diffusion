@@ -81,7 +81,7 @@ def add_parsers(sub):
     p.add_argument('--dataset', choices=['design2code','webui'], default='design2code')
     p.add_argument('--webui-view', default='default_1280-720', help='Exact WebUI viewport prefix, or all')
     p.add_argument('--out', required=True)
-    p.add_argument('--backend', choices=['qwen','openai-compatible'], default='qwen')
+    p.add_argument('--backend', choices=['qwen','hf','openai-compatible'], default='qwen')
     p.add_argument('--model', default='Qwen/Qwen3-VL-8B-Instruct')
     p.add_argument('--revision', default='main')
     p.add_argument('--endpoint', default='http://localhost:8000/v1/chat/completions')
@@ -157,8 +157,8 @@ def prepare(args):
     def call(task, images, current, work, label, extra='', validator=html_answer,
              literal_prompt=False, image_labels=None, prompt_first=False):
         nonlocal runtime
-        if args.backend == 'qwen' and runtime is None:
-            runtime = vlm.load_qwen_runtime(args)
+        if args.backend in ('qwen','hf') and runtime is None:
+            runtime = (vlm.load_qwen_runtime if args.backend=='qwen' else vlm.load_hf_runtime)(args)
         c = copy.copy(args); c.task = task; c.image = list(map(str,images)); c.current = str(current) if current else None; c.frames = None
         c.image_labels=image_labels; c.prompt_first=prompt_first
         base_prompt = extra if literal_prompt or task=='repair-plan' else extra + vlm.prompt_for(c)
@@ -177,13 +177,18 @@ def prepare(args):
             elapsed = time.perf_counter()-started
             (work/f'{name}.raw.txt').write_text(answer)
             write_json(work/f'{name}.meta.json', {**meta,'wall_seconds':elapsed})
+            raw_usage=meta.get('usage') or {}
+            input_tokens=int(meta.get('input_tokens',raw_usage.get('prompt_tokens',raw_usage.get('input_tokens',0))) or 0)
+            output_tokens=int(meta.get('output_tokens',raw_usage.get('completion_tokens',raw_usage.get('output_tokens',0))) or 0)
+            usage=record['vlm_usage'].setdefault(label,{'input_tokens':0,'output_tokens':0})
+            usage['input_tokens']+=input_tokens;usage['output_tokens']+=output_tokens
             return answer, elapsed
         return validated_generation(generate,validator,retries)
 
     # Load outside page timers, consistently excluding one-time model startup.
     needs_vlm = any(not i.get('initial_html') for i in items) or args.rounds > 0 or getattr(args,'repair_conditioning','boxes') != 'visual'
-    if needs_vlm and args.backend == 'qwen' and any(not (out/'pages'/signature(i['id'])[:20]/'record.json').exists() for i in items):
-        runtime = vlm.load_qwen_runtime(args)
+    if needs_vlm and args.backend in ('qwen','hf') and any(not (out/'pages'/signature(i['id'])[:20]/'record.json').exists() for i in items):
+        runtime = (vlm.load_qwen_runtime if args.backend=='qwen' else vlm.load_hf_runtime)(args)
     with HtmlBrowser() as browser:
         for index, item in enumerate(items):
             work = out/'pages'/signature(item['id'])[:20]; work.mkdir(parents=True, exist_ok=True)
@@ -205,7 +210,9 @@ def prepare(args):
             record = {**item,'viewport':viewport,'group':item.get('group',item['id']),
                       'initial_mode':args.initial_mode,'revision_protocol':revision_protocol,
                       'uses_reference_text':revision_protocol=='design2code',
-                      'methods':{},'errors':{},'vlm_model':args.model,'vlm_attempts':{}}
+                      'methods':{},'errors':{},'vlm_model':args.model,'vlm_backend':args.backend,
+                      'vlm_weight_precision':'nf4-4bit' if args.four_bit else ('server-managed' if args.backend=='openai-compatible' else 'bf16'),
+                      'vlm_attempts':{},'vlm_usage':{}}
             paper_texts = None
             if revision_protocol == 'design2code':
                 from .design2code_self_revision import SOURCE_URL,extract_text_elements
@@ -239,7 +246,8 @@ def prepare(args):
             record['methods']['initial'] = {'html':str(initial_path),'seconds':initial_seconds,
                 'browser_executions':0,'vlm_calls':initial_calls,'failed':'initial' in record['errors'],
                 'error':record['errors'].get('initial'),'revision_protocol':revision_protocol,
-                'uses_reference_text':revision_protocol=='design2code'}
+                'uses_reference_text':revision_protocol=='design2code','repair_seconds':0.,
+                'repair_vlm_calls':0,'repair_input_tokens':0,'repair_output_tokens':0}
 
             # Self-revision runs on the SAME initial HTML without target geometry/CSS.
             current = initial; elapsed = initial_seconds; calls = 0; renders = 0
@@ -270,10 +278,14 @@ def prepare(args):
                 elapsed += time.perf_counter()-start; renders += browser.executions-before
                 revision_prefix = 'design2code-self-revision' if revision_protocol=='design2code' else 'self-revision-'
                 calls = sum(v for k,v in record['vlm_attempts'].items() if k.startswith(revision_prefix))
+                revision_usage=[v for k,v in record['vlm_usage'].items() if k.startswith(revision_prefix)]
                 path = work/f'{label}.html'; path.write_text(current)
                 record['methods'][label] = {'html':str(path),'seconds':elapsed,
                     'vlm_calls':initial_calls+calls,'browser_executions':renders,'failed':failure is not None,'error':failure,
-                    'revision_protocol':revision_protocol,'uses_reference_text':revision_protocol=='design2code'}
+                    'revision_protocol':revision_protocol,'uses_reference_text':revision_protocol=='design2code',
+                    'repair_seconds':max(0.,elapsed-initial_seconds),'repair_vlm_calls':calls,
+                    'repair_input_tokens':sum(v['input_tokens'] for v in revision_usage),
+                    'repair_output_tokens':sum(v['output_tokens'] for v in revision_usage)}
 
             # Independent branch: initial DOM -> fitted IR -> predicted target boxes.
             start = time.perf_counter(); before = browser.executions
@@ -485,6 +497,8 @@ def evaluate_pages(args):
                 data = record['methods'][method]; started = time.perf_counter(); before = browser.executions
                 row = {'id':record['id'],'method':method,'failed':data['failed'],
                        'page_id':record.get('page_id',record['id']),
+                       'vlm_model':record.get('vlm_model'),'vlm_backend':record.get('vlm_backend'),
+                       'vlm_weight_precision':record.get('vlm_weight_precision'),
                        'reference_kind':record.get('reference_kind','rendered_html'),
                        'pipeline_seconds':data['seconds'],'pipeline_browser_executions':data['browser_executions'],
                        'vlm_calls':data['vlm_calls'],'proxy_executions':data.get('proxy_executions',0),
@@ -496,6 +510,10 @@ def evaluate_pages(args):
                        'feedback_images':data.get('feedback_images',0),
                        'feedback_browser_screenshots':data.get('feedback_browser_screenshots',0),
                        'candidate_failure_count':data.get('candidate_failure_count',0),
+                       'repair_seconds':data.get('repair_seconds'),
+                       'repair_vlm_calls':data.get('repair_vlm_calls',0),
+                       'repair_input_tokens':data.get('repair_input_tokens'),
+                       'repair_output_tokens':data.get('repair_output_tokens'),
                        'plan_loss':data.get('plan_loss'),'plan_satisfaction':data.get('plan_satisfaction'),
                        'plan_node_coverage':data.get('plan_node_coverage'),
                        'planning_screenshots':data.get('planning_screenshots',0),

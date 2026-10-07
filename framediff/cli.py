@@ -12,6 +12,8 @@ def main(argv=None):
     add_plan_parsers(sub)
     from .visual_cli import add_parsers as add_visual_parsers
     add_visual_parsers(sub)
+    from .abstract_vlm_revision import add_parsers as add_abstract_vlm_parsers
+    add_abstract_vlm_parsers(sub)
     g=sub.add_parser('generate');g.add_argument('--out',required=True);g.add_argument('--count',type=int,default=1000);g.add_argument('--seed',type=int,default=42)
     t=sub.add_parser('train')
     t.add_argument('--train',required=True);t.add_argument('--val',required=True);t.add_argument('--out',required=True)
@@ -35,14 +37,14 @@ def main(argv=None):
     w=sub.add_parser('import-webui');w.add_argument('--root',required=True);w.add_argument('--out',required=True);w.add_argument('--max-nodes',type=int,default=127);w.add_argument('--limit',type=int,default=0);w.add_argument('--split',choices=['train','val','test']);w.add_argument('--seed',type=int,default=42)
     f=sub.add_parser('fit-frames');f.add_argument('--input',required=True);f.add_argument('--out',required=True);f.add_argument('--max-error',type=float,default=.15);f.add_argument('--max-nodes',type=int,default=128);f.add_argument('--seed',type=int,default=42)
     d=sub.add_parser('prepare-design2code');d.add_argument('--root',required=True);d.add_argument('--out',required=True);d.add_argument('--dataset',choices=['design2code','design2code-hard'],default='design2code');d.add_argument('--max-nodes',type=int,default=127);d.add_argument('--max-fit-error',type=float,default=.15);d.add_argument('--limit',type=int,default=0);d.add_argument('--seed',type=int,default=42);d.add_argument('--fail-fast',action='store_true')
-    dv=sub.add_parser('run-design2code');dv.add_argument('--manifest',required=True);dv.add_argument('--out',required=True);dv.add_argument('--backend',choices=['qwen','openai-compatible'],default='qwen');dv.add_argument('--model',default='Qwen/Qwen3-VL-8B-Instruct');dv.add_argument('--revision',default='main');dv.add_argument('--endpoint',default='http://localhost:8000/v1/chat/completions');dv.add_argument('--api-key-env',default='VLM_API_KEY');dv.add_argument('--four-bit',action='store_true');dv.add_argument('--max-new-tokens',type=int,default=8192);dv.add_argument('--max-pixels',type=int,default=1048576);dv.add_argument('--max-nodes',type=int,default=128);dv.add_argument('--limit',type=int,default=0);dv.add_argument('--seed',type=int,default=42);dv.add_argument('--resume',action='store_true');dv.add_argument('--fail-fast',action='store_true')
+    dv=sub.add_parser('run-design2code');dv.add_argument('--manifest',required=True);dv.add_argument('--out',required=True);dv.add_argument('--backend',choices=['qwen','hf','openai-compatible'],default='qwen');dv.add_argument('--model',default='Qwen/Qwen3-VL-8B-Instruct');dv.add_argument('--revision',default='main');dv.add_argument('--endpoint',default='http://localhost:8000/v1/chat/completions');dv.add_argument('--api-key-env',default='VLM_API_KEY');dv.add_argument('--four-bit',action='store_true');dv.add_argument('--max-new-tokens',type=int,default=8192);dv.add_argument('--max-pixels',type=int,default=1048576);dv.add_argument('--max-nodes',type=int,default=128);dv.add_argument('--limit',type=int,default=0);dv.add_argument('--seed',type=int,default=42);dv.add_argument('--resume',action='store_true');dv.add_argument('--fail-fast',action='store_true')
     c=sub.add_parser('combine-data');c.add_argument('--input',action='append',required=True);c.add_argument('--out',required=True);c.add_argument('--split',choices=['train','val','test'])
-    v=sub.add_parser('vlm');v.add_argument('--backend',choices=['qwen','openai-compatible'],default='qwen');v.add_argument('--model',default='Qwen/Qwen3-VL-8B-Instruct');v.add_argument('--revision',default='main');v.add_argument('--endpoint',default='http://localhost:8000/v1/chat/completions');v.add_argument('--api-key-env',default='VLM_API_KEY')
+    v=sub.add_parser('vlm');v.add_argument('--backend',choices=['qwen','hf','openai-compatible'],default='qwen');v.add_argument('--model',default='Qwen/Qwen3-VL-8B-Instruct');v.add_argument('--revision',default='main');v.add_argument('--endpoint',default='http://localhost:8000/v1/chat/completions');v.add_argument('--api-key-env',default='VLM_API_KEY')
     v.add_argument('--task',choices=['generate-ir','revise-ir','generate-html','revise-html','extract-frames'],required=True);v.add_argument('--image',action='append',default=[]);v.add_argument('--current');v.add_argument('--frames');v.add_argument('--out',required=True)
     v.add_argument('--four-bit',action='store_true');v.add_argument('--max-new-tokens',type=int,default=4096);v.add_argument('--max-pixels',type=int,default=1048576);v.add_argument('--seed',type=int,default=42)
     vb=sub.add_parser('vlm-baseline',help='Batch VLM revision from identical initial IRs')
     vb.add_argument('--data',required=True);vb.add_argument('--out',required=True)
-    vb.add_argument('--backend',choices=['qwen','openai-compatible'],default='qwen')
+    vb.add_argument('--backend',choices=['qwen','hf','openai-compatible'],default='qwen')
     vb.add_argument('--model',default='Qwen/Qwen3-VL-8B-Instruct');vb.add_argument('--revision',default='main')
     vb.add_argument('--endpoint',default='http://localhost:8000/v1/chat/completions');vb.add_argument('--api-key-env',default='VLM_API_KEY')
     vb.add_argument('--input-mode',choices=['auto','screenshot','frames'],default='auto')
@@ -70,6 +72,9 @@ def main(argv=None):
     elif args.command=='plan-evaluate':
         from .plan_experiment import evaluate
         evaluate(args)
+    elif args.command in ('web-cache-abstractions','web-abstract-self-revision'):
+        from .abstract_vlm_revision import cache_abstractions,revise
+        (cache_abstractions if args.command=='web-cache-abstractions' else revise)(args)
     elif args.command in ('web-prepare','web-repair','web-evaluate'):
         from .web_experiment import prepare,repair_pages,evaluate_pages
         {'web-prepare':prepare,'web-repair':repair_pages,'web-evaluate':evaluate_pages}[args.command](args)

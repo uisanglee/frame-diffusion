@@ -79,6 +79,20 @@ def load_qwen_runtime(args):
     processor=AutoProcessor.from_pretrained(args.model,revision=args.revision,max_pixels=args.max_pixels)
     return model,processor
 
+def load_hf_runtime(args):
+    """Load a Transformers-native image-to-text model such as Gemma or Pixtral."""
+    import torch
+    from transformers import AutoModelForImageTextToText, AutoProcessor, BitsAndBytesConfig
+    if not torch.cuda.is_available():raise RuntimeError('Local Hugging Face backend requires CUDA; use an API backend on this host')
+    torch.manual_seed(args.seed)
+    kwargs={'revision':args.revision,'dtype':torch.bfloat16,'device_map':'auto','attn_implementation':'sdpa'}
+    if args.four_bit:
+        kwargs['quantization_config']=BitsAndBytesConfig(load_in_4bit=True,bnb_4bit_quant_type='nf4',
+            bnb_4bit_compute_dtype=torch.bfloat16,bnb_4bit_use_double_quant=True)
+    model=AutoModelForImageTextToText.from_pretrained(args.model,**kwargs).eval()
+    processor=AutoProcessor.from_pretrained(args.model,revision=args.revision)
+    return model,processor
+
 def qwen_generate(args,prompt,images,runtime=None):
     import torch
     model,processor=runtime or load_qwen_runtime(args)
@@ -99,10 +113,35 @@ def qwen_generate(args,prompt,images,runtime=None):
     answer=processor.batch_decode(outputs[:,inputs['input_ids'].shape[1]:],skip_special_tokens=True)[0]
     return answer,{'generation_seconds':time.perf_counter()-start,'peak_cuda_bytes':torch.cuda.max_memory_allocated(),
                    'resolved_revision':getattr(model.config,'_commit_hash',None),'input_tokens':inputs['input_ids'].shape[1],
-                   'output_tokens':outputs.shape[1]-inputs['input_ids'].shape[1]}
+                   'output_tokens':outputs.shape[1]-inputs['input_ids'].shape[1],
+                   'weight_precision':'nf4-4bit' if args.four_bit else 'bf16'}
+
+def hf_generate(args,prompt,images,runtime=None):
+    import torch
+    model,processor=runtime or load_hf_runtime(args)
+    labels=getattr(args,'image_labels',None)
+    if labels is not None and len(labels)!=len(images):raise ValueError('image_labels must match images')
+    content=[]
+    if getattr(args,'prompt_first',False):content.append({'type':'text','text':prompt})
+    for index,image in enumerate(images):
+        if labels:content.append({'type':'text','text':labels[index]})
+        content.append({'type':'image','image':image})
+    if not getattr(args,'prompt_first',False):content.append({'type':'text','text':prompt})
+    inputs=processor.apply_chat_template([{'role':'user','content':content}],tokenize=True,
+        add_generation_prompt=True,return_dict=True,return_tensors='pt').to(model.device)
+    torch.cuda.reset_peak_memory_stats();torch.cuda.synchronize();start=time.perf_counter()
+    with torch.inference_mode():outputs=model.generate(**inputs,max_new_tokens=args.max_new_tokens,do_sample=False)
+    torch.cuda.synchronize();input_tokens=inputs['input_ids'].shape[1]
+    answer=processor.batch_decode(outputs[:,input_tokens:],skip_special_tokens=True)[0]
+    return answer,{'generation_seconds':time.perf_counter()-start,'peak_cuda_bytes':torch.cuda.max_memory_allocated(),
+                   'resolved_revision':getattr(model.config,'_commit_hash',None),'input_tokens':input_tokens,
+                   'output_tokens':outputs.shape[1]-input_tokens,
+                   'weight_precision':'nf4-4bit' if args.four_bit else 'bf16'}
 
 def generate(args,prompt,images,runtime=None):
-    return qwen_generate(args,prompt,images,runtime) if args.backend=='qwen' else api_generate(args,prompt,images)
+    if args.backend=='qwen':return qwen_generate(args,prompt,images,runtime)
+    if args.backend=='hf':return hf_generate(args,prompt,images,runtime)
+    return api_generate(args,prompt,images)
 
 def run(args):
     if args.max_pixels<1:raise ValueError('max-pixels must be positive')

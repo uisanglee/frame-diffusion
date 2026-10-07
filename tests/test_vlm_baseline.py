@@ -7,6 +7,14 @@ from framediff.data import make_record, synthetic
 from framediff.ir import read_json, read_jsonl, write_jsonl
 
 
+def test_hf_backend_dispatches_to_generic_runtime(monkeypatch):
+    marker=object();captured=[]
+    monkeypatch.setattr(vlm,'hf_generate',lambda args,prompt,images,runtime:(captured.append(runtime) or ('ok',{})))
+    args=type('Args',(),{'backend':'hf'})()
+    assert vlm.generate(args,'prompt',[],marker)[0]=='ok'
+    assert captured==[marker]
+
+
 class FakeBrowser:
     def __enter__(self):
         self.executions=0
