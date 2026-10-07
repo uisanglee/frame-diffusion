@@ -98,14 +98,19 @@ def test_legacy_pool_inspects_external_only_pages_and_keeps_editable_css(tmp_pat
         path.write_text(f'<html><head><link rel="stylesheet" href="styles.css"></head>'
                         f'<body><div data-fd-id="fd-0" style="{style}">Box</div></body></html>')
         rows.append({**base,'id':name+'/t0-s0','target_html':str(path)})
-    inputs=[rows[0],{**rows[0],'id':'external/t1-s0'},rows[1]]
+    broken=tmp_path/'broken.html'
+    broken.write_text('<html><head><style type="text/plain">.x{width:10px}</style></head>'
+                      '<body><div data-fd-id="fd-0">Box</div></body></html>')
+    inputs=[rows[0],{**rows[0],'id':'external/t1-s0'},rows[1],
+            {**base,'id':'broken/t0-s0','target_html':str(broken)}]
     cache=tmp_path/'cache'
     pool=target_pool(inputs,cache_dir=cache)
     assert [r['id'] for r in pool]==['editable']
     assert mutation_sites(pool[0]['target_declaration_state'])==[(1,'width','120px','')]
     output=capsys.readouterr().out
-    assert "'inspected_missing_states': 2" in output
+    assert "'inspected_missing_states': 3" in output
     assert "'excluded_no_editable_css': 1" in output
+    assert "'excluded_inspection_error': 1" in output
     # Both accepted and excluded pages must survive process restarts without
     # opening Chromium. Modalities carry different detector/image metadata.
     import framediff.tree_online as online
@@ -114,18 +119,18 @@ def test_legacy_pool_inspects_external_only_pages_and_keeps_editable_css(tmp_pat
         patch.setattr(online,'HtmlBrowser',unexpected_browser)
         again=target_pool([{**r,'predicted_target_elements':'another-cache'} for r in inputs],cache_dir=cache)
         assert [r['id'] for r in again]==['editable']
-        assert "'cache_hits': 2" in capsys.readouterr().out
+        assert "'cache_hits': 3" in capsys.readouterr().out
     # HTML content changes invalidate only that page, including prior exclusions.
     path=Path(rows[0]['target_html'])
     path.write_text(path.read_text().replace('color:red','width:90px'))
     assert len(target_pool(inputs,cache_dir=cache))==2
     output=capsys.readouterr().out
-    assert "'inspected_missing_states': 1" in output and "'cache_hits': 1" in output
+    assert "'inspected_missing_states': 1" in output and "'cache_hits': 2" in output
     # Parser/eligibility changes invalidate all old entries.
     original=online.inspection_fingerprint
     monkeypatch.setattr(online,'inspection_fingerprint',lambda: {**original(),'test_version':2})
     assert len(target_pool(inputs,cache_dir=cache))==2
-    assert "'inspected_missing_states': 2" in capsys.readouterr().out
+    assert "'inspected_missing_states': 3" in capsys.readouterr().out
     path.write_text(path.read_text().replace('width:90px','color:red'))
     with pytest.raises(ValueError,match='Empty online target pool'):
         target_pool([rows[0]],cache_dir=cache)

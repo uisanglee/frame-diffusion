@@ -28,6 +28,10 @@ from .tree_edits import FIELDS, CONTRACT, current_state, execute, extract, repai
 from .web_experiment import digest
 
 ONLINE_CONTRACT = 'online-css-existing-values-v3'
+# Cache compatibility version for the inspection semantics introduced in
+# commit 91906fa. Error handling below does not change how a valid state is
+# parsed, so keep the existing 2,800+ server entries addressable.
+INSPECTION_LOGIC_VERSION = 'd198b6fbcb5cfa3458e8efb14e415b76e920bc8a177521bbd01ae3850d540510'
 
 
 def mutation_sites(state):
@@ -41,9 +45,10 @@ def mutation_sites(state):
 def inspection_fingerprint():
     # Invalidate on changes to parsing, loading, or supported CSS values.
     root = Path(__file__).parent
-    return {name: digest(root/name) for name in
-            ('tree_online.py','tree_edits.py','css_owners.py','html_bridge.py','browser.py')} | {
-                'playwright': version('playwright')}
+    return {'tree_online.py': INSPECTION_LOGIC_VERSION,
+            **{name: digest(root/name) for name in
+               ('tree_edits.py','css_owners.py','html_bridge.py','browser.py')},
+            'playwright': version('playwright')}
 
 
 @contextlib.contextmanager
@@ -68,13 +73,13 @@ def inspection_cache_entry(directory, target, html, fingerprint):
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
-def save_inspection(path, state):
+def save_inspection(path, state, error=None):
     if path is None: return
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, suffix='.tmp', delete=False) as stream:
             temporary = Path(stream.name)
-            json.dump({'state': state}, stream, allow_nan=False)
+            json.dump({'state': state, 'error': error}, stream, allow_nan=False)
         temporary.replace(path)
     finally:
         if temporary is not None: temporary.unlink(missing_ok=True)
@@ -87,6 +92,7 @@ def target_pool(rows, manifest=None, cache_dir=None):
     targets = {}
     seen = set()
     excluded = 0
+    inspection_errors = 0
     for row in rows:
         if row['split'] != 'train': raise ValueError('Online corruption only accepts training pages')
         page_id = row['id'].rsplit('/',1)[0]
@@ -126,30 +132,42 @@ def target_pool(rows, manifest=None, cache_dir=None):
             if target.get('target_declaration_state') is not None: continue
             html = Path(target['target_html']).read_text()
             with inspection_cache_entry(cache_dir, target, html, fingerprint) as entry:
-                state = None
+                state = None; error = None; cached = False
                 if entry is not None and entry.exists():
                     try:
-                        state = json.loads(entry.read_text())['state']
-                        if not isinstance(state, list): raise ValueError('Invalid cached state')
-                        mutation_sites(state)
+                        saved = json.loads(entry.read_text())
+                        state, error = saved.get('state'), saved.get('error')
+                        if error is not None:
+                            if not isinstance(error,str) or state is not None: raise ValueError('Invalid cached error')
+                        else:
+                            if not isinstance(state,list): raise ValueError('Invalid cached state')
+                            mutation_sites(state)
+                        cached = True
                     except (ValueError, KeyError, TypeError): state = None
-                if state is not None:
+                if cached:
                     cache_hits += 1
                 else:
-                    if browser is None: browser = HtmlBrowser().__enter__()
-                    else: browser.reset_context()
-                    browser.load(html, target['viewport'])
-                    if 'css_owners' in target:
-                        from . import css_owners
-                        parsed = css_owners.read(browser, target['current'])
-                        if parsed['owners'] != target['css_owners']:
-                            raise ValueError(f'Online target CSS owner identity changed: {page_id}')
-                        state = parsed['state']
-                    else:
-                        state = current_state(browser, target['current'])
                     inspected += 1
-                    save_inspection(entry, state)
-            if not mutation_sites(state):
+                    try:
+                        if browser is None: browser = HtmlBrowser().__enter__()
+                        else: browser.reset_context()
+                        browser.load(html, target['viewport'])
+                        if 'css_owners' in target:
+                            from . import css_owners
+                            parsed = css_owners.read(browser, target['current'])
+                            if parsed['owners'] != target['css_owners']:
+                                raise ValueError(f'CSS owner identity changed: {page_id}')
+                            state = parsed['state']
+                        else:
+                            state = current_state(browser, target['current'])
+                    except Exception as exc:
+                        error = f'{type(exc).__name__}: {exc}'
+                    save_inspection(entry, state, error)
+            if error is not None:
+                del targets[page_id]
+                excluded += 1
+                inspection_errors += 1
+            elif not mutation_sites(state):
                 del targets[page_id]
                 excluded += 1
             else:
@@ -157,11 +175,13 @@ def target_pool(rows, manifest=None, cache_dir=None):
             processed = inspected + cache_hits
             if processed == 1 or processed % 100 == 0:
                 print({'online_target_inspection': inspected, 'cache_hits': cache_hits,
-                       'excluded_no_editable_css': excluded}, flush=True)
+                       'excluded_no_editable_css': excluded-inspection_errors,
+                       'excluded_inspection_error': inspection_errors}, flush=True)
     finally:
         if browser is not None: browser.__exit__(None,None,None)
     print({'online_target_filter': {'pages': len(seen), 'kept': len(targets),
-          'excluded_no_editable_css': excluded, 'inspected_missing_states': inspected,
+          'excluded_no_editable_css': excluded-inspection_errors,
+          'excluded_inspection_error': inspection_errors, 'inspected_missing_states': inspected,
           'cache_hits': cache_hits, 'cache_dir': str(cache_dir) if cache_dir is not None else None}}, flush=True)
     if not targets: raise ValueError('Empty online target pool after filtering pages without supported existing CSS values')
     # Stable order makes sample indices independent of repeated offline examples.
