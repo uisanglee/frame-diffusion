@@ -151,14 +151,17 @@ def rollout(browser,html,tree,viewport,target_path,policy,parser=None,threshold=
 def evaluate(args):
     device=select_device(args.device)
     if device=='cpu':torch.set_num_threads(args.cpu_threads)
-    raw,raw_ck=load_policy(args.raw_checkpoint,device)
+    abstract_only=getattr(args,'abstract_only',False)
+    if not abstract_only and not args.raw_checkpoint:raise ValueError('Supply --raw-checkpoint or --abstract-only')
+    raw,raw_ck=(None,{}) if abstract_only else load_policy(args.raw_checkpoint,device)
     abstract,abstract_ck=load_policy(args.abstract_checkpoint,device)
     if getattr(args,'decoding',None):
-        raw.cfg.decoding=args.decoding;abstract.cfg.decoding=args.decoding
+        if raw is not None:raw.cfg.decoding=args.decoding
+        abstract.cfg.decoding=args.decoding
     parser,parser_ck=load_detector(args.detector_checkpoint,device)
-    if raw.cfg.mode!='screenshot' or abstract.cfg.mode!='abstract':raise ValueError('Policy modality mismatch')
+    if (raw is not None and raw.cfg.mode!='screenshot') or abstract.cfg.mode!='abstract':raise ValueError('Policy modality mismatch')
     for key in ('hidden','layers','heads','max_nodes','token_grid','policy_head','numeric_only','stylesheets','existing_values_only'):
-        if getattr(raw.cfg,key,False)!=getattr(abstract.cfg,key,False):raise ValueError('Matched policies must share tree/policy architecture')
+        if raw is not None and getattr(raw.cfg,key,False)!=getattr(abstract.cfg,key,False):raise ValueError('Matched policies must share tree/policy architecture')
     rows=list(read_jsonl(args.data));rows=rows[:args.limit] if args.limit else rows
     if not rows:raise ValueError('No prepared evaluation pages')
     if args.repeats<1 or args.time_budget<0:raise ValueError('Invalid repeats/time budget')
@@ -170,19 +173,20 @@ def evaluate(args):
                 raise ValueError('Evaluation overlaps policy/parser training corpus')
     out=Path(args.out).resolve()
     guard_run(out,{'kind':'visual-comparison-v1','data':digest(args.data),
-        'checkpoints':[digest(p) for p in (args.raw_checkpoint,args.abstract_checkpoint,args.detector_checkpoint)],
+        'checkpoints':[digest(p) for p in (args.raw_checkpoint if not abstract_only else None,args.abstract_checkpoint,args.detector_checkpoint) if p],
         'assets':[{k:digest(r[k]) for k in ('screenshot','tagged_html') if r.get(k)} for r in rows],
         'settings':{k:v for k,v in vars(args).items() if k not in ('out','resume')}},args.resume)
     # Startup and warmup are excluded equally. No real target is parsed in warmup.
     if args.warmup:
         with torch.inference_mode():
             for policy in (raw,abstract):
+                if policy is None:continue
                 blank=torch.zeros(1,4 if policy.cfg.semantic else 3,policy.cfg.size,policy.cfg.size,device=device)
                 if policy.cfg.policy_head in ('autoregressive','replacement'):policy.encode_pair(blank,blank)
                 else:policy.encode_image(blank)
             parser([torch.zeros(3,parser_ck['config']['min_size'],parser_ck['config']['min_size'],device=device)])
         sync(device)
-    methods={'screenshot-policy':raw,'abstract-policy':abstract}
+    methods={'abstract-policy':abstract} if abstract_only else {'screenshot-policy':raw,'abstract-policy':abstract}
     if args.oracle_ablation:methods['abstract-oracle']=abstract
     results=[];timings=[];rng=random.Random(args.seed)
     with HtmlBrowser() as browser:

@@ -73,7 +73,9 @@ def add_parsers(sub):
     p.add_argument('--limit',type=int,default=0);p.add_argument('--cpu-threads',type=int,default=4)
     p=sub.add_parser('visual-evaluate',help='Paired actual screenshot vs one-shot abstraction greedy rollouts')
     p.add_argument('--decoding',choices=['joint','aggregate'],help='Override flat decoding for a paired ablation')
-    for k in ('data','raw-checkpoint','abstract-checkpoint','detector-checkpoint','out'):p.add_argument('--'+k,required=True)
+    for k in ('data','abstract-checkpoint','detector-checkpoint','out'):p.add_argument('--'+k,required=True)
+    p.add_argument('--raw-checkpoint')
+    p.add_argument('--abstract-only',action='store_true',help='Evaluate abstraction policy alone, including capacity comparisons')
     p.add_argument('--device',default='auto');p.add_argument('--threshold',type=float,default=.4)
     p.add_argument('--goal-threshold',type=float,default=-1,
                    help='RGB MAE termination threshold; -1 disables for fixed-budget comparisons')

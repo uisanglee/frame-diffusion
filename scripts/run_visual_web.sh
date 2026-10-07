@@ -45,6 +45,10 @@ if [[ "${ABSTRACT_VLM_REVISION:-0}" == 1 ]]; then
     --max-new-tokens "$max_new_tokens" --max-pixels "${MAX_PIXELS:-1048576}" --resume
   prepared="$output_root/abstract-vlm/prepared.jsonl"
 fi
+if [[ "${TUIDE_SCALES:-0}" == 1 ]]; then
+  bash scripts/run_tuide_scales.sh "$prepared" "$output_root/scales"
+  exit 0
+fi
 pick_checkpoint() {
   local explicit=$1
   shift

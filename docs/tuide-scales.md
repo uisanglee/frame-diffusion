@@ -59,15 +59,44 @@ main scale on validation performance, not the held-out test set.
 
 ## RGB comparison and evaluation
 
+The integrated scaling runner needs only S screenshot plus S/M/L abstract
+checkpoints. It prepares initial HTML once, evaluates S with its matched RGB
+baseline, then evaluates M and L in abstract-only mode in separate processes.
+M/L screenshot training is optional.
+
+```bash
+CUDA_VISIBLE_DEVICES=1 TUIDE_SCALES=1 PAGE_LIMIT=20 REPEATS=3 REPAIR_STEPS=20 \
+bash scripts/run_visual_web.sh "$D2C_ROOT" runs/eval-tuide-scales \
+  runs/webui-10k-v3-nospacing-fresh-webui
+```
+
+For already prepared evaluation pages, skip VLM preparation entirely:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 PAGE_LIMIT=0 REPEATS=3 REPAIR_STEPS=20 \
+bash scripts/run_tuide_scales.sh \
+  runs/existing-eval/prepare/prepared.jsonl runs/eval-tuide-scales
+```
+
+The combined report is `comparison/paper-report.md` under the scaling output
+(under `scales/` when called through `run_visual_web.sh`). It contains shared
+initial/self-revision rows where available, screenshot-policy (S), and TUIDE-S/M/L.
+`policy-parameters.json` reports measured counts. Repeats are averaged per page.
+Override paths with `RAW_CHECKPOINT`, `DETECTOR_CHECKPOINT`, and
+`TUIDE_S_CHECKPOINT`, `TUIDE_M_CHECKPOINT`, `TUIDE_L_CHECKPOINT` as needed.
+Capacity runs share the same prepared JSONL, seed, steps and detector. An S RGB
+versus M/L abstract comparison changes both modality and capacity; use S RGB
+versus S abstract for the isolated abstraction ablation.
+
 Train a matched RGB policy using `POLICY_MODES=screenshot`:
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 POLICY_MODES=screenshot bash scripts/train_tuide_scale.sh m
 ```
 
-Existing `visual-evaluate` loads architecture dimensions from each checkpoint.
-It requires matched RGB/abstract dimensions, so M abstract must be paired with
-M screenshot, and L with L. For example, after both M policies finish:
+`visual-evaluate` loads architecture dimensions from each checkpoint. Paired
+RGB/abstract mode requires matched dimensions; `--abstract-only` evaluates any
+single scale without an RGB checkpoint. For an optional matched M ablation:
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 \
