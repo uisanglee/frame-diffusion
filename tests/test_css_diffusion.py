@@ -50,6 +50,16 @@ def test_abstraction_error_ignores_blank_background_and_empty_target():
     assert abstraction_error(torch.zeros_like(target),current) is None
 
 
+def test_owner_normalization_accepts_text_only_and_rejects_topology():
+    from framediff.css_diffusion_experiment import canonical_owners
+    expected=[{'kind':'root','matches':[]},{'kind':'rule','block':0,'path':[1],
+              'selector':'.a > .b','conditions':['@media (min-width:400px)'],'matches':['fd-1']}]
+    actual=copy.deepcopy(expected);actual[1]['selector']='.a > .b';actual[1]['conditions']=['@media (min-width: 400px)']
+    assert canonical_owners(expected,actual) is actual
+    actual[1]['path']=[2]
+    with pytest.raises(ValueError,match='topology'):canonical_owners(expected,actual)
+
+
 @pytest.mark.browser
 def test_prepare_train_resume_and_reverse_rollout(tmp_path, monkeypatch):
     from framediff.html_bridge import HtmlBrowser

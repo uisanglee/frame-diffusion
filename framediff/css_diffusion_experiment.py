@@ -99,6 +99,26 @@ def apply_values(browser, row, values):
     browser.executions += 1
 
 
+def owner_topology(owners):
+    """Identity stable across harmless CSSOM serialization normalization."""
+    result=[]
+    for owner in owners:
+        kind=owner.get('kind')
+        if kind=='root': result.append(('root',))
+        elif kind=='inline':result.append(('inline',owner.get('id'),tuple(owner.get('matches',[]))))
+        elif kind=='rule':result.append(('rule',owner.get('block'),tuple(owner.get('path',[])),
+                                         tuple(owner.get('matches',[]))))
+        else:raise ValueError('Unknown CSS owner kind')
+    return result
+
+
+def canonical_owners(expected, actual):
+    """Accept selector/condition formatting changes, reject address/match changes."""
+    if owner_topology(expected) != owner_topology(actual):
+        raise ValueError('CSS owner topology changed after preparation')
+    return actual
+
+
 def prepare(args):
     from .visual_train import load_detector, detect, detector_input
     if args.bins < 3 or args.bins % 2 != 1 or args.limit < 0 or not 0 <= args.threshold <= 1:
@@ -158,6 +178,9 @@ def prepare(args):
                                   x0=x0, bins=args.bins, diffusion_contract=CONTRACT, quantization_errors=error,
                                   source_html_sha=digest(html_path))
                     apply_values(browser, record, x0)
+                    # CSSOM serialization can normalize selector/condition text.
+                    # Store the exact owner representation of the quantized HTML.
+                    record['css_owners']=canonical_owners(record['css_owners'],css_owners.read(browser,row['current'])['owners'])
                     record = observe(browser, record, 'abstract')
                     record['target_html'] = str(folder/'target.html')
                     record['target_image'] = str(folder/'target.png')
@@ -205,10 +228,13 @@ class CSSDenoiser(TreePolicy):
 def materialize(browser, row, xt, mode):
     browser.reset_context()
     browser.load(Path(row['target_html']).read_text(), row['viewport'])
-    if css_owners.read(browser, row['current'])['owners'] != row['css_owners']:
-        raise ValueError('CSS owners changed after preparation')
-    apply_values(browser, row, xt)
-    return observe(browser, row, mode)
+    actual=css_owners.read(browser, row['current'])['owners']
+    # Older prepared records may contain the pre-serialization selector text.
+    # Use live canonical owners after proving that every editable address and
+    # matched DOM set is unchanged; this avoids a costly data rebuild.
+    working={**row,'css_owners':canonical_owners(row['css_owners'],actual)}
+    apply_values(browser, working, xt)
+    return observe(browser, working, mode)
 
 
 def check_rows(rows, split, predicted=False):
