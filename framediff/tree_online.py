@@ -25,6 +25,14 @@ from .web_experiment import digest
 ONLINE_CONTRACT = 'online-css-existing-values-v3'
 
 
+def mutation_sites(state):
+    """Editable, present declarations eligible for value replacement."""
+    return [(node,field,value,priority)
+            for node in range(1,len(state))
+            for field,(value,priority) in zip(FIELDS,state[node])
+            if value and value_valid(value,field)]
+
+
 def target_pool(rows, manifest=None):
     pages = {p['id']:p for p in read_jsonl(manifest)} if manifest else {}
     targets = {}
@@ -45,8 +53,14 @@ def target_pool(rows, manifest=None):
         for key in ('predicted_target_elements','parser_provenance','parser_sha','css_owners'):
             if key in row: target[key] = row[key]
         target.update(id=page_id,target_html=str(Path(html).resolve()))
+        clean_state=row.get('target_declaration_state')
+        # Stylesheet preparation already parsed the clean program. Excluding
+        # pages with no legal replacement sites here prevents unlucky batches
+        # of permanently unusable pages from terminating online training.
+        if clean_state is not None and not mutation_sites(clean_state):
+            continue
         targets[page_id] = target
-    if not targets: raise ValueError('Empty online target pool')
+    if not targets: raise ValueError('Empty online target pool after filtering pages without supported existing CSS values')
     # Stable order makes sample indices independent of repeated offline examples.
     return [targets[k] for k in sorted(targets)]
 
@@ -67,12 +81,7 @@ def sample_mutation(state, viewport, rng):
     are not mutation sites: inserting an override would teach its removal.
     Browser probes subsequently reject shadowed or geometrically inert edits.
     """
-    existing=[]
-    for node in range(1,len(state)):
-        for j,field in enumerate(FIELDS):
-            value,priority=state[node][j]
-            if value and value_valid(value,field):
-                existing.append((node,field,value,priority))
+    existing=mutation_sites(state)
     if not existing: raise ValueError('No supported existing CSS values to corrupt')
     node,field,old,priority=rng.choice(existing)
     axis=viewport[0 if field in ('width','margin-left','margin-right') else 1]

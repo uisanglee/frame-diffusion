@@ -330,7 +330,11 @@ def train(args):
     # Resource tuning does not change the index-seeded sample stream.
     settings={k:v for k,v in settings.items() if k not in ('online_workers','online_prefetch','online_timeout')}
     if not online: settings={k:v for k,v in settings.items() if not k.startswith('online_')}
-    guard_run(out,{'kind':KIND,'config':config,'data':signatures,'settings':settings},bool(args.resume))
+    incomplete_restart=(out/'config.json').exists() and not (out/'last.pt').exists() and not args.resume
+    guard_run(out,{'kind':KIND,'config':config,'data':signatures,'settings':settings},
+              bool(args.resume) or incomplete_restart)
+    if incomplete_restart:
+        print(f'Restarting incomplete run without a checkpoint: {out}',flush=True)
     ck=torch.load(args.resume or args.init_checkpoint,map_location='cpu',weights_only=True) if args.resume or args.init_checkpoint else None
     if ck and (ck.get('kind')!=KIND or TreeConfig(**ck['config'])!=cfg): raise ValueError('Incompatible policy checkpoint; detector reuse is separate')
     groups={r['group'] for r in training};hashes={r['source_sha'] for r in training}

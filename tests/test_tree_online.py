@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from framediff.tree_online import OnlineSampler,OnlineStream,target_pool,sample_mutation,task_seed
+from framediff.tree_online import OnlineSampler,OnlineStream,target_pool,mutation_sites,sample_mutation,task_seed
 from framediff.tree_edits import CONTRACT,FIELDS,extract,current_state,execute,repair_path,apply_state
 from framediff.ir import write_jsonl,read_jsonl
 
@@ -29,6 +29,22 @@ def test_online_pool_rejects_heldout_and_missing_clean_html():
     with pytest.raises(ValueError,match='training pages'): target_pool([{'split':'val'}])
     with pytest.raises(ValueError,match='Missing clean HTML'):
         target_pool([{'id':'a/t0-s0','split':'train'}])
+
+
+def test_online_pool_filters_permanently_unmutable_preparsed_pages(tmp_path):
+    html=tmp_path/'clean.html';html.write_text('<html></html>')
+    empty=[[['',''] for _ in FIELDS] for _ in range(2)]
+    usable=copy.deepcopy(empty);usable[1][0]=['50%','']
+    base={'split':'train','group':'g','source_sha':'x','viewport':[100,100],
+          'current':{'nodes':[]},'target_image':str(tmp_path/'target.png'),'target_elements':[],
+          'target_html':str(html)}
+    rows=[{**base,'id':'bad/t0-s0','target_declaration_state':empty},
+          {**base,'id':'good/t0-s0','target_declaration_state':usable}]
+    pool=target_pool(rows)
+    assert [row['id'] for row in pool]==['good']
+    assert mutation_sites(usable)==[(1,'width','50%','')]
+    with pytest.raises(ValueError,match='after filtering'):
+        target_pool([rows[0]])
 
 
 @pytest.fixture
