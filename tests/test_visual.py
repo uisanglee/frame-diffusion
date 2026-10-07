@@ -73,7 +73,7 @@ def test_semantic_masks_preserve_overlaps_small_objects_and_letterbox():
     items=[{'label':1,'box':[10,10,40,40]}, {'label':4,'box':[0,0,80,50]},
            {'label':3,'box':[90,20,90.5,20.5]}]
     masks=semantic_masks(items,[100,50],32)
-    assert masks.shape==(4,32,32) and masks.min()>=0 and masks.max()<=1
+    assert masks.shape==(8,32,32) and masks.min()>=0 and masks.max()<=1
     assert masks[0,5,5]==masks[3,5,5]==1
     assert masks[2].sum()>0 and masks[2].sum()<1
     assert masks[:,16:,:].sum()==0
@@ -91,8 +91,8 @@ def test_semantic_policy_ce_gradients_and_checkpoint(tmp_path):
     net=VisualPolicy(cfg,False)
     tree,boxes=fixture_tree()
     batch=visual_batch([current_features(tree,boxes,[320,240],16)],'cpu')
-    target=semantic_masks([{'label':3,'box':[100,20,180,50]}],[320,240],32)[None].requires_grad_()
-    current=semantic_masks(elements(tree,boxes,[320,240]),[320,240],32)[None].requires_grad_()
+    target=semantic_masks([{'label':3,'box':[100,20,180,50]}],[320,240],32,boundaries=False)[None].requires_grad_()
+    current=semantic_masks(elements(tree,boxes,[320,240]),[320,240],32,boundaries=False)[None].requires_grad_()
     logits,parts=net(batch,target,current,True)
     assert net.vision.stem[0].in_channels==12 and not hasattr(net,'operation')
     assert torch.isneginf(logits[0,-1])

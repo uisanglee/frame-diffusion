@@ -25,6 +25,8 @@ def embed_placeholder(html, path=None):
 
 class HtmlBrowser(Browser):
     def load(self, html, viewport):
+        from .explicit_html import reject_flat_html
+        reject_flat_html(html)
         # Meta refresh can navigate the main frame while set_content/evaluate is
         # running. Dataset HTML is an untrusted static snapshot, so disable it.
         html=re.sub(r'<meta\b[^>]*http-equiv\s*=\s*["\']?\s*refresh\s*["\']?[^>]*>',
@@ -105,6 +107,9 @@ class HtmlBrowser(Browser):
             const edges=horizontal?['padding-left','padding-right','border-left-width','border-right-width']:
               ['padding-top','padding-bottom','border-top-width','border-bottom-width'];
             const inset=s.boxSizing==='border-box'?0:edges.reduce((a,k)=>a+num(k),0);
+            if(e.hasAttribute('data-tuide-explicit-id') &&
+               (horizontal?r.width:r.height)+delta < edges.reduce((a,k)=>a+num(k),0))
+              throw Error('Explicit size below border/padding minimum');
             property=field;value=Math.max(0,(horizontal?r.width:r.height)+delta-inset);
           }else{
             property=field==='dx'?'margin-left':'margin-top';value=num(property)+delta;
@@ -141,6 +146,10 @@ class HtmlBrowser(Browser):
               ['padding-top','padding-bottom','border-top-width','border-bottom-width'];
             const inset=s.boxSizing==='border-box'?0:edges.reduce((a,k)=>a+num(k),0);
             current=(horizontal?r.width:r.height)-inset;minimum=0;
+            if(e.hasAttribute('data-tuide-explicit-id')){
+              minimum=edges.reduce((a,k)=>a+num(k),0);
+              if(current+delta<minimum)throw Error('Explicit size below border/padding minimum');
+            }
           }else{current=num(field)}
           e.style.setProperty(field,`${Math.max(minimum,current+delta)}px`,'important');return null;
         }''', {'id':node_id,'field':field,'value':value,'delta':delta,'numeric':numeric})

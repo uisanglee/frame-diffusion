@@ -8,7 +8,7 @@ import re
 import torch
 from torch import nn
 
-CONTRACT = 'css-value-d3pm-v1'
+CONTRACT = 'css-value-d3pm-v2-gap'
 
 
 def grid(field, unit, bins):
@@ -18,10 +18,10 @@ def grid(field, unit, bins):
     if unit not in ('px', '%'):
         raise ValueError('Only px and % are diffused; other declarations stay fixed')
     extent = 2048. if unit == 'px' else 200.
-    return torch.linspace(0, extent, bins, dtype=torch.float64) if field in ('width', 'height') else torch.linspace(-extent/2, extent/2, bins, dtype=torch.float64)
+    return torch.linspace(0, extent, bins, dtype=torch.float64) if field in ('width', 'height', 'row-gap', 'column-gap') else torch.linspace(-extent/2, extent/2, bins, dtype=torch.float64)
 
 
-def numeric_slots(state, fields, bins):
+def numeric_slots(state, fields, bins, minimums=None):
     slots, labels, errors = [], [], []
     for owner, props in enumerate(state[1:], 1):
         for prop, (value, priority) in enumerate(props):
@@ -32,17 +32,25 @@ def numeric_slots(state, fields, bins):
             if match[2] is None and number != 0:
                 continue
             values = grid(fields[prop], unit, bins)
+            minimum=(minimums or {}).get(owner,{}).get(fields[prop])
+            if minimum is not None:
+                if unit!='px':raise ValueError('Explicit diffusion sizes must be px')
+                if minimum>=float(values[-1]):raise ValueError('Border minimum exceeds diffusion grid')
+                values=torch.linspace(minimum,float(values[-1]),bins,dtype=torch.float64)
             if not values[0] <= number <= values[-1]:
                 continue  # No clipping of out-of-range original declarations.
             index = int((values-number).abs().argmin())
             slots.append({'owner': owner, 'property': prop, 'unit': unit, 'priority': priority})
+            if minimum is not None:slots[-1]['minimum']=minimum
             labels.append(index)
             errors.append({'unit': unit, 'absolute_error': abs(float(values[index])-number)})
     return slots, labels, errors
 
 
 def slot_edit(slot, index, fields, bins):
-    value = float(grid(fields[slot['property']], slot['unit'], bins)[int(index)])
+    values=grid(fields[slot['property']], slot['unit'], bins)
+    if 'minimum' in slot:values=torch.linspace(slot['minimum'],float(values[-1]),bins,dtype=torch.float64)
+    value = float(values[int(index)])
     return [slot['owner'], fields[slot['property']], f'{value:.8g}{slot["unit"]}', slot['priority']]
 
 

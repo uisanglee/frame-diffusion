@@ -18,7 +18,7 @@ from .ir import read_json, read_jsonl, write_json
 from .model import Block, ModelConfig, encode, collate
 from .train import seed_all, select_device
 from .tree_edits import CONTRACT, FIELDS, EditTokenizer, apply_state, extract, repair_path
-from .visual import SpatialEncoder, elements, semantic_masks, image_tensor
+from .visual import SpatialEncoder, elements, semantic_masks, image_tensor,BOUNDARY_CONTRACT,SEMANTIC_CHANNELS
 from .visual_data import validate_splits
 from .web_experiment import digest, guard_run
 
@@ -55,8 +55,11 @@ class TreeConfig:
     # False keeps historical checkpoints loadable. New stylesheet training opts
     # in explicitly; inference then cannot add absent declarations/overrides.
     existing_values_only: bool = False
+    abstraction_contract: str = BOUNDARY_CONTRACT
 
     def __post_init__(self):
+        if self.abstraction_contract!=BOUNDARY_CONTRACT:
+            raise ValueError('Retrain abstract policy for occupancy+boundary inputs')
         from .css_owners import CONTRACT as OWNER_CONTRACT
         if self.mode not in ('abstract','screenshot') or self.action_contract != (OWNER_CONTRACT if self.stylesheets else CONTRACT) or self.policy_head != 'replacement':
             raise ValueError('Replacement policy contract mismatch')
@@ -67,17 +70,17 @@ class TreeConfig:
     def semantic(self): return self.mode == 'abstract'
 
     @property
-    def observation_contract(self): return 'semantic-mask-pair-diff-v1' if self.semantic else 'rgb-pair-diff-v1'
+    def observation_contract(self): return self.abstraction_contract if self.semantic else 'rgb-pair-diff-v1'
 
 
 class TreePolicy(nn.Module):
     def __init__(self, cfg, pretrained=True):
         super().__init__(); self.cfg=cfg; self.tokenizer=EditTokenizer(cfg.max_nodes)
-        self.vision=SpatialEncoder(cfg.hidden,cfg.token_grid,pretrained,12 if cfg.semantic else 9)
+        self.vision=SpatialEncoder(cfg.hidden,cfg.token_grid,pretrained,3*SEMANTIC_CHANNELS if cfg.semantic else 9)
         self.token=nn.Embedding(len(self.tokenizer.tokens),cfg.hidden)
         self.byte=nn.Embedding(257,cfg.hidden,padding_idx=0)
         self.css_encoder=nn.GRU(cfg.hidden,cfg.hidden,batch_first=True)
-        self.css_projection=nn.Linear(6*cfg.hidden,cfg.hidden)
+        self.css_projection=nn.Linear(len(FIELDS)*cfg.hidden,cfg.hidden)
         if cfg.stylesheets:self.owner_type=nn.Embedding(3,cfg.hidden)
         self.geometry=nn.Linear(4,cfg.hidden)
         self.node=nn.Embedding(cfg.max_nodes,cfg.hidden)
@@ -94,10 +97,11 @@ class TreePolicy(nn.Module):
         from torchvision.ops import roi_align
         spatial,feature=self.encode_pair(target,current) if encoded_pair is None else encoded_pair
         b,n=batch['mask'].shape;device=target.device
-        declarations=torch.zeros(b,n,6,64,dtype=torch.long,device=device)
+        declarations=torch.zeros(b,n,len(FIELDS),64,dtype=torch.long,device=device)
         for i,state in enumerate(states):
             if len(state)>self.cfg.max_nodes: raise ValueError('Too many DOM nodes')
             for j,props in enumerate(state):
+                if len(props)!=len(FIELDS):raise ValueError('CSS field schema changed; reprepare gap-enabled labels')
                 for k,(value,priority) in enumerate(props):
                     # Current CSS is context, not target CSS. Unsupported unchanged
                     # values remain visible as bytes; only replacements use grammar.
@@ -146,7 +150,8 @@ class TreePolicy(nn.Module):
         memory,padding=self.memory(batch,target,current,states,encoded_pair);prefix=[]
         for _ in range(self.tokenizer.max_length):
             allowed=self.tokenizer.allowed(prefix,len(states[0]),
-                state=states[0] if self.cfg.existing_values_only else None)
+                state=states[0] if self.cfg.existing_values_only else None,
+                size_limits=batch.get('explicit_owner_limits',[{}])[0])
             if not allowed: raise ValueError('No grammar-valid continuation')
             tokens=torch.tensor([[self.tokenizer.ids['BOS'],*prefix]],device=target.device)
             scores=self.logits(memory,padding,tokens)[0,-1]
@@ -186,19 +191,22 @@ def tree_batch(rows,device,max_nodes):
             x,y,w,h=boxes[node['id']];values.append([x/scale,y/scale,(x+w)/scale,(y+h)/scale])
         rois[i,:len(values)]=torch.tensor(values,device=device).clamp(0,1)
     batch['roi']=rois
+    from .explicit_html import owner_size_limits
+    batch['explicit_owner_limits']=[owner_size_limits(r) for r in rows]
     return batch
 
 
 def batch_inputs(net,rows,device,predicted=False):
     cfg=net.cfg;targets=[];currents=[]
     for row in rows:
+        if row.get('hierarchy'):raise ValueError('Flat policy data is retired; use original DOM data')
         if cfg.semantic:
             if predicted:
                 if not row.get('predicted_target_elements'): raise ValueError('Missing frozen-detector cache')
                 items=read_json(row['predicted_target_elements'])
             else: items=row['target_elements']
             targets.append(semantic_masks(items,row['viewport'],cfg.size))
-            currents.append(semantic_masks(elements(row['current'],row['current_boxes'],row['viewport']),row['viewport'],cfg.size))
+            currents.append(semantic_masks(elements(row['current'],row['current_boxes'],row['viewport'],row.get('current_clip_boxes')),row['viewport'],cfg.size))
         else:
             targets.append(image_tensor(row['target_image'],cfg.size));currents.append(image_tensor(row['current_image'],cfg.size))
     batch=tree_batch(rows,device,cfg.max_nodes)
@@ -262,6 +270,8 @@ def symbolic_policy_metrics(net,rows,target_states,device,predicted,amp):
         try:
             inputs=batch_inputs(net,[row],device,predicted)
             with amp():action=net.predict(*inputs)
+            from .explicit_html import check_record_edit
+            check_record_edit(row,action)
             after_state=apply_state(current,action);after=len(repair_path(after_state,target))
             gain=before-after;totals['gain']+=gain;totals['normalized_gain']+=gain/before
             entry=per_property[action[1]];entry['n']+=1
@@ -307,11 +317,16 @@ def train(args):
         cfg.existing_values_only=True
     tok=EditTokenizer(cfg.max_nodes)
     for row in training+validation:
+        if row.get('hierarchy'):raise ValueError('Flat policy data is retired; use original DOM data')
         if row.get('teacher_strategy')!=cfg.action_contract: raise ValueError('Run visual-tree-prepare with matching --stylesheets setting')
         node_count=len(row['css_owners']) if cfg.stylesheets else len(row['current']['nodes'])
         if len(row['declaration_state'])!=node_count or node_count>cfg.max_nodes:
             raise ValueError('Invalid declaration state node count')
+        if any(len(p)!=len(FIELDS) for p in row['declaration_state']):
+            raise ValueError('CSS field schema changed; reprepare gap-enabled labels')
         tok.encode(row['replacement_edit'],node_count)
+        from .explicit_html import check_record_edit
+        check_record_edit(row,row['replacement_edit'])
     signatures={'train':digest(args.train),'val':digest(args.val)}
     online=getattr(args,'online_corruption',False);targets=None
     if online:
@@ -319,10 +334,10 @@ def train(args):
         if min(args.online_workers,args.online_prefetch,args.online_max_noise,args.online_attempts,args.online_timeout)<1:
             raise ValueError('Online worker, queue, retry and noise settings must be positive')
         cache_root=Path(args.online_targets or args.train).resolve().parent/'.online-target-cache'
-        targets=target_pool(training,args.online_targets,cache_dir=cache_root)
+        targets=target_pool(training,args.online_targets,cache_dir=cache_root,observation_size=cfg.size)
         signatures['online']={'contract':ONLINE_CONTRACT,'assets':asset_signatures(targets)}
         if cfg.stylesheets and any(r.get('corruption_contract')!=ONLINE_CONTRACT for r in validation):
-            raise ValueError('Validation uses old corruption; run prepare_stylesheet_policy.sh for v3 fixed states (reuse target assets/cache)')
+            raise ValueError('Validation uses old corruption; rerun prepare_stylesheet_policy.sh in a new output directory (reuse target assets/cache)')
     out=Path(args.out).resolve();settings={k:v for k,v in vars(args).items() if k not in ('out','steps','resume','init_checkpoint','policy_scale')}
     config=asdict(cfg)
     if not cfg.existing_values_only:config.pop('existing_values_only')
@@ -337,6 +352,8 @@ def train(args):
     if incomplete_restart:
         print(f'Restarting incomplete run without a checkpoint: {out}',flush=True)
     ck=torch.load(args.resume or args.init_checkpoint,map_location='cpu',weights_only=True) if args.resume or args.init_checkpoint else None
+    if ck and cfg.semantic and ck.get('config',{}).get('abstraction_contract')!=BOUNDARY_CONTRACT:
+        raise ValueError('Old occupancy-only policy checkpoint; train a new occupancy+boundary policy. Detector weights can be reused.')
     if ck and (ck.get('kind')!=KIND or TreeConfig(**ck['config'])!=cfg): raise ValueError('Incompatible policy checkpoint; detector reuse is separate')
     groups={r['group'] for r in training};hashes={r['source_sha'] for r in training}
     parser_groups=set();parser_hashes=set();provenance={}

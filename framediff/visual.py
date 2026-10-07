@@ -20,6 +20,8 @@ CONTRACT = 'visible-ui-v1'
 ACTION_CONTRACT = 'single-css-declaration-normalized-v3-no-padding-gap'
 CLASSES = ('background', 'text', 'image', 'control', 'painted-region')
 COLORS = ('white', '#2864b4', '#26946c', '#df7832', '#b49ac7')
+BOUNDARY_CONTRACT = 'semantic-occupancy-boundary-pair-v2'
+SEMANTIC_CHANNELS = 8
 MAX_ACTION_FRACTION = .05
 # Numeric actions are fractions of the corresponding viewport axis.  Thus one
 # action changes exactly one CSS declaration by at most 5% of the viewport.
@@ -134,7 +136,7 @@ def annotate(browser, tree):
     return tree
 
 
-def elements(tree, boxes, viewport):
+def elements(tree, boxes, viewport, clip_boxes=None):
     w, h = viewport
     result = []
     for node in tree['nodes']:
@@ -142,6 +144,9 @@ def elements(tree, boxes, viewport):
         if not label: continue
         x, y, bw, bh = boxes[node['id']]
         x1, y1, x2, y2 = max(0., x), max(0., y), min(w, x+bw), min(h, y+bh)
+        if clip_boxes is not None and clip_boxes.get(node['id']) is not None:
+            cx,cy,cw,ch=clip_boxes[node['id']]
+            x1,y1,x2,y2=max(x1,cx),max(y1,cy),min(x2,cx+cw),min(y2,cy+ch)
         if x2>x1 and y2>y1:
             result.append({'box':[x1, y1, x2, y2], 'label':label})
     return result
@@ -171,15 +176,15 @@ def image_tensor(image, size):
     return (tensor-torch.tensor([.485,.456,.406])[:,None,None])/torch.tensor([.229,.224,.225])[:,None,None]
 
 
-def semantic_masks(items, viewport, size):
-    """Four independent occupancy planes; preserve cross-class overlaps.
+def semantic_masks(items, viewport, size, boundaries=True):
+    """Four occupancy planes plus four per-class boundary planes.
 
     Area resampling retains fractional coverage of subpixel objects. No RGB
     palette, IDs, ImageNet normalization, or artificial minimum box thickness.
     """
     w,h=viewport
     if min(w,h,size)<=0:raise ValueError('Invalid semantic mask dimensions')
-    result=np.zeros((4,size,size),dtype=np.float32);scale=size/max(w,h)
+    result=np.zeros((8 if boundaries else 4,size,size),dtype=np.float32);scale=size/max(w,h)
     for item in items:
         label=int(item['label'])
         if not 1<=label<=4:continue
@@ -194,6 +199,14 @@ def semantic_masks(items, viewport, size):
         coverage=np.maximum(0,np.minimum(ys+1,y2)-np.maximum(ys,y1))[:,None]*np.maximum(0,np.minimum(xs+1,x2)-np.maximum(xs,x1))[None,:]
         region=result[label-1,top:bottom,left:right]
         np.maximum(region,coverage,out=region)
+        if boundaries:
+            # Union per-box rings, not the boundary of the filled union.
+            ix1,iy1,ix2,iy2=x1+1,y1+1,x2-1,y2-1
+            inner=np.zeros_like(coverage)
+            if ix2>ix1 and iy2>iy1:
+                inner=np.maximum(0,np.minimum(ys+1,iy2)-np.maximum(ys,iy1))[:,None]*np.maximum(0,np.minimum(xs+1,ix2)-np.maximum(xs,ix1))[None,:]
+            edge=result[label+3,top:bottom,left:right]
+            np.maximum(edge,np.maximum(coverage-inner,0),out=edge)
     return torch.from_numpy(result)
 
 
@@ -201,6 +214,10 @@ def observation_mae(target,current,semantic=False):
     if semantic:return float((target-current).abs().mean())
     std=target.new_tensor([.229,.224,.225])[None,:,None,None]
     return float(((target-current)*std).abs().mean())
+
+
+def semantic_channels(cfg):
+    return SEMANTIC_CHANNELS if cfg.observation_contract==BOUNDARY_CONTRACT else 4
 
 
 def current_features(tree, boxes, viewport, max_nodes):
@@ -473,6 +490,8 @@ def load_policy(path,device):
     checkpoint=torch.load(path,map_location='cpu',weights_only=True)
     from .tree_policy import KIND,TreeConfig,TreePolicy
     if checkpoint.get('kind')==KIND:
+        if checkpoint['config'].get('mode','abstract')=='abstract' and checkpoint['config'].get('abstraction_contract')!=BOUNDARY_CONTRACT:
+            raise ValueError('Old occupancy-only policy checkpoint; train a new occupancy+boundary policy. Detector weights can be reused.')
         model=TreePolicy(TreeConfig(**checkpoint['config']),pretrained=False)
         model.load_state_dict(checkpoint['model'])
         return model.to(device).eval(),checkpoint

@@ -80,8 +80,10 @@ def policy_batch(net,rows,device,rng,prediction_probability):
             else:
                 if 'target_elements' not in row:raise ValueError('Missing target elements; run visual-subset-numeric on cached rendered data')
                 items=row['target_elements']
-            target.append(semantic_masks(items,row['viewport'],cfg.size))
-            current.append(semantic_masks(elements(row['current'],row['current_boxes'],row['viewport']),row['viewport'],cfg.size))
+            from .visual import semantic_channels
+            boundary=semantic_channels(cfg)==8
+            target.append(semantic_masks(items,row['viewport'],cfg.size,boundaries=boundary))
+            current.append(semantic_masks(elements(row['current'],row['current_boxes'],row['viewport'],row.get('current_clip_boxes')),row['viewport'],cfg.size,boundaries=boundary))
             continue
         if cfg.mode=='screenshot':tp,cp=row['target_image'],row['current_image']
         else:

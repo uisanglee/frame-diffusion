@@ -26,6 +26,28 @@ def sync(device):
 
 def rollout(browser,html,tree,viewport,target_path,policy,parser=None,threshold=.4,
             steps=10,time_budget=0,oracle_elements=None,diagnostic_target_boxes=None,goal_threshold=-1):
+    """Keep partial work and costs even when an execution/verification fails."""
+    stats={};started=time.perf_counter();before=browser.executions;shots=browser.screenshots
+    try:
+        return _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,steps,time_budget,
+                        oracle_elements,diagnostic_target_boxes,goal_threshold,stats)
+    except Exception as exc:
+        # A failed render may have a dead page. In that case keep the input,
+        # but never invent zero execution costs for work already performed.
+        retained=html
+        if stats.get('_loaded'):
+            try:retained=browser.page.content()
+            except Exception:pass
+        stats.pop('_loaded',None)
+        stats.update(failed=True,error=str(exc),stop_reason='rollout_failed',
+                     seconds=time.perf_counter()-started,browser_executions=browser.executions-before,
+                     browser_screenshots=browser.screenshots-shots)
+        stats['time_budget_overshoot']=max(0.,stats['seconds']-time_budget) if time_budget else 0.
+        return retained,stats,None
+
+
+def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
+             steps,time_budget,oracle_elements,diagnostic_target_boxes,goal_threshold,stats):
     """Only the explicitly enabled oracle ablation accepts target elements.
 
     Autoregressive policies have no learned STOP. No box/pixel oracle ranking, no hidden
@@ -33,12 +55,12 @@ def rollout(browser,html,tree,viewport,target_path,policy,parser=None,threshold=
     """
     device=next(policy.parameters()).device;cfg=policy.cfg
     before=browser.executions;shots=browser.screenshots;sync(device);start=time.perf_counter()
-    stats={'target_abstraction_seconds':0.,'target_encoding_seconds':0.,'current_render_seconds':0.,
+    stats.update({'target_abstraction_seconds':0.,'target_encoding_seconds':0.,'current_render_seconds':0.,
            'current_encoding_seconds':0.,'policy_seconds':0.,'layout_seconds':0.,
            'abstraction_calls':0,'current_image_encodings':0,'target_image_encodings':0,
            'actions':0,'mode':cfg.mode,'stop_reason':'steps','history':[],
            'observation_contract':cfg.observation_contract,'goal_threshold':goal_threshold,
-           'pair_encoding_seconds':0.,'pair_image_encodings':0,'dom_queries':0}
+           'pair_encoding_seconds':0.,'pair_image_encodings':0,'dom_queries':0,'failed':False,'error':None})
     t=time.perf_counter()
     if cfg.mode=='abstract':
         if oracle_elements is None:
@@ -51,7 +73,8 @@ def rollout(browser,html,tree,viewport,target_path,policy,parser=None,threshold=
         stats['predicted_elements']=len(items)
     else:
         with Image.open(target_path) as image:target=image.convert('RGB')
-    target_tensor=(semantic_masks(items,viewport,cfg.size) if cfg.semantic else image_tensor(target,cfg.size))[None].to(device)
+    from .visual import semantic_channels
+    target_tensor=(semantic_masks(items,viewport,cfg.size,boundaries=semantic_channels(cfg)==8) if cfg.semantic else image_tensor(target,cfg.size))[None].to(device)
     target_tokens=None
     if cfg.policy_head not in ('autoregressive','replacement'):
         t=time.perf_counter()
@@ -59,18 +82,22 @@ def rollout(browser,html,tree,viewport,target_path,policy,parser=None,threshold=
         sync(device);stats['target_encoding_seconds']=time.perf_counter()-t;stats['target_image_encodings']=1
     root=tree['nodes'][0]['id'];ids=[n['id'] for n in tree['nodes'][1:]]
     t=time.perf_counter();browser.load(html,viewport);stats['layout_seconds']+=time.perf_counter()-t
+    stats['_loaded']=True
     current_html=html;current_tree=copy.deepcopy(tree)
     for step in range(steps):
         if time_budget and time.perf_counter()-start>=time_budget:stats['stop_reason']='time_budget';break
         t=time.perf_counter();boxes=browser.tagged_boxes(ids);boxes[root]=[0,0,*viewport]
         stats['dom_queries']+=1
         current_tree=refresh_geometry(current_tree,boxes);stats['layout_seconds']+=time.perf_counter()-t
+        from .explicit_html import feedback_metadata
+        feedback=feedback_metadata(browser,current_tree)
         t=time.perf_counter()
         if cfg.mode=='screenshot':
-            png=browser.page.screenshot(animations='disabled');browser.screenshots+=1
+            from .explicit_html import feedback_screenshot
+            png=feedback_screenshot(browser,animations='disabled');browser.screenshots+=1
             with Image.open(io.BytesIO(png)) as image:current_image=image.convert('RGB')
-        elif cfg.semantic:current_image=semantic_masks(elements(current_tree,boxes,viewport),viewport,cfg.size)
-        else:current_image=abstract_image(elements(current_tree,boxes,viewport),viewport,cfg.size)
+        elif cfg.semantic:current_image=semantic_masks(elements(current_tree,boxes,viewport,feedback.get('current_clip_boxes')),viewport,cfg.size,boundaries=semantic_channels(cfg)==8)
+        else:current_image=abstract_image(elements(current_tree,boxes,viewport,feedback.get('current_clip_boxes')),viewport,cfg.size)
         stats['current_render_seconds']+=time.perf_counter()-t
         t=time.perf_counter()
         current_tensor=(current_image if cfg.semantic else image_tensor(current_image,cfg.size))[None].to(device)
@@ -86,7 +113,7 @@ def rollout(browser,html,tree,viewport,target_path,policy,parser=None,threshold=
         t=time.perf_counter()
         if cfg.policy_head=='replacement':
             from .tree_policy import tree_batch
-            context={'current':current_tree,'current_boxes':boxes,'viewport':viewport}
+            context={'current':current_tree,'current_boxes':boxes,'viewport':viewport,**feedback}
             if getattr(cfg,'stylesheets',False):
                 from . import css_owners
                 owner_state=css_owners.read(browser,current_tree)
@@ -115,6 +142,16 @@ def rollout(browser,html,tree,viewport,target_path,policy,parser=None,threshold=
                 stats['target_image_encodings']+=1
             else:logits=policy.decode(batch,target_tokens,current_tokens,current_map)[0]
             if cfg.policy_head!='replacement':
+                # Legacy numeric heads also exclude physically impossible sizes
+                # before selection, rather than repeating a rejected proposal.
+                from .visual import action_index,action_delta_px,ACTION_VALUES
+                for i,node in enumerate(current_tree['nodes']):
+                    bound=feedback.get('explicit_size_limits',{}).get(node['id'])
+                    if not bound:continue
+                    for field,axis in (('width',2),('height',3)):
+                        for delta in ACTION_VALUES[field]:
+                            if boxes[node['id']][axis]+action_delta_px(field,delta,viewport)<bound[field]:
+                                logits[action_index((i,field,delta),len(current_tree['nodes']))]=-float('inf')
                 action=decode_action(int(policy.select(logits)),len(current_tree['nodes']))
         sync(device);stats['policy_seconds']+=time.perf_counter()-t-(pair_elapsed if cfg.policy_head in ('autoregressive','replacement') else 0.)
         history={'step':step,'action':action,'boxes':boxes,'elapsed_seconds':time.perf_counter()-start}
@@ -124,20 +161,29 @@ def rollout(browser,html,tree,viewport,target_path,policy,parser=None,threshold=
         if action is None:stats['stop_reason']='policy_stop';break
         if time_budget and time.perf_counter()-start>=time_budget:stats['stop_reason']='time_budget';break
         t=time.perf_counter()
-        if cfg.policy_head=='replacement':
-            from .tree_edits import execute
-            if getattr(cfg,'stylesheets',False):css_owners.execute(browser,owner_state['owners'],action)
-            else:execute(browser,current_tree,action)
-        else:
-            i,field,delta=action
-            browser.edit_visual_action(current_html,viewport,current_tree['nodes'][i]['id'],field,delta)
+        try:
+            if cfg.policy_head=='replacement':
+                from .tree_edits import execute
+                if getattr(cfg,'stylesheets',False):css_owners.execute(browser,owner_state['owners'],action)
+                else:execute(browser,current_tree,action)
+            else:
+                i,field,delta=action
+                browser.edit_visual_action(current_html,viewport,current_tree['nodes'][i]['id'],field,delta)
+        except Exception as exc:
+            if 'Explicit ' not in str(exc):raise
+            history.update(rejected_action=action,action=None,rejection=str(exc))
+            stats['rejected_size_actions']=stats.get('rejected_size_actions',0)+1
+            stats['layout_seconds']+=time.perf_counter()-t
+            stats.update(failed=True,error=str(exc),stop_reason='invalid_action')
+            break
         current_html=browser.page.content();stats['layout_seconds']+=time.perf_counter()-t;stats['actions']+=1
+    current_html=browser.page.content()
     sync(device);stats['seconds']=time.perf_counter()-start
     stats['browser_executions']=browser.executions-before;stats['browser_screenshots']=browser.screenshots-shots
     stats['time_budget_overshoot']=max(0.,stats['seconds']-time_budget) if time_budget else 0.
     # Diagnostic work runs after the repair timer and cannot affect time-budget decisions.
     diagnostic_start=time.perf_counter()
-    if diagnostic_target_boxes is not None and stats['actions']==len(stats['history']) and stats['actions']:
+    if diagnostic_target_boxes is not None:
         boxes=browser.tagged_boxes(ids);boxes[root]=[0,0,*viewport]
         stats['history'].append({'step':len(stats['history']),'action':None,'boxes':boxes,
             'elapsed_seconds':stats['seconds'],'phase':'final_observation'})
@@ -145,6 +191,7 @@ def rollout(browser,html,tree,viewport,target_path,policy,parser=None,threshold=
         for state in stats['history']:
             state['diagnostic_metrics']=box_metrics(state['boxes'],diagnostic_target_boxes,viewport,(root,))
     stats['diagnostic_seconds']=time.perf_counter()-diagnostic_start
+    stats.pop('_loaded',None)
     return current_html,stats,target
 
 
@@ -172,7 +219,7 @@ def evaluate(args):
             if row['group'] in groups or (row.get('html') and digest(row['html']) in hashes) or row.get('source_sha') in hashes:
                 raise ValueError('Evaluation overlaps policy/parser training corpus')
     out=Path(args.out).resolve()
-    guard_run(out,{'kind':'visual-comparison-v1','data':digest(args.data),
+    guard_run(out,{'kind':'visual-comparison-v3-dom-boundary','data':digest(args.data),
         'checkpoints':[digest(p) for p in (args.raw_checkpoint if not abstract_only else None,args.abstract_checkpoint,args.detector_checkpoint) if p],
         'assets':[{k:digest(r[k]) for k in ('screenshot','tagged_html') if r.get(k)} for r in rows],
         'settings':{k:v for k,v in vars(args).items() if k not in ('out','resume')}},args.resume)
@@ -181,7 +228,8 @@ def evaluate(args):
         with torch.inference_mode():
             for policy in (raw,abstract):
                 if policy is None:continue
-                blank=torch.zeros(1,4 if policy.cfg.semantic else 3,policy.cfg.size,policy.cfg.size,device=device)
+                from .visual import semantic_channels
+                blank=torch.zeros(1,semantic_channels(policy.cfg) if policy.cfg.semantic else 3,policy.cfg.size,policy.cfg.size,device=device)
                 if policy.cfg.policy_head in ('autoregressive','replacement'):policy.encode_pair(blank,blank)
                 else:policy.encode_image(blank)
             parser([torch.zeros(3,parser_ck['config']['min_size'],parser_ck['config']['min_size'],device=device)])
@@ -216,6 +264,7 @@ def evaluate(args):
                             record['viewport'],record['screenshot'],methods[method],parser,args.threshold,args.steps,args.time_budget,
                             oracle,record.get('evaluation_target_boxes'),
                             getattr(args,'abstract_goal_threshold',-1) if methods[method].cfg.semantic else args.goal_threshold)
+                        if stats.get('failed'):error=stats.get('error') or 'Rollout failed'
                     except Exception as exc:error=str(exc)
                     if 'seconds' not in stats:stats['seconds']=time.perf_counter()-started
                     path=work/f'{method}-r{repeat+1}.html';path.write_text(html)
@@ -250,6 +299,8 @@ def evaluate(args):
     for method in methods:
         selected=[r for r in timings if r['method']==method];valid=[r for r in selected if not r['failed']]
         summary[method]={'n':len(selected),'failed':sum(r['failed'] for r in selected),
+            'all_trial_means':{k:statistics.mean(r[k] for r in selected if k in r)
+              for k in ('seconds','browser_screenshots','browser_executions','dom_queries','actions') if any(k in r for r in selected)},
             'successful_n':len(valid),'successful_means':{k:statistics.mean(r[k] for r in valid if k in r)
               for k in ('seconds','target_abstraction_seconds','target_encoding_seconds','current_render_seconds',
                         'current_encoding_seconds','pair_encoding_seconds','pair_image_encodings',

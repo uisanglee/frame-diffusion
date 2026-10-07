@@ -8,16 +8,22 @@ if [[ $# -gt 4 ]]; then
 fi
 source_corpus=${1:-data/webui-10k-v5-improvement-distribution}
 detector=${2:-runs/webui-10k-v3-nospacing-fresh-webui/detector/best.pt}
-data_out=${3:-data/webui-css-owners-v3}
-cache_out=${4:-runs/css-owners-v3-shared}
+data_out=${3:-data/webui-css-owners-v5-visible}
+cache_out=${4:-runs/css-owners-v5-visible-shared}
 [[ -f "$source_corpus/rendered/policy-train.jsonl" ]] && source_corpus="$source_corpus/rendered"
-# Parsed owners/clean targets are independent of the corruption distribution.
-# Reuse the existing v2 parse rather than rereading all source HTML again.
+# Gap adds two declaration slots. Reparse HTML (reuse existing images), never
+# reuse six-field labels as though they contained gap supervision.
 labels=${SOURCE_LABELS:-${data_out}-labels}
-if [[ $# -eq 0 && -z "${SOURCE_LABELS:-}" && -s data/webui-css-owners-v2-labels/prepare-report.json ]]; then
-  labels=data/webui-css-owners-v2-labels
+if [[ $# -eq 0 && -z "${SOURCE_LABELS:-}" && -s data/webui-css-owners-v4-gap-labels/prepare-report.json ]]; then
+  labels=data/webui-css-owners-v4-gap-labels
 fi
 if [[ -s "$labels/prepare-report.json" ]]; then
+  python - "$labels/config.json" <<'PY'
+import json, sys
+from framediff.css_owners import CONTRACT
+if json.load(open(sys.argv[1])).get('kind') != CONTRACT:
+    raise SystemExit('Old parsed labels do not contain gap slots. Use a new DATA_OUT/SOURCE_LABELS directory.')
+PY
   for split in train val test; do
     for kind in policy pages; do
       [[ -s "$labels/$kind-$split.jsonl" ]] || { echo "Incomplete parsed corpus: $labels/$kind-$split.jsonl" >&2; exit 2; }
@@ -30,7 +36,7 @@ else
 fi
 python -m framediff visual-tree-freeze --rendered "$labels" \
   --out "$data_out" --samples-per-page "${FIXED_SAMPLES_PER_PAGE:-1}" \
-  --max-noise "${ONLINE_MAX_NOISE:-4}" --resume
+  --max-noise "${ONLINE_MAX_NOISE:-4}" --observation-size "${IMAGE_SIZE:-384}" --resume
 for split in train val; do
   reuse=()
   previous="${REUSE_TARGET_CACHE:-runs/css-owners-v2-shared}/predicted-$split"

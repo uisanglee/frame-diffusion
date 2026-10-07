@@ -68,8 +68,11 @@ def observe(browser, row, mode):
     parsed=css_owners.read(browser, tree)
     result = {**reconcile_owners(row,parsed['owners']), 'current':refresh_geometry(tree, boxes), 'current_boxes':boxes,
               'declaration_state':parsed['state']}
+    from .explicit_html import feedback_metadata
+    result.update(feedback_metadata(browser,tree))
     if mode == 'screenshot':
-        result['current_image'] = browser.page.screenshot(animations='disabled')
+        from .explicit_html import feedback_screenshot
+        result['current_image'] = feedback_screenshot(browser,animations='disabled')
     return result
 
 
@@ -79,6 +82,14 @@ def apply_values(browser, row, values):
     if len(values) != len(row['diffusion_slots']):
         raise ValueError('Diffusion slot count mismatch')
     edits = [slot_edit(slot, value, FIELDS, row['bins']) for slot,value in zip(row['diffusion_slots'],values)]
+    from .explicit_html import explicit_size_limits
+    limits=explicit_size_limits(browser,[n['id'] for n in row['current']['nodes'][1:]])
+    for owner,field,value,_ in edits:
+        if field not in ('width','height'):continue
+        for id in row['css_owners'][owner].get('matches',[]):
+            bound=limits.get(id)
+            if bound is not None and (not value.endswith('px') or float(value[:-2])+1e-6<bound[field]):
+                raise ValueError('Explicit diffusion size below border minimum; reprepare bounded slots')
     browser.page.evaluate('''({owners, edits})=>{
       const nodes=new Map([...document.querySelectorAll('[data-fd-id]')].map(e=>[e.dataset.fdId,e]));
       const sheets=[...document.querySelectorAll('style:not([data-framediff-static])')];
@@ -218,7 +229,11 @@ def prepare(args):
                     parsed = css_owners.read(browser, row['current'])
                     if len(parsed['owners']) > args.max_nodes:
                         raise ValueError('CSS owner capacity exceeded')
-                    slots, x0, error = numeric_slots(parsed['state'], FIELDS, args.bins)
+                    from .explicit_html import explicit_size_limits
+                    limits=explicit_size_limits(browser,[n['id'] for n in row['current']['nodes'][1:]])
+                    minimums={i:limits[o['id']] for i,o in enumerate(parsed['owners'])
+                              if o.get('kind')=='inline' and limits.get(o['id']) is not None}
+                    slots, x0, error = numeric_slots(parsed['state'], FIELDS, args.bins,minimums)
                     if not slots:
                         raise ValueError('No in-range px/% numeric declarations')
                     record = {k:copy.deepcopy(row[k]) for k in ('group','split','source_sha','viewport','current')}
@@ -234,7 +249,7 @@ def prepare(args):
                     record['target_image'] = str(folder/'target.png')
                     Path(record['target_html']).write_text(browser.page.content())
                     browser.page.screenshot(path=record['target_image'], animations='disabled')
-                    record['target_elements'] = elements(record['current'], record['current_boxes'], record['viewport'])
+                    record['target_elements'] = elements(record['current'], record['current_boxes'], record['viewport'],record.get('current_clip_boxes'))
                     if detector is not None:
                         record['predicted_target_elements'] = str(folder/'detector.json')
                         write_json(record['predicted_target_elements'], detect(detector, detector_input(record['target_image']), args.threshold))
@@ -262,14 +277,14 @@ class CSSDenoiser(TreePolicy):
         for key in ('token','position','decoder','output'):
             delattr(self, key)
         self.time = nn.Embedding(diffusion_steps+1, cfg.hidden)
-        self.bin_head = nn.Sequential(nn.Linear(cfg.hidden,cfg.hidden), nn.SiLU(), nn.Linear(cfg.hidden,6*bins))
+        self.bin_head = nn.Sequential(nn.Linear(cfg.hidden,cfg.hidden), nn.SiLU(), nn.Linear(cfg.hidden,len(FIELDS)*bins))
         self.bins = bins
 
     def forward(self, rows, timesteps, device, predicted=False):
         batch, target, current, states = batch_inputs(self, rows, device, predicted)
         memory, _ = self.memory(batch, target, current, states)
         owner_memory = memory[:, :batch['mask'].shape[1]] + self.time(torch.tensor(timesteps, device=device))[:,None]
-        logits = self.bin_head(owner_memory).reshape(len(rows), -1, 6, self.bins)
+        logits = self.bin_head(owner_memory).reshape(len(rows), -1, len(FIELDS), self.bins)
         return [logits[i, [s['owner'] for s in r['diffusion_slots']], [s['property'] for s in r['diffusion_slots']]] for i,r in enumerate(rows)]
 
 
@@ -289,6 +304,7 @@ def check_rows(rows, split, predicted=False):
     if not rows:
         raise ValueError('Empty '+split+' data')
     for row in rows:
+        if row.get('hierarchy'):raise ValueError('Flat diffusion data is retired; prepare from original DOM')
         if row['split'] != split or row.get('diffusion_contract') != CONTRACT:
             raise ValueError('Wrong split or diffusion data contract')
         if not row['diffusion_slots'] or len(row['diffusion_slots']) != len(row['x0']):
@@ -402,6 +418,9 @@ def evaluate(args):
     device=select_device(args.device);ck=torch.load(args.checkpoint,map_location=device,weights_only=False)
     if ck['kind'] != CONTRACT:raise ValueError('Not a CSS diffusion checkpoint')
     sig=ck['signature'];cfg=TreeConfig(**sig['model']);kernel=Kernel(**sig['kernel']).to(device)
+    from .visual import BOUNDARY_CONTRACT
+    if cfg.semantic and sig['model'].get('abstraction_contract')!=BOUNDARY_CONTRACT:
+        raise ValueError('Old occupancy-only diffusion policy; retrain for occupancy+boundary inputs')
     kernel.check_t(args.start_t)
     net=CSSDenoiser(cfg,kernel.bins,kernel.steps,False).to(device);net.load_state_dict(ck['model']);net.eval()
     rows=list(read_jsonl(args.data));check_rows(rows,'test',sig['settings']['target_source']=='detector')
@@ -424,7 +443,7 @@ def evaluate(args):
                             if sig['settings']['target_source']=='detector' else row['target_elements'])
             target_mask = semantic_masks(target_items,row['viewport'],cfg.size)
             def error(observation):
-                mask=semantic_masks(elements(observation['current'],observation['current_boxes'],row['viewport']),row['viewport'],cfg.size)
+                mask=semantic_masks(elements(observation['current'],observation['current_boxes'],row['viewport'],observation.get('current_clip_boxes')),row['viewport'],cfg.size)
                 return abstraction_error(target_mask,mask)
             score=error(current);initial_score=score
             def reached(value):return threshold >= 0 and value is not None and value <= threshold
@@ -448,14 +467,18 @@ def evaluate(args):
             seconds=time.perf_counter()-started
             ids=[n['id'] for n in row['current']['nodes'][1:]]
             def geometry(observation):return sum(iou(observation['current_boxes'][i],row['current_boxes'][i]) for i in ids)/len(ids)
-            result={'id':row['id'],'initial_geometry_iou':geometry(initial),'final_geometry_iou':geometry(current),
+            # No hierarchy conversion: final metrics describe the current DOM.
+            current={**current,'current_boxes':browser.tagged_boxes([n['id'] for n in row['current']['nodes'][1:]])}
+            current['current_boxes'][row['current']['nodes'][0]['id']]=[0,0,*row['viewport']]
+            result={'id':row['id'],'failed':False,'error':None,
+                    'initial_geometry_iou':geometry(initial),'final_geometry_iou':geometry(current),
                     'repair_seconds':seconds,'reverse_steps':len(trace),'max_reverse_steps':args.start_t,
                     'initial_abstract_error':initial_score,'final_abstract_error':score,
                     'stop_reason':stop_reason,'abstract_goal_reached':reached(score),'trace':trace}
             (folder/'repaired.html').write_text(browser.page.content())
             browser.page.screenshot(path=str(folder/'repaired.png'),animations='disabled')
             results.append(result);write_jsonl(out/'results.jsonl',results);print(result['id'],result['final_geometry_iou'],flush=True)
-    write_json(out/'summary.json',{'n':len(results),**{k:sum(r[k] for r in results)/len(results) for k in
+    write_json(out/'summary.json',{'n':len(results),'failed':sum(r['failed'] for r in results),**{k:sum(r[k] for r in results)/len(results) for k in
                ('initial_geometry_iou','final_geometry_iou','repair_seconds','reverse_steps','abstract_goal_reached')},
                'abstract_goal_threshold':threshold,'goal_metric':'semantic-union-error-v1',
                'warning':'Controlled quantized CSS corruption benchmark, not end-to-end VLM HTML repair. Timing excludes initial corruption/render and final evaluation.'})

@@ -8,7 +8,7 @@ import json
 
 from .tree_edits import FIELDS, validate_edit
 
-CONTRACT = 'css-owner-tree-v2'
+CONTRACT = 'css-owner-tree-v3-gap'
 
 # Only embedded stylesheets are editable. External sheets keep participating in
 # browser layout. Group rules preserve their index paths when values change.
@@ -78,6 +78,8 @@ def read(browser, tree, html=None, fixed=False):
 
 def execute(browser, owners, edit):
     index, field, value, priority = validate_edit(edit, len(owners))
+    from .explicit_html import check_explicit_edit
+    check_explicit_edit(browser,owners[index].get('matches',[]),field,value)
     browser.page.evaluate(r'''({owner,field,value,priority})=>{
       let style,sheet,el;
       if(owner.kind==='inline') {

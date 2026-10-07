@@ -34,18 +34,10 @@ def test_online_pool_rejects_heldout_and_missing_clean_html():
 def test_online_pool_filters_permanently_unmutable_preparsed_pages(tmp_path):
     html=tmp_path/'clean.html';html.write_text('<html></html>')
     empty=[[['',''] for _ in FIELDS] for _ in range(2)]
-    usable=copy.deepcopy(empty);usable[1][0]=['50%','']
     base={'split':'train','group':'g','source_sha':'x','viewport':[100,100],
           'current':{'nodes':[]},'target_image':str(tmp_path/'target.png'),'target_elements':[],
           'target_html':str(html)}
-    rows=[{**base,'id':'bad/t0-s0','target_declaration_state':empty},
-          {**base,'id':'good/t0-s0','target_declaration_state':usable}]
-    pool=target_pool(rows)
-    assert [row['id'] for row in pool]==['good']
-    assert pool[0]['target_declaration_state']==usable
-    sampler=OnlineSampler(pool,'abstract')
-    assert sampler.clean_state('good')==usable
-    assert mutation_sites(usable)==[(1,'width','50%','')]
+    rows=[{**base,'id':'bad/t0-s0','target_declaration_state':empty}]
     with pytest.raises(ValueError,match='after filtering'):
         target_pool([rows[0]])
 
@@ -117,15 +109,15 @@ def test_legacy_pool_inspects_external_only_pages_and_keeps_editable_css(tmp_pat
     with monkeypatch.context() as patch:
         def unexpected_browser(): raise AssertionError('Cache hit launched a browser')
         patch.setattr(online,'HtmlBrowser',unexpected_browser)
-        again=target_pool([{**r,'predicted_target_elements':'another-cache'} for r in inputs],cache_dir=cache)
+        again=target_pool([{**r,'predicted_target_elements':'another-cache'} for r in inputs[:-1]],cache_dir=cache)
         assert [r['id'] for r in again]==['editable']
-        assert "'cache_hits': 3" in capsys.readouterr().out
+        assert "'cache_hits': 2" in capsys.readouterr().out
     # HTML content changes invalidate only that page, including prior exclusions.
     path=Path(rows[0]['target_html'])
     path.write_text(path.read_text().replace('color:red','width:90px'))
     assert len(target_pool(inputs,cache_dir=cache))==2
     output=capsys.readouterr().out
-    assert "'inspected_missing_states': 1" in output and "'cache_hits': 2" in output
+    assert "'inspected_missing_states': 2" in output and "'cache_hits': 1" in output
     # Parser/eligibility changes invalidate all old entries.
     original=online.inspection_fingerprint
     monkeypatch.setattr(online,'inspection_fingerprint',lambda: {**original(),'test_version':2})

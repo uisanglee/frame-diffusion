@@ -57,7 +57,7 @@ def test_token_ce_gradient_and_checkpoint(tmp_path):
     net=TreePolicy(cfg,False)
     tree={'version':1,'nodes':[node('root',None,'page'),node('a','root','card')]}
     batch=visual_batch([current_features(tree,{'root':[0,0,100,100],'a':[0,0,50,50]},[100,100],8)],'cpu')
-    image=torch.randn(1,4,32,32)
+    image=torch.randn(1,8,32,32)
     loss,count=net.loss(batch,image,image,[empty_state(2)],[[1,'width','50%','']])
     assert torch.isfinite(loss) and count==8
     labels=torch.tensor([net.tokenizer.encode([1,'width','50%',''],2)])

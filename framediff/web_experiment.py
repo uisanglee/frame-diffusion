@@ -666,7 +666,7 @@ def evaluate_pages(args):
         lines += ['', 'Visual-policy comparison: n counts page × repeat trials, not independent pages.',
                   'Target abstraction/encoding is included in repair timing; model startup and final evaluation are excluded.',
                   'Pipeline timing also includes shared initial generation and DOM preparation. See repair/timing-summary.json.',
-                  'Visual policies use image feedback without target-box scoring or fixed plans; failed rollouts retain initial HTML.']
+                  'Visual policies retain DOM parent relations throughout repair. Failed rollouts retain the last available HTML and remain marked failed; failures before a rollout result is available retain initial HTML.']
     if any(r.get('uses_reference_text') for r in records):
         lines += ['', 'Design2Code Self-Revision condition: `initial` and `design2code-self-revision` use text extracted from reference HTML.',
                   'This oracle-text input is recorded as `uses_reference_text=true`; target boxes and reference CSS are not provided.']

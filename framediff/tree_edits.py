@@ -1,7 +1,7 @@
 """Typed CSS subtree replacements, independent of rendered-image distance.
 
 Reference: revalo/tree-diffusion@e8b29f2, td/samplers/mutator.py.
-Our restricted tree has fixed DOM nodes and six editable declaration children.
+Our restricted tree has fixed DOM nodes and eight editable declaration children.
 No claim of minimum image distance, full HTML synthesis, or generic CSS parsing.
 """
 import copy
@@ -15,14 +15,44 @@ from .ir import read_json, read_jsonl, write_json, write_jsonl
 from .visual import NUMERIC_FIELDS, elements
 from .web_experiment import digest, guard_run
 
-CONTRACT = 'css-declaration-tree-v1'
-FIELDS = tuple(NUMERIC_FIELDS)
+CONTRACT = 'css-declaration-tree-v2-gap'
+# Use longhands: gap:10px 20px becomes two independently editable slots.
+# Legacy numeric-head policies retain their original NUMERIC_FIELDS contract.
+FIELDS = (*NUMERIC_FIELDS, 'row-gap', 'column-gap')
+NONNEGATIVE_FIELDS = ('width', 'height', 'row-gap', 'column-gap')
 UNITS = ('px', '%', 'em', 'rem', 'vw', 'vh', 'vmin', 'vmax', 'ch', 'ex', 'cm', 'mm', 'in', 'pt', 'pc', 'q')
 KEYWORDS = ('auto', 'inherit', 'initial', 'unset', 'revert', 'revert-layer')
 MAX_VALUE = 32
 
 
+def explicit_value_valid(value, minimum):
+    """A normalized border-box size must remain an explicit px declaration."""
+    import math
+    try: number=float(value[:-2]) if value.endswith('px') else 0. if value=='0' else float('nan')
+    except (ValueError,TypeError): return False
+    return math.isfinite(number) and number+1e-6>=minimum
+
+
+def bounded_px_prefix(value, minimum):
+    """Whether this character prefix has a valid completion within MAX_VALUE.
+
+    In particular, do not enter `5p` when the minimum is 10, or a decimal
+    branch whose entire attainable interval lies below the border floor.
+    """
+    if len(value)>MAX_VALUE:return False
+    if 'p' in value:
+        number,unit=value.split('p',1)
+        return unit in ('','x') and len(number)+2<=MAX_VALUE and value_valid(number+'px','width') and explicit_value_valid(number+'px',minimum)
+    if not re.fullmatch(r'\+?\d*(?:\.\d*)?',value):return False
+    remaining=MAX_VALUE-2-len(value)
+    if remaining<0:return False
+    maximum=value+'9'*remaining
+    return bool(re.search(r'\d',maximum)) and explicit_value_valid(maximum+'px',minimum)
+
+
 def keywords(field):
+    if field in ('row-gap','column-gap'):
+        return tuple(k for k in KEYWORDS if k!='auto') + ('normal',)
     return KEYWORDS + (('min-content', 'max-content', 'fit-content') if field in ('width', 'height') else ())
 
 
@@ -32,14 +62,14 @@ def value_valid(value, field):
     m = re.fullmatch(r'([+-]?(?:\d+(?:\.\d*)?|\.\d+))([a-z%]*)', value)
     if not m: return False
     number, unit = m.groups()
-    if field in ('width', 'height') and float(number) < 0: return False
+    if field in NONNEGATIVE_FIELDS and float(number) < 0: return False
     return unit in UNITS or (not unit and float(number) == 0)
 
 
 def value_prefix(value, field):
     if len(value) > MAX_VALUE: return False
     if any(k.startswith(value) for k in keywords(field)): return True
-    sign = r'[+]?' if field in ('width', 'height') else r'[+-]?'
+    sign = r'[+]?' if field in NONNEGATIVE_FIELDS else r'[+-]?'
     if re.fullmatch(sign + r'\d*(?:\.\d*)?', value):
         return len(value) < MAX_VALUE or value_valid(value, field)
     m = re.fullmatch(sign + r'(?:\d+(?:\.\d*)?|\.\d+)([a-z%]+)', value)
@@ -132,6 +162,8 @@ def current_state(browser, tree):
 def execute(browser, tree, edit):
     """Mutate one declaration of the already loaded document, preserve cascade."""
     node, field, value, priority = validate_edit(edit, len(tree['nodes']))
+    from .explicit_html import check_explicit_edit
+    check_explicit_edit(browser,[tree['nodes'][node]['id']],field,value)
     browser.page.evaluate('''({id,field,value,priority})=>{
       const e=[...document.querySelectorAll('[data-fd-id]')].find(e=>e.getAttribute('data-fd-id')===id);
       if(!e)throw new Error('Missing edit target');
@@ -190,7 +222,7 @@ def prepare(args):
                     if stylesheets and len(target['owners'])>config['max_css_owners']:
                         raise ValueError(f"CSS owner count {len(target['owners'])} exceeds max_css_owners={config['max_css_owners']}")
                     asset_hashes[clean['current_html']] = digest(clean['current_html'])
-                    target_elements = elements(clean['current'], clean['current_boxes'], clean['viewport'])
+                    target_elements = elements(clean['current'], clean['current_boxes'], clean['viewport'],clean.get('current_clip_boxes'))
                 except Exception as exc:
                     failures.append({'id':page_id,'error':str(exc)})
                     if 'crash' in str(exc).lower() or 'closed' in str(exc).lower(): browser.reset_context()
@@ -258,7 +290,7 @@ class EditTokenizer:
         text = [f'N{node}',field] + (['SET',*value,'IMPORTANT' if priority else 'NORMAL'] if value else ['REMOVE']) + ['EOS']
         return [self.ids[t] for t in text]
 
-    def allowed(self, prefix, node_count, state=None):
+    def allowed(self, prefix, node_count, state=None, size_limits=None):
         p = [self.tokens[i] for i in prefix]
         if not p: choices = [f'N{i}' for i in range(1,min(node_count,self.max_nodes))]
         elif len(p)==1: choices = list(FIELDS)
@@ -283,6 +315,14 @@ class EditTokenizer:
                 priority=state[int(p[0][1:])][FIELDS.index(p[1])][1]
                 forbidden='NORMAL' if priority else 'IMPORTANT'
                 choices=[t for t in choices if t!=forbidden]
+        if len(p)>=2:
+            minimum=(size_limits or {}).get(int(p[0][1:]),{}).get(p[1])
+            if minimum is not None:
+                if len(p)==2:choices=[c for c in choices if c=='SET']
+                elif p[2]=='SET' and p[-1] not in ('NORMAL','IMPORTANT','EOS'):
+                    value=''.join(p[3:])
+                    choices=[c for c in choices if (explicit_value_valid(value,minimum)
+                             if c in ('NORMAL','IMPORTANT') else bounded_px_prefix(value+c,minimum))]
         return [self.ids[t] for t in choices]
 
     def decode(self, tokens, node_count):

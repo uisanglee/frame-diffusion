@@ -70,6 +70,7 @@ def build(args):
     out=Path(args.out).resolve()
     config={'kind':'visual-data-v7-cached-css-corruptions','contract':CONTRACT,'action_contract':ACTION_CONTRACT,
             'sources':sources,'settings':{k:v for k,v in vars(args).items() if k not in ('out','resume')}}
+    if any(r.get('hierarchy') for r in sources):raise ValueError('Use original parent-preserving HTML, not flat manifests')
     guard_run(out,config,args.resume)
     policy=[];detection=[];pages=[];errors=[]
     with HtmlBrowser() as browser:
@@ -89,7 +90,9 @@ def build(args):
                 if asset.exists():raw=embed_placeholder(raw,asset)
                 dom=browser.snapshot(raw,viewport,work/'target.png',args.max_nodes-1)
                 tree,target_boxes,_=dom_tree(dom);annotate(browser,tree)
-                target_elements=elements(tree,target_boxes,viewport)
+                from .explicit_html import feedback_metadata
+                target_feedback=feedback_metadata(browser,tree)
+                target_elements=elements(tree,target_boxes,viewport,target_feedback.get('current_clip_boxes'))
                 min_elements=getattr(args,'min_elements',1)
                 if len(target_elements)<min_elements:raise ValueError(f'Only {len(target_elements)} visible abstraction elements')
                 source_mae=None
@@ -107,20 +110,22 @@ def build(args):
                 base.update(contract=CONTRACT,action_contract=ACTION_CONTRACT,viewport=viewport,target_image=str(work/'target.png'),
                             target_abstract=str(work/'target-abstract.png'),
                             teacher_strategy='unlabeled-css-corruption-v1',target_elements=target_elements)
-                abstract_image(elements(tree,target_boxes,viewport),viewport,args.abstract_size).save(base['target_abstract'])
+                abstract_image(target_elements,viewport,args.abstract_size).save(base['target_abstract'])
                 def observe():
                     boxes=browser.tagged_boxes(ids);boxes[root]=[0,0,*viewport];return boxes
                 def save_example(name,current_html,boxes,corruption=None):
                     current_tree=refresh_geometry(tree,boxes)
-                    screenshot=work/f'{name}.png';browser.page.screenshot(path=str(screenshot),animations='disabled')
+                    from .explicit_html import feedback_screenshot
+                    screenshot=work/f'{name}.png';feedback_screenshot(browser,path=str(screenshot),animations='disabled')
                     browser.screenshots+=1
                     abstract=work/f'{name}-abstract.png'
-                    labels=elements(tree,boxes,viewport)
+                    feedback=feedback_metadata(browser,tree)
+                    labels=elements(tree,boxes,viewport,feedback.get('current_clip_boxes'))
                     abstract_image(labels,viewport,args.abstract_size).save(abstract)
                     html_path=work/f'{name}.html';html_path.write_text(current_html)
                     record={**base,'id':source['id']+'/'+name,'current':current_tree,'current_boxes':copy.deepcopy(boxes),
                         'current_image':str(screenshot),'current_abstract':str(abstract),'current_html':str(html_path),
-                        'corruption_edit':corruption}
+                        'corruption_edit':corruption,**feedback}
                     local_policy.append(record)
                     local_detection.append({**base,'id':record['id'],'image':str(screenshot),'elements':labels})
                 browser.load(tagged,viewport);save_example('clean',tagged,target_boxes)
@@ -136,7 +141,9 @@ def build(args):
                             field=rng.choice(fields)
                             value=rng.choice(ACTION_VALUES[field]);nid=tree['nodes'][i]['id']
                             try:browser.edit_visual_action(html,viewport,nid,field,value)
-                            except ValueError:continue
+                            except Exception as exc:
+                                if isinstance(exc,ValueError) or 'Explicit ' in str(exc):continue
+                                raise
                             candidate_html=browser.page.content();candidate=observe()
                             # Corruption validity is syntactic/executable, not
                             # "farther from target pixels". The teacher will diff

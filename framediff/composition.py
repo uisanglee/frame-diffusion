@@ -292,6 +292,7 @@ def evaluate(args):
                 else:
                     html,stats,_ = rollout(browser,initial,row['current'],row['viewport'],row['target_image'],policy,
                         parser,args.threshold,args.steps,oracle_elements=row['target_elements'] if args.oracle else None)
+                    if stats.get('failed'):error=stats.get('error') or 'Rollout failed'
                 # Replay applied actions after timing. No target state reaches the policy.
                 browser.load(initial,row['viewport'])
                 actions = [h['action'] for h in stats['history'] if h.get('action') is not None][:stats['actions']]
@@ -299,7 +300,7 @@ def evaluate(args):
                     css_owners.execute(browser,row['css_owners'],action)
                     states.append(css_owners.read(browser,row['current'])['state'])
                     boxes.append(observe(browser,row['current'],row['viewport']))
-                html = browser.page.content()
+                html=browser.page.content()
             except Exception as exc:
                 error = str(exc)
                 # Consistent retained-initial failure result, included in denominator.
@@ -323,7 +324,7 @@ def evaluate(args):
     write_json(out/'summary.json',summary)
     lines = ['# Synthetic Action Composition Benchmark', '',
              'Known-reverse sanity check (not model performance).' if args.sanity else ('Oracle target masks.' if args.oracle else 'Model evaluation.'),
-             'Fixed-budget final states; failed trials retain initial state. Variants share base scenes.', '',
+             'Fixed-budget final states with original DOM parents retained. Replay failures retain initial state. Variants share base scenes.', '',
              '| Condition | n | failed | improving ↑ | full geometry recovery ↑ | initial IoU | final IoU ↑ | seconds ↓ |',
              '|---|---:|---:|---:|---:|---:|---:|---:|']
     for key,s in summary.items():

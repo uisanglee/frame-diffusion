@@ -2,6 +2,8 @@
 
 
 def add_parsers(sub):
+    from .explicit_html import add_parser as add_explicit_parser
+    add_explicit_parser(sub)
     from .css_diffusion_experiment import add_parsers as add_css_diffusion_parsers
     add_css_diffusion_parsers(sub)
     from .composition import add_parsers as add_composition_parsers
@@ -18,6 +20,7 @@ def add_parsers(sub):
     p.add_argument('--rendered',required=True);p.add_argument('--out',required=True)
     p.add_argument('--resume',action='store_true');p.add_argument('--seed',type=int,default=90210)
     p.add_argument('--max-noise',type=int,default=4);p.add_argument('--samples-per-page',type=int,default=1)
+    p.add_argument('--observation-size',type=int,default=384,help='Resolution for visible-corruption screening')
     p=sub.add_parser('visual-import-webui',help='Build domain-disjoint WebUI manifests and optional native AX detector labels')
     p.add_argument('--root',required=True);p.add_argument('--out',required=True);p.add_argument('--view',default='default_1280-720')
     p.add_argument('--train-count',type=int,default=600);p.add_argument('--val-count',type=int,default=200)
@@ -96,6 +99,9 @@ def add_parsers(sub):
 
 
 def run(args):
+    if args.command=='visual-explicit-html':
+        from .explicit_html import run as run_explicit
+        return run_explicit(args)
     if args.command.startswith('visual-css-diffusion-'):
         from .css_diffusion_experiment import run as run_css_diffusion
         return run_css_diffusion(args)

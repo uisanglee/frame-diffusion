@@ -27,15 +27,17 @@ from .ir import read_jsonl
 from .tree_edits import FIELDS, CONTRACT, current_state, execute, extract, repair_path, value_valid
 from .web_experiment import digest
 
-ONLINE_CONTRACT = 'online-css-existing-values-v3'
-# Cache compatibility version for the inspection semantics introduced in
-# commit 91906fa. Error handling below does not change how a valid state is
-# parsed, so keep the existing 2,800+ server entries addressable.
-INSPECTION_LOGIC_VERSION = 'd198b6fbcb5cfa3458e8efb14e415b76e920bc8a177521bbd01ae3850d540510'
+ONLINE_CONTRACT = 'online-css-visible-values-v5'
+# Bump when eligibility semantics change; old syntax-only caches are invalid.
+INSPECTION_LOGIC_VERSION = 'visible-candidates-v1-four-probes'
+PROBES_PER_SITE = 4
+ABSTRACTION_EPS = 1e-6
 
 
 def mutation_sites(state):
     """Editable, present declarations eligible for value replacement."""
+    if any(len(props)!=len(FIELDS) for props in state):
+        raise ValueError('Old CSS declaration fields; reprepare labels with row-gap/column-gap support')
     return [(node,field,value,priority)
             for node in range(1,len(state))
             for field,(value,priority) in zip(FIELDS,state[node])
@@ -47,7 +49,7 @@ def inspection_fingerprint():
     root = Path(__file__).parent
     return {'tree_online.py': INSPECTION_LOGIC_VERSION,
             **{name: digest(root/name) for name in
-               ('tree_edits.py','css_owners.py','html_bridge.py','browser.py')},
+               ('tree_edits.py','css_owners.py','html_bridge.py','browser.py','visual.py','explicit_html.py')},
             'playwright': version('playwright')}
 
 
@@ -59,6 +61,7 @@ def inspection_cache_entry(directory, target, html, fingerprint):
     signature = {'code': fingerprint, 'html': hashlib.sha256(html.encode()).hexdigest(),
                  'viewport': target['viewport'],
                  'ids': [n['id'] for n in target['current']['nodes']],
+                 'observation_size':target.get('corruption_observation_size',384),
                  'owners': target.get('css_owners')}
     key = hashlib.sha256(json.dumps(signature, sort_keys=True).encode()).hexdigest()
     directory = Path(directory)
@@ -73,19 +76,69 @@ def inspection_cache_entry(directory, target, html, fingerprint):
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
-def save_inspection(path, state, error=None):
+def save_inspection(path, state, error=None, **metadata):
     if path is None: return
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, suffix='.tmp', delete=False) as stream:
             temporary = Path(stream.name)
-            json.dump({'state': state, 'error': error}, stream, allow_nan=False)
+            json.dump({'state': state, 'error': error, **metadata}, stream, allow_nan=False)
         temporary.replace(path)
     finally:
         if temporary is not None: temporary.unlink(missing_ok=True)
 
 
-def target_pool(rows, manifest=None, cache_dir=None):
+def abstraction(browser, tree, viewport, size):
+    """Same clipped occupancy+boundary representation used by the policy."""
+    from .visual import elements,semantic_masks
+    from .explicit_html import current_clip_boxes
+    ids=[n['id'] for n in tree['nodes'][1:]]
+    boxes=browser.tagged_boxes(ids);boxes[tree['nodes'][0]['id']]=[0,0,*viewport]
+    items=elements(tree,boxes,viewport,current_clip_boxes(browser,ids))
+    return semantic_masks(items,viewport,size),boxes,items
+
+
+def changed(a,b):
+    return bool((a-b).abs().max().item()>ABSTRACTION_EPS)
+
+
+def inspect_candidates(browser,target,html):
+    """Find witnessed visible edits; finite probing is not exhaustive CSS search."""
+    from . import css_owners
+    from .visual import annotate
+    tree=copy.deepcopy(target['current']);viewport=target['viewport']
+    browser.load(html,viewport);annotate(browser,tree)
+    owner_mode='css_owners' in target
+    if owner_mode:
+        parsed=css_owners.read(browser,tree)
+        if parsed['owners']!=target['css_owners']:raise ValueError('CSS owner identity changed')
+        state=parsed['state']
+    else:state=current_state(browser,tree)
+    def apply(edit):
+        return css_owners.execute(browser,target['css_owners'],edit) if owner_mode else execute(browser,tree,edit)
+    before,boxes,items=abstraction(browser,tree,viewport,target.get('corruption_observation_size',384))
+    candidates=[]
+    for site in mutation_sites(state):
+        node,field,value,priority=site
+        rng=random.Random(hashlib.sha256(f'{node}:{field}:{value}'.encode()).digest())
+        for _ in range(PROBES_PER_SITE):
+            edit=sample_mutation(state,viewport,rng,explicit='data-tuide-explicit-id' in html,sites=[site])
+            try:
+                apply(edit)
+                after,new_boxes,_=abstraction(browser,tree,viewport,target.get('corruption_observation_size',384))
+                visible=new_boxes!=boxes and changed(before,after)
+            except ValueError as exc:
+                if 'Explicit ' not in str(exc):raise
+                visible=False
+            finally:apply([node,field,value,priority])
+            if visible:
+                candidates.append(edit);break
+    return state,dict(visible_candidates=candidates,target_elements=items,
+                     visual_classes=[n.get('visual_class',0) for n in tree['nodes']])
+
+
+def target_pool(rows, manifest=None, cache_dir=None, observation_size=384):
+    if observation_size<1:raise ValueError('Invalid corruption observation size')
     if cache_dir is None and manifest:
         cache_dir = Path(manifest).resolve().parent/'.online-target-cache'
     pages = {p['id']:p for p in read_jsonl(manifest)} if manifest else {}
@@ -94,6 +147,7 @@ def target_pool(rows, manifest=None, cache_dir=None):
     excluded = 0
     inspection_errors = 0
     for row in rows:
+        if row.get('hierarchy'):raise ValueError('Flat targets are retired; use original parent-preserving HTML')
         if row['split'] != 'train': raise ValueError('Online corruption only accepts training pages')
         page_id = row['id'].rsplit('/',1)[0]
         if page_id in seen: continue
@@ -111,7 +165,7 @@ def target_pool(rows, manifest=None, cache_dir=None):
         for key in ('predicted_target_elements','parser_provenance','parser_sha','css_owners',
                     'target_declaration_state'):
             if key in row: target[key] = row[key]
-        target.update(id=page_id,target_html=str(Path(html).resolve()))
+        target.update(id=page_id,target_html=str(Path(html).resolve()),corruption_observation_size=observation_size)
         clean_state=row.get('target_declaration_state')
         # Stylesheet preparation already parsed the clean program. Excluding
         # pages with no legal replacement sites here prevents unlucky batches
@@ -120,19 +174,17 @@ def target_pool(rows, manifest=None, cache_dir=None):
             excluded += 1
             continue
         targets[page_id] = target
-    # Older prepared corpora lack target_declaration_state. Missing metadata
-    # must trigger inspection, not bypass the eligibility filter. Inspect each
-    # unique page once and pass the recovered state to the online workers.
+    # Even preparsed declarations need execution probes. Cache accepted and
+    # excluded pages, including witnessed edits, independently of model scale.
     browser = None
     inspected = 0
     cache_hits = 0
     fingerprint = inspection_fingerprint() if cache_dir is not None else None
     try:
         for page_id, target in list(targets.items()):
-            if target.get('target_declaration_state') is not None: continue
             html = Path(target['target_html']).read_text()
             with inspection_cache_entry(cache_dir, target, html, fingerprint) as entry:
-                state = None; error = None; cached = False
+                state = None; error = None; cached = False;metadata={}
                 if entry is not None and entry.exists():
                     try:
                         saved = json.loads(entry.read_text())
@@ -142,6 +194,8 @@ def target_pool(rows, manifest=None, cache_dir=None):
                         else:
                             if not isinstance(state,list): raise ValueError('Invalid cached state')
                             mutation_sites(state)
+                            metadata={k:saved[k] for k in ('visible_candidates','target_elements','visual_classes')}
+                            if not isinstance(metadata['visible_candidates'],list):raise ValueError('Invalid candidate cache')
                         cached = True
                     except (ValueError, KeyError, TypeError): state = None
                 if cached:
@@ -151,39 +205,38 @@ def target_pool(rows, manifest=None, cache_dir=None):
                     try:
                         if browser is None: browser = HtmlBrowser().__enter__()
                         else: browser.reset_context()
-                        browser.load(html, target['viewport'])
-                        if 'css_owners' in target:
-                            from . import css_owners
-                            parsed = css_owners.read(browser, target['current'])
-                            if parsed['owners'] != target['css_owners']:
-                                raise ValueError(f'CSS owner identity changed: {page_id}')
-                            state = parsed['state']
-                        else:
-                            state = current_state(browser, target['current'])
+                        state,metadata=inspect_candidates(browser,target,html)
                     except Exception as exc:
                         error = f'{type(exc).__name__}: {exc}'
-                    save_inspection(entry, state, error)
+                    # Transient browser failures must be retried next run, not
+                    # persisted as permanently unusable source pages.
+                    if error is None:save_inspection(entry,state,**metadata)
             if error is not None:
                 del targets[page_id]
                 excluded += 1
                 inspection_errors += 1
-            elif not mutation_sites(state):
+            elif not metadata['visible_candidates']:
                 del targets[page_id]
                 excluded += 1
             else:
                 target['target_declaration_state'] = state
+                target.update(metadata)
+                for node,label in zip(target['current']['nodes'],metadata['visual_classes']):node['visual_class']=label
             processed = inspected + cache_hits
             if processed == 1 or processed % 100 == 0:
                 print({'online_target_inspection': inspected, 'cache_hits': cache_hits,
                        'excluded_no_editable_css': excluded-inspection_errors,
+                       'excluded_no_visible_candidate':excluded-inspection_errors,
                        'excluded_inspection_error': inspection_errors}, flush=True)
     finally:
         if browser is not None: browser.__exit__(None,None,None)
     print({'online_target_filter': {'pages': len(seen), 'kept': len(targets),
+          'visible_candidates':sum(len(t['visible_candidates']) for t in targets.values()),
           'excluded_no_editable_css': excluded-inspection_errors,
+          'excluded_no_visible_candidate':excluded-inspection_errors,
           'excluded_inspection_error': inspection_errors, 'inspected_missing_states': inspected,
           'cache_hits': cache_hits, 'cache_dir': str(cache_dir) if cache_dir is not None else None}}, flush=True)
-    if not targets: raise ValueError('Empty online target pool after filtering pages without supported existing CSS values')
+    if not targets: raise ValueError('Empty online target pool after filtering pages without witnessed abstraction-changing edits')
     # Stable order makes sample indices independent of repeated offline examples.
     return [targets[k] for k in sorted(targets)]
 
@@ -197,18 +250,22 @@ def task_seed(seed, index):
     return int(hashlib.sha256(f'{ONLINE_CONTRACT}:{seed}:{index}'.encode()).hexdigest()[:16],16)
 
 
-def sample_mutation(state, viewport, rng):
+def sample_mutation(state, viewport, rng, explicit=False, sites=None):
     """Replace an existing value in place, preserving its owner and priority.
 
     Sample uniformly over supported, present owner/property pairs. Absent fields
     are not mutation sites: inserting an override would teach its removal.
     Browser probes subsequently reject shadowed or geometrically inert edits.
     """
-    existing=mutation_sites(state)
+    existing=mutation_sites(state) if sites is None else sites
     if not existing: raise ValueError('No supported existing CSS values to corrupt')
     node,field,old,priority=rng.choice(existing)
-    axis=viewport[0 if field in ('width','margin-left','margin-right') else 1]
-    if rng.random()<.2:
+    axis=viewport[0 if field in ('width','margin-left','margin-right','column-gap') else 1]
+    if field in ('row-gap','column-gap'):
+        value=f'{round(rng.uniform(0,.15)*axis,3):g}px'
+        if value==old:value='1px' if old!='1px' else '2px'
+        return [node,field,value,priority]
+    if rng.random()<.2 and not explicit:
         value=f'{rng.randint(5,95) if field in ("width","height") else rng.randint(-15,15)}%'
     else:
         value=f'{round(rng.uniform(.01,.8)*axis if field in ("width","height") else rng.uniform(-.15,.15)*axis,3):g}px'
@@ -256,6 +313,12 @@ class OnlineSampler:
                 browser=self.browser;tree=target['current'];viewport=target['viewport']
                 browser.page.set_default_timeout(10000)
                 html=self.html(target['target_html'])
+                if 'visible_candidates' not in target:
+                    inspected,metadata=inspect_candidates(browser,target,html)
+                    target.update(metadata,target_declaration_state=inspected)
+                    for node,label in zip(tree['nodes'],metadata['visual_classes']):node['visual_class']=label
+                    self.clean_state.cache_clear()
+                if not target['visible_candidates']:raise ValueError('No visible corruption candidates')
                 clean=self.clean_state(target['id'])
                 browser.load(html,viewport)
                 from . import css_owners
@@ -267,22 +330,35 @@ class OnlineSampler:
                 def apply(edit):
                     return css_owners.execute(browser,owners,edit) if owner_mode else execute(browser,tree,edit)
                 def geometry():return browser.tagged_boxes([n['id'] for n in tree['nodes'][1:]])
-                clean_boxes=geometry() if owner_mode else None
+                size=target.get('corruption_observation_size',384)
+                clean_mask,clean_boxes,_=abstraction(browser,tree,viewport,size)
+                frame=clean_mask
                 state=state_now();noise=[];probe_rejections=0
                 for _ in range(rng.randint(1,self.max_noise)):
                     if self.stop is not None and self.stop.is_set(): raise RuntimeError('Online producer stopped')
-                    for trial in range(24 if owner_mode else 1):
-                        mutation=sample_mutation(state,viewport,rng)
+                    for trial in range(24):
+                        eligible={(e[0],e[1]) for e in target['visible_candidates']}
+                        sites=[s for s in mutation_sites(state) if (s[0],s[1]) in eligible]
+                        mutation=sample_mutation(state,viewport,rng,explicit='data-tuide-explicit-id' in html,sites=sites)
+                        # Witness edits ensure even a narrow responsive range
+                        # gets tried; their effect is rechecked in this state.
+                        if trial>=12:
+                            mutation=list(rng.choice(target['visible_candidates']))
+                        old=state[mutation[0]][FIELDS.index(mutation[1])]
                         if owner_mode:
                             # Preserve cascade priority when mutating an existing
                             # declaration. Do not promote a shadowed rule to winner.
                             old=state[mutation[0]][FIELDS.index(mutation[1])]
                             if mutation[2]: mutation[3]=old[1]
                             before_values=css_owners.computed(browser,owners,mutation);before_boxes=geometry()
-                        apply(mutation)
-                        if owner_mode and (before_values==css_owners.computed(browser,owners,mutation) or before_boxes==geometry()):
+                        try:apply(mutation)
+                        except ValueError as exc:
+                            if 'Explicit ' not in str(exc):raise
+                            probe_rejections+=1;continue
+                        after_mask,after_boxes,_=abstraction(browser,tree,viewport,size)
+                        if not changed(frame,after_mask) or (owner_mode and (before_values==css_owners.computed(browser,owners,mutation) or before_boxes==geometry())):
                             apply([mutation[0],mutation[1],*old]);probe_rejections+=1;continue
-                        state=state_now();noise.append(mutation);break
+                        frame=after_mask;state=state_now();noise.append(mutation);break
                 path=repair_path(state,clean,rng.getrandbits(64))
                 if not path: raise ValueError('Corruption returned to clean program')
                 # Select an intermediate reverse-path state, not only the
@@ -294,29 +370,42 @@ class OnlineSampler:
                 if sorted(remaining)!=sorted(repair_path(state,clean)):
                     raise ValueError('CSS execution changed the symbolic repair path')
                 if not remaining: raise ValueError('Sampled clean state has no next edit')
-                boxes=browser.tagged_boxes([n['id'] for n in tree['nodes'][1:]])
-                if owner_mode and boxes==clean_boxes:raise ValueError('Remaining CSS differences have no visible geometry effect')
-                boxes[tree['nodes'][0]['id']]=[0,0,*viewport]
+                frame,boxes,_=abstraction(browser,tree,viewport,size)
+                if not changed(frame,clean_mask):raise ValueError('Remaining CSS differences have no abstraction effect')
+                # Reversing other edits can make a formerly active declaration
+                # invisible. Do not emit an unobservable next-action label.
+                for teacher in remaining:
+                    old=state[teacher[0]][FIELDS.index(teacher[1])]
+                    apply(teacher)
+                    next_frame,_,_=abstraction(browser,tree,viewport,size)
+                    apply([teacher[0],teacher[1],*old])
+                    if changed(frame,next_frame):break
+                else:raise ValueError('No abstraction-changing reverse label')
                 result={**target,'id':target['id']+f'/online-{index}',
                         'current':refresh_geometry(tree,boxes),'current_boxes':boxes,
                         'declaration_state':state,'target_declaration_state':clean,
-                        'replacement_edit':remaining[0],
+                        'replacement_edit':teacher,
                         'teacher_strategy':css_owners.CONTRACT if owner_mode else CONTRACT,'symbolic_distance':len(remaining),
                         'corruption_contract':ONLINE_CONTRACT}
+                from .explicit_html import feedback_metadata
+                result.update(feedback_metadata(browser,tree))
                 if owner_mode:
                     result['css_owners']=owners
                     result['current_html_text']=browser.page.content()
                 if self.mode=='screenshot':
                     # Bytes travel through a bounded queue, never thousands of
                     # transient files on disk. Target images are never recaptured.
-                    result['current_image']=browser.page.screenshot(animations='disabled')
+                    from .explicit_html import feedback_screenshot
+                    result['current_image']=feedback_screenshot(browser,animations='disabled')
                 result['online']={'index':index,'seed':task_seed(self.seed,index),'retries':attempt,
+                                  'visible_candidate_count':len(target['visible_candidates']),
+                                  'abstraction_max_difference':float((frame-clean_mask).abs().max()),
                                   'corruptions':noise,'reverse_prefix':depth,'path_length':len(path),
                                   'screenshot_captures':int(self.mode=='screenshot'),
                                   'seconds':time.perf_counter()-started,'errors':errors}
                 if owner_mode:
                     result['online'].update(probe_rejections=probe_rejections,
-                        teacher_owner=owners[remaining[0][0]]['kind'],
+                        teacher_owner=owners[teacher[0]]['kind'],
                         rule_mutations=sum(owners[e[0]]['kind']=='rule' for e in noise))
                 return result
             except Exception as exc:
