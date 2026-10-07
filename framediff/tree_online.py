@@ -36,10 +36,13 @@ def mutation_sites(state):
 def target_pool(rows, manifest=None):
     pages = {p['id']:p for p in read_jsonl(manifest)} if manifest else {}
     targets = {}
+    seen = set()
+    excluded = 0
     for row in rows:
         if row['split'] != 'train': raise ValueError('Online corruption only accepts training pages')
         page_id = row['id'].rsplit('/',1)[0]
-        if page_id in targets: continue
+        if page_id in seen: continue
+        seen.add(page_id)
         html = row.get('target_html') or pages.get(page_id,{}).get('html')
         if not html:
             raise ValueError(f'Missing clean HTML for {page_id}; pass --online-targets pages-train.jsonl')
@@ -59,8 +62,40 @@ def target_pool(rows, manifest=None):
         # pages with no legal replacement sites here prevents unlucky batches
         # of permanently unusable pages from terminating online training.
         if clean_state is not None and not mutation_sites(clean_state):
+            excluded += 1
             continue
         targets[page_id] = target
+    # Older prepared corpora lack target_declaration_state. Missing metadata
+    # must trigger inspection, not bypass the eligibility filter. Inspect each
+    # unique page once and pass the recovered state to the online workers.
+    browser = None
+    inspected = 0
+    try:
+        for page_id, target in list(targets.items()):
+            if target.get('target_declaration_state') is not None: continue
+            if browser is None: browser = HtmlBrowser().__enter__()
+            else: browser.reset_context()
+            browser.load(Path(target['target_html']).read_text(), target['viewport'])
+            if 'css_owners' in target:
+                from . import css_owners
+                parsed = css_owners.read(browser, target['current'])
+                if parsed['owners'] != target['css_owners']:
+                    raise ValueError(f'Online target CSS owner identity changed: {page_id}')
+                state = parsed['state']
+            else:
+                state = current_state(browser, target['current'])
+            inspected += 1
+            if not mutation_sites(state):
+                del targets[page_id]
+                excluded += 1
+            else:
+                target['target_declaration_state'] = state
+            if inspected == 1 or inspected % 100 == 0:
+                print({'online_target_inspection': inspected, 'excluded_no_editable_css': excluded}, flush=True)
+    finally:
+        if browser is not None: browser.__exit__(None,None,None)
+    print({'online_target_filter': {'pages': len(seen), 'kept': len(targets),
+          'excluded_no_editable_css': excluded, 'inspected_missing_states': inspected}}, flush=True)
     if not targets: raise ValueError('Empty online target pool after filtering pages without supported existing CSS values')
     # Stable order makes sample indices independent of repeated offline examples.
     return [targets[k] for k in sorted(targets)]

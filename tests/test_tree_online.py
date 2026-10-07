@@ -85,6 +85,30 @@ def corpus(tmp_path):
 
 
 @pytest.mark.browser
+def test_legacy_pool_inspects_external_only_pages_and_keeps_editable_css(tmp_path, capsys):
+    tree={'nodes':[{'id':'__viewport__'},{'id':'fd-0'}]}
+    owners=[{'kind':'root','matches':[]},
+            {'kind':'inline','id':'fd-0','matches':['fd-0']}]
+    base={'split':'train','group':'g','source_sha':'x','viewport':[300,200],
+          'current':tree,'css_owners':owners,'target_elements':[],
+          'target_image':str(tmp_path/'target.png')}
+    rows=[]
+    for name,style in [('external','color:red'),('editable','width:120px')]:
+        path=tmp_path/f'{name}.html'
+        path.write_text(f'<html><head><link rel="stylesheet" href="styles.css"></head>'
+                        f'<body><div data-fd-id="fd-0" style="{style}">Box</div></body></html>')
+        rows.append({**base,'id':name+'/t0-s0','target_html':str(path)})
+    pool=target_pool([rows[0],{**rows[0],'id':'external/t1-s0'},rows[1]])
+    assert [r['id'] for r in pool]==['editable']
+    assert mutation_sites(pool[0]['target_declaration_state'])==[(1,'width','120px','')]
+    output=capsys.readouterr().out
+    assert "'inspected_missing_states': 2" in output
+    assert "'excluded_no_editable_css': 1" in output
+    with pytest.raises(ValueError,match='Empty online target pool'):
+        target_pool([rows[0]])
+
+
+@pytest.mark.browser
 def test_fresh_path_states_and_paired_modalities(corpus):
     pool=target_pool([corpus['train']]);abstract=OnlineSampler(pool,'abstract',max_noise=5)
     raw=OnlineSampler(pool,'screenshot',max_noise=5)
