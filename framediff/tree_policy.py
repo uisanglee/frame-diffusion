@@ -24,6 +24,20 @@ from .web_experiment import digest, guard_run
 
 KIND = 'visual-policy-css-tree-v1'
 
+POLICY_SCALES = {
+    's': {'hidden': 128, 'layers': 3, 'heads': 4},
+    'm': {'hidden': 256, 'layers': 6, 'heads': 8},
+    'l': {'hidden': 512, 'layers': 8, 'heads': 8},
+}
+
+
+def resolve_policy_scale(args):
+    """Resolve a named capacity before checkpoint/config validation."""
+    scale = getattr(args, 'policy_scale', None)
+    if scale:
+        for key, value in POLICY_SCALES[scale].items():
+            setattr(args, key, value)
+
 
 @dataclass
 class TreeConfig:
@@ -274,6 +288,7 @@ def symbolic_policy_metrics(net,rows,target_states,device,predicted,amp):
 
 def train(args):
     from .visual_train import validation_sample, update_early_stopping
+    resolve_policy_scale(args)
     device=select_device(args.device);seed_all(args.seed);torch.set_num_threads(args.cpu_threads)
     if min(args.steps,args.batch_size,args.accumulation,args.eval_every,args.log_every,args.val_samples)<1:
         raise ValueError('Training counts must be positive')
@@ -307,7 +322,7 @@ def train(args):
         signatures['online']={'contract':ONLINE_CONTRACT,'assets':asset_signatures(targets)}
         if cfg.stylesheets and any(r.get('corruption_contract')!=ONLINE_CONTRACT for r in validation):
             raise ValueError('Validation uses old corruption; run prepare_stylesheet_policy.sh for v3 fixed states (reuse target assets/cache)')
-    out=Path(args.out).resolve();settings={k:v for k,v in vars(args).items() if k not in ('out','steps','resume','init_checkpoint')}
+    out=Path(args.out).resolve();settings={k:v for k,v in vars(args).items() if k not in ('out','steps','resume','init_checkpoint','policy_scale')}
     config=asdict(cfg)
     if not cfg.existing_values_only:config.pop('existing_values_only')
     if not cfg.stylesheets:

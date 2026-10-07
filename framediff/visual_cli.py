@@ -45,6 +45,8 @@ def add_parsers(sub):
         else:
             p.add_argument('--mode',choices=['screenshot','abstract'],required=True)
             if name=='visual-tree-train':
+                p.add_argument('--policy-scale',choices=['s','m','l'],
+                               help='TUIDE capacity preset; overrides hidden/layers/heads, leaves data and action space unchanged')
                 p.add_argument('--stylesheets',action='store_true',help='Train CSS owner decoder; requires v2 prepared labels')
                 p.add_argument('--predicted-targets',action='store_true',help='Use frozen detector cache rather than DOM target masks')
                 p.add_argument('--online-corruption',action='store_true',help='Generate fresh CPU-browser corruption/path states during training only')

@@ -9,6 +9,11 @@ rendered=$1
 detector=$2
 run=$3
 policy_run=${POLICY_RUN_DIR:-$run}
+scale_options=()
+if [[ -n "${POLICY_SCALE:-}" ]]; then
+  case "$POLICY_SCALE" in s|m|l) scale_options=(--policy-scale "$POLICY_SCALE");;
+    *) echo 'POLICY_SCALE must be s, m, or l' >&2; exit 2;; esac
+fi
 online=()
 owner_options=()
 case "${CSS_STYLESHEETS:-0}" in
@@ -58,9 +63,10 @@ for head in ${POLICY_HEADS:-replacement}; do
       fi
       if [[ -f "$output/last.pt" ]]; then options=(--resume "$output/last.pt"); fi
       python -m framediff visual-tree-train --train "$train" --val "$val" --out "$output" \
-        --mode "$mode" --device "${DEVICE:-cuda}" "${owner_options[@]}" \
+        --mode "$mode" --device "${DEVICE:-cuda}" "${owner_options[@]}" "${scale_options[@]}" \
         --steps "$steps" --lr "$lr" "${condition[@]}" "${online[@]}" \
         --batch-size "${BATCH_SIZE:-2}" --accumulation "${ACCUMULATION:-4}" \
+        --seed "${SEED:-42}" \
         --val-samples "${VAL_SAMPLES:-2000}" --eval-every "${EVAL_EVERY:-500}" \
         --policy-metric-samples "${POLICY_METRIC_SAMPLES:-128}" \
         --early-stop-patience "${EARLY_STOP_PATIENCE:-10}" --bf16 "${options[@]}"
