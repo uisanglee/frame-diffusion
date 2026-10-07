@@ -257,7 +257,7 @@ class EditTokenizer:
         text = [f'N{node}',field] + (['SET',*value,'IMPORTANT' if priority else 'NORMAL'] if value else ['REMOVE']) + ['EOS']
         return [self.ids[t] for t in text]
 
-    def allowed(self, prefix, node_count):
+    def allowed(self, prefix, node_count, state=None):
         p = [self.tokens[i] for i in prefix]
         if not p: choices = [f'N{i}' for i in range(1,min(node_count,self.max_nodes))]
         elif len(p)==1: choices = list(FIELDS)
@@ -268,6 +268,20 @@ class EditTokenizer:
             value=''.join(p[3:]);field=p[1]
             choices=[c for c in '0123456789.+-%abcdefghijklmnopqrstuvwxyz' if value_prefix(value+c,field)]
             if value_valid(value,field): choices += ['NORMAL','IMPORTANT']
+        if state is not None:
+            # Restrict edits to currently present, supported values. REMOVE is
+            # still a legal action for an existing unwanted declaration.
+            def editable(node,field):
+                value=state[node][FIELDS.index(field)][0]
+                return bool(value) and value_valid(value,field)
+            if not p:
+                choices=[t for t in choices if any(editable(int(t[1:]),f) for f in FIELDS)]
+            elif len(p)==1:
+                choices=[f for f in choices if editable(int(p[0][1:]),f)]
+            elif len(p)>2 and p[2]=='SET':
+                priority=state[int(p[0][1:])][FIELDS.index(p[1])][1]
+                forbidden='NORMAL' if priority else 'IMPORTANT'
+                choices=[t for t in choices if t!=forbidden]
         return [self.ids[t] for t in choices]
 
     def decode(self, tokens, node_count):

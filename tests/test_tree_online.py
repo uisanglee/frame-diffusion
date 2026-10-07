@@ -10,13 +10,18 @@ from framediff.tree_edits import CONTRACT,FIELDS,extract,current_state,execute,r
 from framediff.ir import write_jsonl,read_jsonl
 
 
-def test_mutations_cover_existing_removal_and_absent_insertion():
+def test_mutations_only_replace_existing_supported_values_and_preserve_priority():
     state=[[['',''] for _ in FIELDS] for _ in range(3)]
     state[1][0]=['50%',''];state[1][1]=['calc(100px - 2px)','']
+    state[2][0]=['80px','important']
     rng=random.Random(2);edits=[sample_mutation(state,[500,300],rng) for _ in range(200)]
-    assert any(e==[1,'width','',''] for e in edits)
-    assert any(e[2] and e[1].startswith('margin-') for e in edits)
-    assert not any(e[:2]==[1,'height'] for e in edits)
+    assert {e[0] for e in edits}=={1,2}
+    for node,field,value,priority in edits:
+        old=state[node][FIELDS.index(field)]
+        assert field=='width' and value and value!=old[0]
+        assert priority==old[1]
+    with pytest.raises(ValueError,match='No supported existing'):
+        sample_mutation([[['',''] for _ in FIELDS] for _ in range(3)],[500,300],rng)
     assert task_seed(42,10)==task_seed(42,10)!=task_seed(42,11)
 
 

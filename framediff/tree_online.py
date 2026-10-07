@@ -22,7 +22,7 @@ from .ir import read_jsonl
 from .tree_edits import FIELDS, CONTRACT, current_state, execute, extract, repair_path, value_valid
 from .web_experiment import digest
 
-ONLINE_CONTRACT = 'online-css-path-v1'
+ONLINE_CONTRACT = 'online-css-existing-values-v3'
 
 
 def target_pool(rows, manifest=None):
@@ -61,27 +61,29 @@ def task_seed(seed, index):
 
 
 def sample_mutation(state, viewport, rng):
-    """Mix edits of existing declarations with insertion of absent overrides.
+    """Replace an existing value in place, preserving its owner and priority.
 
-    Removal of existing declarations makes SET necessary during repair. This
-    does not guarantee balanced labels when source pages use only stylesheets.
+    Sample uniformly over supported, present owner/property pairs. Absent fields
+    are not mutation sites: inserting an override would teach its removal.
+    Browser probes subsequently reject shadowed or geometrically inert edits.
     """
-    existing=[];absent=[]
+    existing=[]
     for node in range(1,len(state)):
         for j,field in enumerate(FIELDS):
             value,priority=state[node][j]
-            if value and not value_valid(value,field): continue  # must be restorable
-            (existing if value else absent).append((node,field,value,priority))
-    pools=[p for p in (existing,absent) if p]
-    if not pools: raise ValueError('No grammar-repairable declarations')
-    node,field,old,priority=rng.choice(rng.choice(pools))
-    if old and rng.random()<.25: return [node,field,'','']
+            if value and value_valid(value,field):
+                existing.append((node,field,value,priority))
+    if not existing: raise ValueError('No supported existing CSS values to corrupt')
+    node,field,old,priority=rng.choice(existing)
     axis=viewport[0 if field in ('width','margin-left','margin-right') else 1]
     if rng.random()<.2:
         value=f'{rng.randint(5,95) if field in ("width","height") else rng.randint(-15,15)}%'
     else:
         value=f'{round(rng.uniform(.01,.8)*axis if field in ("width","height") else rng.uniform(-.15,.15)*axis,3):g}px'
-    return [node,field,value,'important']
+    # Avoid no-op string replacements; the browser also checks actual effects.
+    if value==old:
+        value='1px' if old!='1px' else '2px'
+    return [node,field,value,priority]
 
 
 class OnlineSampler:
@@ -161,7 +163,8 @@ class OnlineSampler:
                 result={**target,'id':target['id']+f'/online-{index}',
                         'current':refresh_geometry(tree,boxes),'current_boxes':boxes,
                         'declaration_state':state,'replacement_edit':remaining[0],
-                        'teacher_strategy':css_owners.CONTRACT if owner_mode else CONTRACT,'symbolic_distance':len(remaining)}
+                        'teacher_strategy':css_owners.CONTRACT if owner_mode else CONTRACT,'symbolic_distance':len(remaining),
+                        'corruption_contract':ONLINE_CONTRACT}
                 if owner_mode:
                     result['css_owners']=owners
                     result['current_html_text']=browser.page.content()

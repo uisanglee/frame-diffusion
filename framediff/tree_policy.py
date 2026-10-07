@@ -38,6 +38,9 @@ class TreeConfig:
     numeric_only: bool = True
     action_contract: str = CONTRACT
     stylesheets: bool = False
+    # False keeps historical checkpoints loadable. New stylesheet training opts
+    # in explicitly; inference then cannot add absent declarations/overrides.
+    existing_values_only: bool = False
 
     def __post_init__(self):
         from .css_owners import CONTRACT as OWNER_CONTRACT
@@ -128,7 +131,8 @@ class TreePolicy(nn.Module):
         if len(states)!=1: raise ValueError('Rollout decoder takes one page at a time')
         memory,padding=self.memory(batch,target,current,states,encoded_pair);prefix=[]
         for _ in range(self.tokenizer.max_length):
-            allowed=self.tokenizer.allowed(prefix,len(states[0]))
+            allowed=self.tokenizer.allowed(prefix,len(states[0]),
+                state=states[0] if self.cfg.existing_values_only else None)
             if not allowed: raise ValueError('No grammar-valid continuation')
             tokens=torch.tensor([[self.tokenizer.ids['BOS'],*prefix]],device=target.device)
             scores=self.logits(memory,padding,tokens)[0,-1]
@@ -203,6 +207,7 @@ def train(args):
     if getattr(args,'stylesheets',False):
         from .css_owners import CONTRACT as OWNER_CONTRACT
         cfg.stylesheets=True;cfg.action_contract=OWNER_CONTRACT;cfg.__post_init__()
+        cfg.existing_values_only=True
     tok=EditTokenizer(cfg.max_nodes)
     for row in training+validation:
         if row.get('teacher_strategy')!=cfg.action_contract: raise ValueError('Run visual-tree-prepare with matching --stylesheets setting')
@@ -218,8 +223,11 @@ def train(args):
             raise ValueError('Online worker, queue, retry and noise settings must be positive')
         targets=target_pool(training,args.online_targets)
         signatures['online']={'contract':ONLINE_CONTRACT,'assets':asset_signatures(targets)}
+        if cfg.stylesheets and any(r.get('corruption_contract')!=ONLINE_CONTRACT for r in validation):
+            raise ValueError('Validation uses old corruption; run prepare_stylesheet_policy.sh for v3 fixed states (reuse target assets/cache)')
     out=Path(args.out).resolve();settings={k:v for k,v in vars(args).items() if k not in ('out','steps','resume','init_checkpoint')}
     config=asdict(cfg)
+    if not cfg.existing_values_only:config.pop('existing_values_only')
     if not cfg.stylesheets:
         config.pop('stylesheets');settings.pop('stylesheets',None)
     # Resource tuning does not change the index-seeded sample stream.
@@ -298,7 +306,8 @@ def train(args):
             if step%args.log_every==0 or step==args.steps:
                 metrics={'step':step,'loss':total,'token_ce':total,'elapsed_s':time.perf_counter()-started}
                 if stream:
-                    metrics.update(online_samples=stream.cursor,data_wait_s=wait_seconds,
+                    metrics.update(online_corruption_contract=ONLINE_CONTRACT,
+                        online_samples=stream.cursor,data_wait_s=wait_seconds,
                         producer_seconds=producer_seconds,online_retries=retry_count,
                         online_teacher_remove_rate=remove_count/max(1,sample_count),
                         online_mean_remaining_edits=remaining_total/max(1,sample_count),

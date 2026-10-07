@@ -97,6 +97,9 @@ def rollout(browser,html,tree,viewport,target_path,policy,parser=None,threshold=
             if cfg.policy_head=='replacement':
                 from .tree_edits import current_state
                 state=owner_state['state'] if getattr(cfg,'stylesheets',False) else current_state(browser,current_tree)
+                if getattr(cfg,'existing_values_only',False) and not policy.tokenizer.allowed([],len(state),state=state):
+                    stats['stop_reason']='no_editable_declarations'
+                    break
                 sync(device);pair_start=time.perf_counter()
                 pair=policy.encode_pair(target_tensor,current_tensor)
                 sync(device);pair_elapsed=time.perf_counter()-pair_start
@@ -154,7 +157,7 @@ def evaluate(args):
         raw.cfg.decoding=args.decoding;abstract.cfg.decoding=args.decoding
     parser,parser_ck=load_detector(args.detector_checkpoint,device)
     if raw.cfg.mode!='screenshot' or abstract.cfg.mode!='abstract':raise ValueError('Policy modality mismatch')
-    for key in ('hidden','layers','heads','max_nodes','token_grid','policy_head','numeric_only','stylesheets'):
+    for key in ('hidden','layers','heads','max_nodes','token_grid','policy_head','numeric_only','stylesheets','existing_values_only'):
         if getattr(raw.cfg,key,False)!=getattr(abstract.cfg,key,False):raise ValueError('Matched policies must share tree/policy architecture')
     rows=list(read_jsonl(args.data));rows=rows[:args.limit] if args.limit else rows
     if not rows:raise ValueError('No prepared evaluation pages')

@@ -5,6 +5,6 @@ cd "$repo_root"
 [[ $# -le 4 ]] || { echo 'Expected at most DATA DETECTOR SHARED_RUN POLICY_RUN' >&2; exit 2; }
 export CSS_STYLESHEETS=1 ONLINE_CORRUPTION=1
 exec bash scripts/train_numeric_policy_gpu1.sh \
-  "${1:-data/webui-css-owners-v2}" \
+  "${1:-data/webui-css-owners-v3}" \
   "${2:-runs/webui-10k-v3-nospacing-fresh-webui/detector/best.pt}" \
-  "${3:-runs/css-owners-v2-shared}" "${4:-runs/css-owners-online-v2-screenshot}"
+  "${3:-runs/css-owners-v3-shared}" "${4:-runs/css-owners-online-v3-screenshot}"

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from .css_owners import CONTRACT
 from .ir import read_json,read_jsonl,write_json,write_jsonl
-from .tree_online import OnlineSampler,target_pool,asset_signatures
+from .tree_online import ONLINE_CONTRACT,OnlineSampler,target_pool,asset_signatures
 from .web_experiment import guard_run,digest
 
 
@@ -14,7 +14,8 @@ def freeze(args):
     if out==source or source in out.parents:raise ValueError('Use a separate frozen-data output directory')
     if args.samples_per_page<1:raise ValueError('samples-per-page must be positive')
     files=[source/f'{kind}-{split}.jsonl' for split in ('train','val','test') for kind in ('policy','pages')]
-    guard_run(out,{'kind':CONTRACT+'-fixed-v1','data':{str(p):digest(p) for p in files},
+    guard_run(out,{'kind':CONTRACT+'-fixed-v1','corruption_contract':ONLINE_CONTRACT,
+        'data':{str(p):digest(p) for p in files},
         'seed':args.seed,'max_noise':args.max_noise,'samples':args.samples_per_page},args.resume)
     # Online training needs clean targets, not fresh stored train screenshots.
     for kind in ('policy','pages'):
@@ -62,6 +63,7 @@ def freeze(args):
                 print(f'{split} fixed CSS corruption [{index+1}/{len(pool)}], kept={len(kept)}, failures={len(errors)}',flush=True)
         write_jsonl(out/f'policy-{split}.jsonl',kept);write_jsonl(out/f'pages-{split}.jsonl',selected)
         write_jsonl(out/f'rejections-{split}.jsonl',errors)
-        report[split]={'pages':len(selected),'rows':len(kept),'failed_pages':len(errors),'teachers':dict(counts)}
+        report[split]={'corruption_contract':ONLINE_CONTRACT,'pages':len(selected),
+            'rows':len(kept),'failed_pages':len(errors),'teachers':dict(counts)}
         if not kept:raise ValueError(f'Empty frozen {split}; inspect rejection report')
     write_json(out/'freeze-report.json',report)

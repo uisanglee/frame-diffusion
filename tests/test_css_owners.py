@@ -74,10 +74,16 @@ def test_owner_online_samples_and_policy_rollout(tmp_path):
             assert row['teacher_strategy']==css_owners.CONTRACT
             assert row['replacement_edit'] in repair_path(row['declaration_state'],parsed['state'])
             assert row['css_owners']==parsed['owners']
+            # No declaration is added/deleted and no priority is escalated.
+            for before,after in zip(parsed['state'],row['declaration_state']):
+                assert [bool(v) for v,p in before]==[bool(v) for v,p in after]
+                assert [p for v,p in before]==[p for v,p in after]
+            assert row['replacement_edit'][2]  # reverse teacher is SET
+            assert all(e[2] for e in row['online']['corruptions'])
         row=next(r for r in rows if r['online']['teacher_owner']=='rule')
     finally:sampler.close()
     cfg=TreeConfig(size=32,hidden=16,layers=1,heads=2,token_grid=2,max_nodes=32,
-        stylesheets=True,action_contract=css_owners.CONTRACT)
+        stylesheets=True,action_contract=css_owners.CONTRACT,existing_values_only=True)
     policy=TreePolicy(cfg,False)
     inputs=batch_inputs(policy,[row],'cpu')
     loss,_=policy.loss(*inputs,[row['replacement_edit']]);loss.backward()

@@ -160,3 +160,21 @@ def test_cached_prepare_train_resume_and_rollout(tmp_path):
 
 
 from pathlib import Path
+def test_existing_value_decoder_blocks_new_overrides_but_keeps_remove():
+    from framediff.tree_edits import EditTokenizer,FIELDS
+    tok=EditTokenizer(8)
+    state=[[['',''] for _ in FIELDS] for _ in range(4)]
+    state[2][0]=['240px','']
+    state[3][1]=['80px','important']
+    def allowed(*tokens):
+        return {tok.tokens[i] for i in tok.allowed([tok.ids[t] for t in tokens],4,state=state)}
+    assert allowed()=={'N2','N3'}
+    assert allowed('N2')=={'width'}
+    assert allowed('N3')=={'height'}
+    assert allowed('N2','width')=={'SET','REMOVE'}
+    assert 'IMPORTANT' not in allowed('N2','width','SET','3','0','0','p','x')
+    assert 'NORMAL' in allowed('N2','width','SET','3','0','0','p','x')
+    assert 'NORMAL' not in allowed('N3','height','SET','9','0','p','x')
+    assert 'IMPORTANT' in allowed('N3','height','SET','9','0','p','x')
+    # Old checkpoints retain their original unrestricted grammar.
+    assert tok.ids['N1'] in tok.allowed([],4)
