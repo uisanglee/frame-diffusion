@@ -51,13 +51,18 @@ def test_abstraction_error_ignores_blank_background_and_empty_target():
 
 
 def test_owner_normalization_accepts_text_only_and_rejects_topology():
-    from framediff.css_diffusion_experiment import canonical_owners
+    from framediff.css_diffusion_experiment import canonical_owners,reconcile_owners
     expected=[{'kind':'root','matches':[]},{'kind':'rule','block':0,'path':[1],
               'selector':'.a > .b','conditions':['@media (min-width:400px)'],'matches':['fd-1']}]
     actual=copy.deepcopy(expected);actual[1]['selector']='.a > .b';actual[1]['conditions']=['@media (min-width: 400px)']
     assert canonical_owners(expected,actual) is actual
     actual[1]['path']=[2]
     with pytest.raises(ValueError,match='topology'):canonical_owners(expected,actual)
+    row={'css_owners':expected,'diffusion_slots':[{'owner':1,'property':0}]}
+    remapped=reconcile_owners(row,actual)
+    assert remapped['diffusion_slots'][0]['owner']==1 and remapped['css_owners'] is actual
+    changed=copy.deepcopy(actual);changed[1]['matches']=['fd-2']
+    with pytest.raises(ValueError,match='topology'):reconcile_owners(row,changed)
 
 
 @pytest.mark.browser

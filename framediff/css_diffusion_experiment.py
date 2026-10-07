@@ -119,6 +119,52 @@ def canonical_owners(expected, actual):
     return actual
 
 
+def normalized_owner_key(owner):
+    """Stable rule identity when CSSOM serialization shifts nested rule paths."""
+    kind=owner.get('kind')
+    if kind=='root':return ('root',)
+    if kind=='inline':return ('inline',owner.get('id'),tuple(owner.get('matches',[])))
+    if kind=='rule':
+        def compact(value):return ' '.join(str(value).split())
+        def condition(value):return ''.join(str(value).split())
+        return ('rule',owner.get('block'),compact(owner.get('selector','')),
+                tuple(condition(v) for v in owner.get('conditions',[])),tuple(owner.get('matches',[])))
+    raise ValueError('Unknown CSS owner kind')
+
+
+def reconcile_owners(row, actual):
+    """Remap old pre-canonical owner indices to the quantized target HTML.
+
+    The mapping is one-to-one and occurrence ordered within an exact semantic
+    key. It never accepts changed selectors, conditions, or matched DOM IDs.
+    """
+    expected=row['css_owners']
+    if owner_topology(expected)==owner_topology(actual):
+        return {**row,'css_owners':actual}
+    expected_groups={};actual_groups={}
+    for index,owner in enumerate(expected):expected_groups.setdefault(normalized_owner_key(owner),[]).append(index)
+    for index,owner in enumerate(actual):actual_groups.setdefault(normalized_owner_key(owner),[]).append(index)
+    if len(expected)!=len(actual) or set(expected_groups)!=set(actual_groups):
+        used=sorted({slot['owner'] for slot in row['diffusion_slots']})
+        missing=list(set(expected_groups)-set(actual_groups))[:3]
+        added=list(set(actual_groups)-set(expected_groups))[:3]
+        raise ValueError(f'CSS owner topology changed after preparation; expected_count={len(expected)} '
+                         f'actual_count={len(actual)} missing={missing!r} added={added!r} used_owners={used}')
+    mapping={}
+    for key,old_indices in expected_groups.items():
+        new_indices=actual_groups.get(key,[])
+        if len(old_indices)!=len(new_indices):
+            used=sorted({slot['owner'] for slot in row['diffusion_slots']})
+            raise ValueError(f'CSS owner topology changed after preparation; unmapped key={key!r}; '
+                             f'expected={len(old_indices)} actual={len(new_indices)} used_owners={used}')
+        mapping.update(zip(old_indices,new_indices))
+    slots=[]
+    for slot in row['diffusion_slots']:
+        if slot['owner'] not in mapping:raise ValueError('Diffusion owner disappeared after CSS serialization')
+        slots.append({**slot,'owner':mapping[slot['owner']]})
+    return {**row,'css_owners':actual,'diffusion_slots':slots}
+
+
 def prepare(args):
     from .visual_train import load_detector, detect, detector_input
     if args.bins < 3 or args.bins % 2 != 1 or args.limit < 0 or not 0 <= args.threshold <= 1:
@@ -232,7 +278,7 @@ def materialize(browser, row, xt, mode):
     # Older prepared records may contain the pre-serialization selector text.
     # Use live canonical owners after proving that every editable address and
     # matched DOM set is unchanged; this avoids a costly data rebuild.
-    working={**row,'css_owners':canonical_owners(row['css_owners'],actual)}
+    working=reconcile_owners(row,actual)
     apply_values(browser, working, xt)
     return observe(browser, working, mode)
 
