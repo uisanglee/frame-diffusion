@@ -42,6 +42,9 @@ def test_online_pool_filters_permanently_unmutable_preparsed_pages(tmp_path):
           {**base,'id':'good/t0-s0','target_declaration_state':usable}]
     pool=target_pool(rows)
     assert [row['id'] for row in pool]==['good']
+    assert pool[0]['target_declaration_state']==usable
+    sampler=OnlineSampler(pool,'abstract')
+    assert sampler.clean_state('good')==usable
     assert mutation_sites(usable)==[(1,'width','50%','')]
     with pytest.raises(ValueError,match='after filtering'):
         target_pool([rows[0]])

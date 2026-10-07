@@ -50,7 +50,8 @@ def target_pool(rows, manifest=None):
                 raise ValueError(f'Online target identity mismatch: {page_id} {key}')
         target = {k:copy.deepcopy(row[k]) for k in ('group','split','source_sha','viewport','current',
                   'target_image','target_elements')}
-        for key in ('predicted_target_elements','parser_provenance','parser_sha','css_owners'):
+        for key in ('predicted_target_elements','parser_provenance','parser_sha','css_owners',
+                    'target_declaration_state'):
             if key in row: target[key] = row[key]
         target.update(id=page_id,target_html=str(Path(html).resolve()))
         clean_state=row.get('target_declaration_state')
@@ -108,6 +109,11 @@ class OnlineSampler:
     @lru_cache(maxsize=64)
     def clean_state(self,page_id):
         target=self.by_id[page_id]
+        # The stylesheet preparation pass already parsed and validated this
+        # exact clean program. Reuse that authoritative state so pool
+        # filtering and mutation sampling cannot disagree after a reparse.
+        if 'target_declaration_state' in target:
+            return copy.deepcopy(target['target_declaration_state'])
         if 'css_owners' in target:
             from .css_owners import read
             return read(self.browser,target['current'],self.html(target['target_html']))['state']
