@@ -20,7 +20,7 @@ QUALITY = {
 }
 COST = ('pipeline_seconds', 'repair_seconds', 'repair_browser_executions',
         'repair_browser_screenshots', 'repair_actions', 'repair_vlm_calls',
-        'repair_input_tokens', 'repair_output_tokens')
+        'repair_input_tokens', 'repair_output_tokens', 'input_tokens', 'output_tokens')
 
 
 def finite(value):

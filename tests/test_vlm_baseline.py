@@ -1,4 +1,5 @@
 import json
+import io
 from PIL import Image
 
 from framediff import vlm
@@ -13,6 +14,27 @@ def test_hf_backend_dispatches_to_generic_runtime(monkeypatch):
     args=type('Args',(),{'backend':'hf'})()
     assert vlm.generate(args,'prompt',[],marker)[0]=='ok'
     assert captured==[marker]
+
+
+def test_openai_compatible_uses_selected_key_reasoning_and_usage(monkeypatch):
+    captured={}
+    class Response(io.BytesIO):
+        def __enter__(self):return self
+        def __exit__(self,*args):pass
+    def urlopen(request,timeout):
+        captured['headers']=dict(request.header_items())
+        captured['payload']=json.loads(request.data)
+        return Response(json.dumps({'model':'gemini-3.5-flash','choices':[{'message':{'content':'ok'}}],
+                                    'usage':{'prompt_tokens':123,'completion_tokens':45}}).encode())
+    monkeypatch.setenv('GEMINI_API_KEY','secret-value')
+    monkeypatch.setattr(vlm.urllib.request,'urlopen',urlopen)
+    args=type('Args',(),{'model':'gemini-3.5-flash','endpoint':'https://example.test/chat/completions',
+        'api_key_env':'GEMINI_API_KEY','max_new_tokens':4096,'seed':2024,'reasoning_effort':'low'})()
+    answer,meta=vlm.api_generate(args,'prompt',[Image.new('RGB',(2,2))])
+    assert answer=='ok' and meta['usage']=={'prompt_tokens':123,'completion_tokens':45}
+    assert captured['headers']['Authorization']=='Bearer secret-value'
+    assert captured['payload']['reasoning_effort']=='low'
+    assert captured['payload']['messages'][0]['content'][1]['type']=='image_url'
 
 
 class FakeBrowser:

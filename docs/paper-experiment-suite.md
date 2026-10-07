@@ -74,6 +74,37 @@ export VLM_SPECS='qwen3vl8b|qwen|Qwen/Qwen3-VL-8B-Instruct|bf16,gemma3-12b|hf|go
 
 For a per-model OpenAI-compatible endpoint, append a fifth field: `alias|openai-compatible|model|server|endpoint`. Set `VLM_API_KEY` when required. The older `alias=model` format remains supported.
 
+The full record also accepts provider-specific credentials and reasoning control:
+`alias|backend|model|precision|endpoint|api_key_env|reasoning_effort`.
+
+## GPT-4o and Gemini 3.5 Flash APIs
+
+The API wrapper runs the main comparison only—`Initial VLM`, RGB Design2Code Self-Revision, and TUIDE—because the abstract-VLM condition belongs in the separate ablation. Both providers receive the same selected pages and Design2Code prompt protocol. Gemini uses low reasoning effort; GPT-4o does not receive a reasoning parameter.
+
+```bash
+cd /home/uisang/2027/frame-diffusion
+source .venv/bin/activate
+
+read -rsp 'OpenAI API key: ' OPENAI_API_KEY; export OPENAI_API_KEY; echo
+read -rsp 'Gemini API key: ' GEMINI_API_KEY; export GEMINI_API_KEY; echo
+
+CUDA_VISIBLE_DEVICES=1 PAGE_LIMIT=5 REPEATS=1 REPAIR_STEPS=20 \
+bash scripts/run_paper_api_vlms.sh \
+  "$D2C_ROOT" runs/paper-api-smoke runs/webui-10k-v3-nospacing-fresh-webui
+```
+
+After checking the smoke-test HTML and failure rate, run 100 pages with a fresh output directory:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 PAGE_LIMIT=100 REPEATS=3 REPAIR_STEPS=20 \
+bash scripts/run_paper_api_vlms.sh \
+  "$D2C_ROOT" runs/paper-api-100 runs/webui-10k-v3-nospacing-fresh-webui
+```
+
+Each model normally makes two calls per page: one initial screenshot-to-HTML call and one RGB Self-Revision call. TUIDE reuses the same initial HTML and adds no VLM calls. Validation failures are retained and reported rather than silently removed. Measured provider usage is written to each method row, and the wrapper creates `api-cost.json` and `api-cost.md` under each model's paper output. Default cost rates are a dated snapshot and can be overridden with `GPT4O_INPUT_USD_PER_M`, `GPT4O_OUTPUT_USD_PER_M`, `GEMINI_INPUT_USD_PER_M`, and `GEMINI_OUTPUT_USD_PER_M`.
+
+The wrapper uses the official Chat Completions endpoints directly; API keys remain environment variables and are not written to run configuration files.
+
 For the official Design2Code evaluator, set `OFFICIAL_REPO` before running. If omitted, the suite still reports diagnostic geometry and pixel metrics.
 
 ## Outputs
@@ -84,3 +115,28 @@ For the official Design2Code evaluator, set `OFFICIAL_REPO` before running. If o
 - `runs/paper-d2c/paper/README.md`: index of all paper tables.
 
 Use a fresh output directory if the model, page selection, checkpoint, or protocol changes. Resume is safe only when those inputs are unchanged.
+
+## Externally generated GPT/Gemini HTML
+
+You can generate HTML manually in GPT, Gemini, Claude, or another product and evaluate TUIDE without making any VLM request from this repository. Save the target screenshot and the complete generated HTML, then run:
+
+```bash
+SOURCE_MODEL='gemini-3.5-flash' \
+CUDA_VISIBLE_DEVICES=1 REPEATS=3 REPAIR_STEPS=20 \
+bash scripts/run_external_html.sh \
+  examples/my-page/target.png \
+  examples/my-page/gemini-initial.html \
+  runs/external-gemini-my-page \
+  runs/webui-10k-v3-nospacing-fresh-webui
+```
+
+The two policy checkpoint variables may point at separate runs as in the main experiment. The script records `SOURCE_MODEL`, never loads that VLM, and evaluates the unchanged external HTML as `initial` before running both screenshot-policy and TUIDE.
+
+If the original reference HTML is available, provide it as the fifth positional argument. This enables diagnostic DOM geometry and, when `OFFICIAL_REPO` is set, official Design2Code metrics:
+
+```bash
+bash scripts/run_external_html.sh \
+  target.png gpt-initial.html runs/external-gpt "$TRAIN_RUN" reference.html
+```
+
+Without reference HTML, target-screenshot pixel MAE, repair time, actions, browser executions and failures are reported; DOM IoU and official HTML-reference metrics are intentionally unavailable. For multiple pages, create a JSONL manifest with the same fields (`id`, `screenshot`, `initial_html`, optional `html`, and `external_source_model`) and pass it through `PAGE_MANIFEST` to `scripts/run_visual_web.sh` with `SELF_REVISION_PROTOCOL=none`.

@@ -86,6 +86,7 @@ def add_parsers(sub):
     p.add_argument('--revision', default='main')
     p.add_argument('--endpoint', default='http://localhost:8000/v1/chat/completions')
     p.add_argument('--api-key-env', default='VLM_API_KEY')
+    p.add_argument('--reasoning-effort',choices=['none','minimal','low','medium','high'])
     p.add_argument('--four-bit', action='store_true'); p.add_argument('--resume', action='store_true')
     p.add_argument('--retry-failed', action='store_true', help='With resume, regenerate failed preparation pages; use new downstream output directories')
     p.add_argument('--vlm-retries', type=int, default=2, help='Additional validation retries per VLM operation')
@@ -242,12 +243,14 @@ def prepare(args):
                 record['errors']['initial'] = str(error)
             initial_path = work/'initial.html'; initial_path.write_text(initial)
             initial_calls = record['vlm_attempts'].get('initial',0)
+            initial_usage=record['vlm_usage'].get('initial',{'input_tokens':0,'output_tokens':0})
             initial_seconds = time.perf_counter()-start
             record['methods']['initial'] = {'html':str(initial_path),'seconds':initial_seconds,
                 'browser_executions':0,'vlm_calls':initial_calls,'failed':'initial' in record['errors'],
                 'error':record['errors'].get('initial'),'revision_protocol':revision_protocol,
                 'uses_reference_text':revision_protocol=='design2code','repair_seconds':0.,
-                'repair_vlm_calls':0,'repair_input_tokens':0,'repair_output_tokens':0}
+                'repair_vlm_calls':0,'repair_input_tokens':0,'repair_output_tokens':0,
+                'input_tokens':initial_usage['input_tokens'],'output_tokens':initial_usage['output_tokens']}
 
             # Self-revision runs on the SAME initial HTML without target geometry/CSS.
             current = initial; elapsed = initial_seconds; calls = 0; renders = 0
@@ -285,7 +288,9 @@ def prepare(args):
                     'revision_protocol':revision_protocol,'uses_reference_text':revision_protocol=='design2code',
                     'repair_seconds':max(0.,elapsed-initial_seconds),'repair_vlm_calls':calls,
                     'repair_input_tokens':sum(v['input_tokens'] for v in revision_usage),
-                    'repair_output_tokens':sum(v['output_tokens'] for v in revision_usage)}
+                    'repair_output_tokens':sum(v['output_tokens'] for v in revision_usage),
+                    'input_tokens':initial_usage['input_tokens']+sum(v['input_tokens'] for v in revision_usage),
+                    'output_tokens':initial_usage['output_tokens']+sum(v['output_tokens'] for v in revision_usage)}
 
             # Independent branch: initial DOM -> fitted IR -> predicted target boxes.
             start = time.perf_counter(); before = browser.executions
@@ -499,6 +504,7 @@ def evaluate_pages(args):
                        'page_id':record.get('page_id',record['id']),
                        'vlm_model':record.get('vlm_model'),'vlm_backend':record.get('vlm_backend'),
                        'vlm_weight_precision':record.get('vlm_weight_precision'),
+                       'external_source_model':record.get('external_source_model'),
                        'reference_kind':record.get('reference_kind','rendered_html'),
                        'pipeline_seconds':data['seconds'],'pipeline_browser_executions':data['browser_executions'],
                        'vlm_calls':data['vlm_calls'],'proxy_executions':data.get('proxy_executions',0),
@@ -514,6 +520,7 @@ def evaluate_pages(args):
                        'repair_vlm_calls':data.get('repair_vlm_calls',0),
                        'repair_input_tokens':data.get('repair_input_tokens'),
                        'repair_output_tokens':data.get('repair_output_tokens'),
+                       'input_tokens':data.get('input_tokens'),'output_tokens':data.get('output_tokens'),
                        'plan_loss':data.get('plan_loss'),'plan_satisfaction':data.get('plan_satisfaction'),
                        'plan_node_coverage':data.get('plan_node_coverage'),
                        'planning_screenshots':data.get('planning_screenshots',0),

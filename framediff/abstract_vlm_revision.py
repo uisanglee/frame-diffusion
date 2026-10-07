@@ -23,6 +23,7 @@ def add_parsers(sub):
     p.add_argument('--backend',choices=['qwen','hf','openai-compatible'],default='qwen')
     p.add_argument('--model',default='Qwen/Qwen3-VL-8B-Instruct');p.add_argument('--revision',default='main')
     p.add_argument('--endpoint',default='http://localhost:8000/v1/chat/completions');p.add_argument('--api-key-env',default='VLM_API_KEY')
+    p.add_argument('--reasoning-effort',choices=['none','minimal','low','medium','high'])
     p.add_argument('--four-bit',action='store_true');p.add_argument('--resume',action='store_true')
     p.add_argument('--max-new-tokens',type=int,default=4096);p.add_argument('--max-pixels',type=int,default=1048576)
     p.add_argument('--seed',type=int,default=2024);p.add_argument('--vlm-retries',type=int,default=0)
@@ -104,6 +105,8 @@ def revise(args):
                 'seconds':initial.get('seconds',0)+repair_seconds,'repair_seconds':repair_seconds,
                 'vlm_calls':initial.get('vlm_calls',0)+attempts,'repair_vlm_calls':attempts,
                 'repair_input_tokens':input_tokens,'repair_output_tokens':output_tokens,
+                'input_tokens':initial.get('input_tokens',0)+input_tokens,
+                'output_tokens':initial.get('output_tokens',0)+output_tokens,
                 'browser_executions':browser.executions-before,'feedback_mode':'abstract-vlm','target_source':'detector-abstraction',
                 'revision_protocol':'abstract-vlm','uses_reference_text':bool(record.get('html'))}
             write_json(cache,record);result.append(record);write_jsonl(out/'prepared.jsonl',result)

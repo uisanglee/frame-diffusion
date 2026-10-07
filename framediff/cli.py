@@ -14,6 +14,8 @@ def main(argv=None):
     add_visual_parsers(sub)
     from .abstract_vlm_revision import add_parsers as add_abstract_vlm_parsers
     add_abstract_vlm_parsers(sub)
+    from .external_html import add_parser as add_external_html_parser
+    add_external_html_parser(sub)
     g=sub.add_parser('generate');g.add_argument('--out',required=True);g.add_argument('--count',type=int,default=1000);g.add_argument('--seed',type=int,default=42)
     t=sub.add_parser('train')
     t.add_argument('--train',required=True);t.add_argument('--val',required=True);t.add_argument('--out',required=True)
@@ -75,6 +77,9 @@ def main(argv=None):
     elif args.command in ('web-cache-abstractions','web-abstract-self-revision'):
         from .abstract_vlm_revision import cache_abstractions,revise
         (cache_abstractions if args.command=='web-cache-abstractions' else revise)(args)
+    elif args.command=='web-external-manifest':
+        from .external_html import build
+        build(args)
     elif args.command in ('web-prepare','web-repair','web-evaluate'):
         from .web_experiment import prepare,repair_pages,evaluate_pages
         {'web-prepare':prepare,'web-repair':repair_pages,'web-evaluate':evaluate_pages}[args.command](args)

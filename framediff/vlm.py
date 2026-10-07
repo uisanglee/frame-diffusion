@@ -61,6 +61,8 @@ def api_generate(args,prompt,images):
         buf=io.BytesIO();image.save(buf,format='PNG')
         content.append({'type':'image_url','image_url':{'url':'data:image/png;base64,'+base64.b64encode(buf.getvalue()).decode()}})
     payload={'model':args.model,'messages':[{'role':'user','content':content}],'temperature':0,'max_tokens':args.max_new_tokens,'seed':args.seed}
+    reasoning=getattr(args,'reasoning_effort',None)
+    if reasoning:payload['reasoning_effort']=reasoning
     headers={'Content-Type':'application/json'}
     key=os.environ.get(args.api_key_env)
     if key:headers['Authorization']='Bearer '+key

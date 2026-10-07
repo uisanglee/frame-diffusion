@@ -7,7 +7,11 @@ train_root=$3
 source_options=(--root "$dataset_root" --dataset "${WEB_DATASET:-design2code}" --webui-view "${WEBUI_VIEW:-default_1280-720}")
 if [[ -n "${PAGE_MANIFEST:-}" ]]; then source_options=(--manifest "$PAGE_MANIFEST"); fi
 vlm_options=(--backend "${VLM_BACKEND:-qwen}" --model "${VLM_MODEL:-Qwen/Qwen3-VL-8B-Instruct}"
-  --endpoint "${VLM_ENDPOINT:-http://localhost:8000/v1/chat/completions}")
+  --endpoint "${VLM_ENDPOINT:-http://localhost:8000/v1/chat/completions}"
+  --api-key-env "${VLM_API_KEY_ENV:-VLM_API_KEY}")
+if [[ -n "${VLM_REASONING_EFFORT:-}" ]]; then
+  vlm_options+=(--reasoning-effort "$VLM_REASONING_EFFORT")
+fi
 case "${VLM_FOUR_BIT:-1}" in
   1) [[ "${VLM_BACKEND:-qwen}" != openai-compatible ]] && vlm_options+=(--four-bit) ;;
   0) ;;

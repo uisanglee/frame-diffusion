@@ -234,6 +234,7 @@ def evaluate(args):
                         'vlm_calls':initial['vlm_calls'],'browser_executions':record.get('frame_browser_executions',0)+trial.get('browser_executions',0),
                         'repair_vlm_calls':0,'repair_input_tokens':0,'repair_output_tokens':0,
                         'repair_seconds':trial['seconds'],
+                        'input_tokens':initial.get('input_tokens',0),'output_tokens':initial.get('output_tokens',0),
                         'feedback_browser_screenshots':trial.get('browser_screenshots',0),
                         'feedback_mode':method,'target_source':'image','visual_timing':numeric}
                 page_results.append(trial_record)

@@ -29,7 +29,7 @@ def selected(rows, mapping):
     return result
 
 
-def build(root, aliases, representative, out):
+def build(root, aliases, representative, out, include_ablation=True):
     root = Path(root)
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
@@ -44,15 +44,16 @@ def build(root, aliases, representative, out):
             raise ValueError(f'{alias} is missing main methods: {sorted(missing)}')
         report(rows, out / 'main' / alias)
         lines.append(f'- [{alias}](main/{alias}/paper-report.md)')
-    path = root / representative / 'evaluation' / 'metrics.jsonl'
-    rows = selected(read_jsonl(path), ABLATION_METHODS)
-    missing = set(ABLATION_METHODS.values()) - {r['method'] for r in rows}
-    if missing:
-        raise ValueError(f'{representative} is missing ablation methods: {sorted(missing)}')
-    report(rows, out / 'ablation')
-    lines += ['', '## Ablation', '',
-              f'- Representative VLM: `{representative}`',
-              '- [Ablation table](ablation/paper-report.md)', '']
+    if include_ablation:
+        path = root / representative / 'evaluation' / 'metrics.jsonl'
+        rows = selected(read_jsonl(path), ABLATION_METHODS)
+        missing = set(ABLATION_METHODS.values()) - {r['method'] for r in rows}
+        if missing:
+            raise ValueError(f'{representative} is missing ablation methods: {sorted(missing)}')
+        report(rows, out / 'ablation')
+        lines += ['', '## Ablation', '',
+                  f'- Representative VLM: `{representative}`',
+                  '- [Ablation table](ablation/paper-report.md)', '']
     (out / 'README.md').write_text('\n'.join(lines))
 
 
@@ -62,11 +63,12 @@ def main():
     parser.add_argument('--aliases', required=True, help='Comma-separated VLM aliases')
     parser.add_argument('--representative', required=True)
     parser.add_argument('--out', required=True)
+    parser.add_argument('--skip-ablation', action='store_true')
     args = parser.parse_args()
     aliases = [x.strip() for x in args.aliases.split(',') if x.strip()]
     if not aliases or args.representative not in aliases:
         raise ValueError('representative must be one of aliases')
-    build(args.root, aliases, args.representative, args.out)
+    build(args.root, aliases, args.representative, args.out, not args.skip_ablation)
 
 
 if __name__ == '__main__':
