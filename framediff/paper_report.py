@@ -16,8 +16,7 @@ QUALITY = {
     'dom_center_error': -1, 'webui_center_error': -1,
     'dom_size_error': -1, 'webui_size_error': -1,
     'pixel_mae': -1,
-    'official_block': 1, 'official_text': 1, 'official_position': 1,
-    'official_color': 1, 'official_clip': 1,
+    'official_block': 1, 'official_position': 1, 'official_clip': 1,
 }
 COST = ('pipeline_seconds', 'repair_seconds', 'repair_browser_executions',
         'repair_browser_screenshots', 'repair_actions')

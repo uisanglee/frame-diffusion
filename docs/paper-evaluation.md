@@ -3,7 +3,11 @@
 `web-evaluate` now writes `paper-report.md`, `paper-summary.json`, and
 `paper-summary.csv` next to its existing reports. No training or dataset rebuild
 is required. The new files report final rendered geometry IoU, center/size error,
-pixel MAE, and official Design2Code metrics when `--official-repo` is enabled.
+pixel MAE, and official Design2Code Block, Position and CLIP metrics when
+`--official-repo` is enabled. Text and Color scores remain in the upstream raw
+evaluation output but are excluded from the paper tables and paired comparisons:
+text/content and color correction are outside the repair task. CLIP and pixel MAE
+are supplementary whole-image checks, not direct measures of geometry recovery.
 Geometry scores are diagnostic Hungarian-matched geometry, not official scores.
 
 Repeated trials are averaged within each page. Each metric includes its evaluated
