@@ -26,7 +26,7 @@ def freeze(args):
         if any(r['teacher_strategy']!=CONTRACT for r in rows):raise ValueError('Prepare --stylesheets labels first')
         # target_pool's train guard is for the actual training stream. This
         # command intentionally samples held-out pages and restores their split.
-        pool=target_pool([{**r,'split':'train'} for r in rows])
+        pool=target_pool([{**r,'split':'train'} for r in rows],cache_dir=source/'.online-target-cache')
         pages={p['id']:p for p in read_jsonl(source/f'pages-{split}.jsonl')}
         kept=[];selected=[];errors=[];counts=Counter()
         for index,target in enumerate(pool):

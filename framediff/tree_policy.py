@@ -318,7 +318,8 @@ def train(args):
         from .tree_online import ONLINE_CONTRACT,target_pool,asset_signatures
         if min(args.online_workers,args.online_prefetch,args.online_max_noise,args.online_attempts,args.online_timeout)<1:
             raise ValueError('Online worker, queue, retry and noise settings must be positive')
-        targets=target_pool(training,args.online_targets)
+        cache_root=Path(args.online_targets or args.train).resolve().parent/'.online-target-cache'
+        targets=target_pool(training,args.online_targets,cache_dir=cache_root)
         signatures['online']={'contract':ONLINE_CONTRACT,'assets':asset_signatures(targets)}
         if cfg.stylesheets and any(r.get('corruption_contract')!=ONLINE_CONTRACT for r in validation):
             raise ValueError('Validation uses old corruption; run prepare_stylesheet_policy.sh for v3 fixed states (reuse target assets/cache)')

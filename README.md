@@ -20,6 +20,13 @@ declaration-tree policy입니다. [최신 코드 구분·기존 데이터 재사
 학습 스크립트는 기본적으로 CPU 브라우저 worker의 **online corruption**을 사용합니다.
 목표 이미지·detector는 재사용하고 검증·테스트는 고정합니다. `ONLINE_CORRUPTION=0`으로
 오프라인 비교가 가능하며, 두 실험은 별도 출력 디렉터리를 사용해야 합니다.
+기존 데이터의 누락된 clean CSS 상태는 시작 시 검사하고, 페이지별 상태와 제외 결과를
+`--online-targets` manifest 옆의 `.online-target-cache/`에 저장합니다
+(manifest가 없으면 train JSONL 옆). 동일 데이터의 S/M/L 및 screenshot/abstract 실행이 공유하며,
+동시 실행은 페이지별 파일 잠금으로 중복 검사를 방지합니다. HTML 내용, viewport, DOM ID,
+CSS owner, 검사 코드 또는 Playwright 버전이 바뀌면 해당 캐시를 재사용하지 않습니다.
+`cache_hits`는 재사용 수, `inspected_missing_states`는 새 브라우저 검사 수입니다.
+중단 전 완료된 검사는 다음 실행에서 재사용되며, 캐시는 학습 샘플의 온라인 corruption을 저장하지 않습니다.
 
 **목표 screenshot → 전용 검출기로 한 번 추상화 → 현재 DOM 추상화 이미지와 비교해 매 스텝 CSS action 예측**을 지원합니다.
 고정 VLM 계획이나 목표 box residual을 사용하지 않습니다. 매번 실제 screenshot을 사용하는 별도 정책과

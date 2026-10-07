@@ -5,11 +5,16 @@ We sample CSS declarations on fixed real DOMs, not arbitrary TinySVG programs.
 Task seeds depend on consumed sample indices, never worker scheduling or GPU.
 """
 import copy
+import contextlib
+import fcntl
 import hashlib
+import json
 import math
 import multiprocessing as mp
 import random
 import time
+import tempfile
+from importlib.metadata import version
 from collections import deque
 from concurrent.futures import ProcessPoolExecutor
 from functools import lru_cache
@@ -33,7 +38,51 @@ def mutation_sites(state):
             if value and value_valid(value,field)]
 
 
-def target_pool(rows, manifest=None):
+def inspection_fingerprint():
+    # Invalidate on changes to parsing, loading, or supported CSS values.
+    root = Path(__file__).parent
+    return {name: digest(root/name) for name in
+            ('tree_online.py','tree_edits.py','css_owners.py','html_bridge.py','browser.py')} | {
+                'playwright': version('playwright')}
+
+
+@contextlib.contextmanager
+def inspection_cache_entry(directory, target, html, fingerprint):
+    if directory is None:
+        yield None
+        return
+    signature = {'code': fingerprint, 'html': hashlib.sha256(html.encode()).hexdigest(),
+                 'viewport': target['viewport'],
+                 'ids': [n['id'] for n in target['current']['nodes']],
+                 'owners': target.get('css_owners')}
+    key = hashlib.sha256(json.dumps(signature, sort_keys=True).encode()).hexdigest()
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    # Different scales/modalities may start simultaneously. Only one process
+    # inspects a given page; others read its completed atomic cache entry.
+    with (directory/f'{key}.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield directory/f'{key}.json'
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def save_inspection(path, state):
+    if path is None: return
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, suffix='.tmp', delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump({'state': state}, stream, allow_nan=False)
+        temporary.replace(path)
+    finally:
+        if temporary is not None: temporary.unlink(missing_ok=True)
+
+
+def target_pool(rows, manifest=None, cache_dir=None):
+    if cache_dir is None and manifest:
+        cache_dir = Path(manifest).resolve().parent/'.online-target-cache'
     pages = {p['id']:p for p in read_jsonl(manifest)} if manifest else {}
     targets = {}
     seen = set()
@@ -70,32 +119,50 @@ def target_pool(rows, manifest=None):
     # unique page once and pass the recovered state to the online workers.
     browser = None
     inspected = 0
+    cache_hits = 0
+    fingerprint = inspection_fingerprint() if cache_dir is not None else None
     try:
         for page_id, target in list(targets.items()):
             if target.get('target_declaration_state') is not None: continue
-            if browser is None: browser = HtmlBrowser().__enter__()
-            else: browser.reset_context()
-            browser.load(Path(target['target_html']).read_text(), target['viewport'])
-            if 'css_owners' in target:
-                from . import css_owners
-                parsed = css_owners.read(browser, target['current'])
-                if parsed['owners'] != target['css_owners']:
-                    raise ValueError(f'Online target CSS owner identity changed: {page_id}')
-                state = parsed['state']
-            else:
-                state = current_state(browser, target['current'])
-            inspected += 1
+            html = Path(target['target_html']).read_text()
+            with inspection_cache_entry(cache_dir, target, html, fingerprint) as entry:
+                state = None
+                if entry is not None and entry.exists():
+                    try:
+                        state = json.loads(entry.read_text())['state']
+                        if not isinstance(state, list): raise ValueError('Invalid cached state')
+                        mutation_sites(state)
+                    except (ValueError, KeyError, TypeError): state = None
+                if state is not None:
+                    cache_hits += 1
+                else:
+                    if browser is None: browser = HtmlBrowser().__enter__()
+                    else: browser.reset_context()
+                    browser.load(html, target['viewport'])
+                    if 'css_owners' in target:
+                        from . import css_owners
+                        parsed = css_owners.read(browser, target['current'])
+                        if parsed['owners'] != target['css_owners']:
+                            raise ValueError(f'Online target CSS owner identity changed: {page_id}')
+                        state = parsed['state']
+                    else:
+                        state = current_state(browser, target['current'])
+                    inspected += 1
+                    save_inspection(entry, state)
             if not mutation_sites(state):
                 del targets[page_id]
                 excluded += 1
             else:
                 target['target_declaration_state'] = state
-            if inspected == 1 or inspected % 100 == 0:
-                print({'online_target_inspection': inspected, 'excluded_no_editable_css': excluded}, flush=True)
+            processed = inspected + cache_hits
+            if processed == 1 or processed % 100 == 0:
+                print({'online_target_inspection': inspected, 'cache_hits': cache_hits,
+                       'excluded_no_editable_css': excluded}, flush=True)
     finally:
         if browser is not None: browser.__exit__(None,None,None)
     print({'online_target_filter': {'pages': len(seen), 'kept': len(targets),
-          'excluded_no_editable_css': excluded, 'inspected_missing_states': inspected}}, flush=True)
+          'excluded_no_editable_css': excluded, 'inspected_missing_states': inspected,
+          'cache_hits': cache_hits, 'cache_dir': str(cache_dir) if cache_dir is not None else None}}, flush=True)
     if not targets: raise ValueError('Empty online target pool after filtering pages without supported existing CSS values')
     # Stable order makes sample indices independent of repeated offline examples.
     return [targets[k] for k in sorted(targets)]
