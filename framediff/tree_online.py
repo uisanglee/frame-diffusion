@@ -162,7 +162,8 @@ class OnlineSampler:
                 boxes[tree['nodes'][0]['id']]=[0,0,*viewport]
                 result={**target,'id':target['id']+f'/online-{index}',
                         'current':refresh_geometry(tree,boxes),'current_boxes':boxes,
-                        'declaration_state':state,'replacement_edit':remaining[0],
+                        'declaration_state':state,'target_declaration_state':clean,
+                        'replacement_edit':remaining[0],
                         'teacher_strategy':css_owners.CONTRACT if owner_mode else CONTRACT,'symbolic_distance':len(remaining),
                         'corruption_contract':ONLINE_CONTRACT}
                 if owner_mode:

@@ -484,6 +484,7 @@ def evaluate_pages(args):
             for method in methods:
                 data = record['methods'][method]; started = time.perf_counter(); before = browser.executions
                 row = {'id':record['id'],'method':method,'failed':data['failed'],
+                       'page_id':record.get('page_id',record['id']),
                        'reference_kind':record.get('reference_kind','rendered_html'),
                        'pipeline_seconds':data['seconds'],'pipeline_browser_executions':data['browser_executions'],
                        'vlm_calls':data['vlm_calls'],'proxy_executions':data.get('proxy_executions',0),
@@ -649,4 +650,6 @@ def evaluate_pages(args):
               'Timing excludes model loading and evaluation; conditioning/preparation costs follow the selected pipeline.',
               'Single screenshot viewport; no claim of responsive CSS reconstruction.']
     (out/'report.md').write_text('\n'.join(lines)+'\n')
+    from .paper_report import report as paper_report
+    paper_report(rows,out)
     return rows

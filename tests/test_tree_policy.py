@@ -74,6 +74,26 @@ def test_token_ce_gradient_and_checkpoint(tmp_path):
     assert action[0]==1 and action[1] in FIELDS
 
 
+def test_symbolic_metrics_accept_any_distance_reducing_edit(monkeypatch):
+    import contextlib
+    import framediff.tree_policy as policy
+    current=empty_state();target=empty_state()
+    current[1][0]=['20px',''];target[1][0]=['10px','']
+    rows=[{'declaration_state':copy.deepcopy(current)} for _ in range(3)]
+    predictions=iter(([1,'width','10px',''],       # distance 1 -> 0
+                      [1,'width','30px',''],       # distance 1 -> 1
+                      [2,'margin-left','5px',''])) # distance 1 -> 2
+    class Net:
+        def predict(self,*args):return next(predictions)
+    monkeypatch.setattr(policy,'batch_inputs',lambda *args:(None,None,None,None))
+    metrics=policy.symbolic_policy_metrics(Net(),rows,[target]*3,'cpu',False,contextlib.nullcontext)
+    assert metrics['symbolic_improving_action_rate']==pytest.approx(1/3)
+    assert metrics['symbolic_no_change_action_rate']==pytest.approx(1/3)
+    assert metrics['symbolic_worsening_action_rate']==pytest.approx(1/3)
+    assert metrics['mean_symbolic_distance_reduction']==0
+    assert metrics['mean_positive_action_count']==1
+
+
 HTML='''<html><head><style>body{margin:0} section{width:300px;display:flex} .card{height:50px}</style></head>
 <body><section><div class="card" style="width:50%;margin:1px 2px 3px 4px">A</div><div class="card">B</div></section></body></html>'''
 

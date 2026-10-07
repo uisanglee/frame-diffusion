@@ -62,6 +62,7 @@ for head in ${POLICY_HEADS:-replacement}; do
         --steps "$steps" --lr "$lr" "${condition[@]}" "${online[@]}" \
         --batch-size "${BATCH_SIZE:-2}" --accumulation "${ACCUMULATION:-4}" \
         --val-samples "${VAL_SAMPLES:-2000}" --eval-every "${EVAL_EVERY:-500}" \
+        --policy-metric-samples "${POLICY_METRIC_SAMPLES:-128}" \
         --early-stop-patience "${EARLY_STOP_PATIENCE:-10}" --bf16 "${options[@]}"
     done
   done

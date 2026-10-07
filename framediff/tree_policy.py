@@ -17,7 +17,7 @@ from torch.nn import functional as F
 from .ir import read_json, read_jsonl, write_json
 from .model import Block, ModelConfig, encode, collate
 from .train import seed_all, select_device
-from .tree_edits import CONTRACT, FIELDS, EditTokenizer
+from .tree_edits import CONTRACT, FIELDS, EditTokenizer, apply_state, extract, repair_path
 from .visual import SpatialEncoder, elements, semantic_masks, image_tensor
 from .visual_data import validate_splits
 from .web_experiment import digest, guard_run
@@ -191,11 +191,93 @@ def batch_inputs(net,rows,device,predicted=False):
     return batch,torch.stack(targets).to(device),torch.stack(currents).to(device),[r['declaration_state'] for r in rows]
 
 
+def validation_target_states(rows,out,data_signature,stylesheets):
+    """Load clean declaration states for diagnostics only, never model inputs.
+
+    New corpora carry the state directly. Older already-prepared v3 corpora are
+    upgraded lazily from their clean target HTML and cached inside the run, so a
+    long preparation job does not need to be restarted.
+    """
+    cache=Path(out)/'validation-target-states.json'
+    ids=[r['id'] for r in rows]
+    if cache.exists():
+        saved=read_json(cache)
+        if saved.get('data_signature')==data_signature and saved.get('ids')==ids:
+            return saved['states']
+    states=[];browser=None
+    try:
+        for row in rows:
+            state=row.get('target_declaration_state')
+            if state is None:
+                target_html=row.get('target_html')
+                if not target_html:raise ValueError(f"Missing target declaration state/HTML for {row['id']}")
+                if browser is None:
+                    from .html_bridge import HtmlBrowser
+                    browser=HtmlBrowser().__enter__()
+                html=Path(target_html).read_text()
+                if stylesheets:
+                    from . import css_owners
+                    parsed=css_owners.read(browser,row['current'],html,fixed=True)
+                    if parsed['owners']!=row['css_owners']:
+                        raise ValueError(f"CSS owner topology changed for {row['id']}")
+                else:parsed=extract(browser,html,row['current'])
+                state=parsed['state']
+            if len(state)!=len(row['declaration_state']):
+                raise ValueError(f"Target declaration topology changed for {row['id']}")
+            states.append(state)
+    finally:
+        if browser is not None:browser.__exit__(None,None,None)
+    write_json(cache,{'data_signature':data_signature,'ids':ids,'states':states})
+    return states
+
+
+@torch.no_grad()
+def symbolic_policy_metrics(net,rows,target_states,device,predicted,amp):
+    """One-step tree-distance diagnostics with every valid reverse edit positive.
+
+    A prediction improves iff it reduces the number of declaration children that
+    differ from the clean target. It is not compared with one shuffled teacher.
+    """
+    totals={'n':0,'improving':0,'worsening':0,'no_change':0,'invalid':0,
+            'gain':0.,'normalized_gain':0.,'distance':0.,'positive_actions':0.}
+    per_property={field:{'n':0,'improving':0} for field in FIELDS}
+    for row,target in zip(rows,target_states):
+        current=row['declaration_state'];before=len(repair_path(current,target))
+        if before<1:continue
+        totals['n']+=1;totals['distance']+=before;totals['positive_actions']+=before
+        try:
+            inputs=batch_inputs(net,[row],device,predicted)
+            with amp():action=net.predict(*inputs)
+            after_state=apply_state(current,action);after=len(repair_path(after_state,target))
+            gain=before-after;totals['gain']+=gain;totals['normalized_gain']+=gain/before
+            entry=per_property[action[1]];entry['n']+=1
+            if gain>0:totals['improving']+=1;entry['improving']+=1
+            elif gain<0:totals['worsening']+=1
+            else:totals['no_change']+=1
+        except Exception:
+            totals['invalid']+=1
+    n=totals['n']
+    if not n:return {'symbolic_metric_n':0}
+    return {'symbolic_metric_n':n,
+            'symbolic_improving_action_rate':totals['improving']/n,
+            'symbolic_worsening_action_rate':totals['worsening']/n,
+            'symbolic_no_change_action_rate':totals['no_change']/n,
+            'invalid_action_rate':totals['invalid']/n,
+            'mean_symbolic_distance_reduction':totals['gain']/n,
+            'mean_normalized_symbolic_distance_reduction':totals['normalized_gain']/n,
+            'mean_symbolic_distance':totals['distance']/n,
+            'mean_positive_action_count':totals['positive_actions']/n,
+            'symbolic_by_predicted_property':{field:{'n':v['n'],
+                'improving_rate':v['improving']/v['n'] if v['n'] else None}
+                for field,v in per_property.items()}}
+
+
 def train(args):
     from .visual_train import validation_sample, update_early_stopping
     device=select_device(args.device);seed_all(args.seed);torch.set_num_threads(args.cpu_threads)
     if min(args.steps,args.batch_size,args.accumulation,args.eval_every,args.log_every,args.val_samples)<1:
         raise ValueError('Training counts must be positive')
+    if args.policy_metric_samples<0:raise ValueError('policy-metric-samples must be nonnegative')
     if args.lr<=0 or args.early_stop_patience<0 or args.early_stop_min_delta<0: raise ValueError('Invalid optimizer/early stop settings')
     if args.resume and args.init_checkpoint: raise ValueError('Choose resume OR init-checkpoint')
     if getattr(args,'prediction_probability',0): raise ValueError('Use --predicted-targets; stochastic legacy target mixing is retired')
@@ -265,6 +347,8 @@ def train(args):
         if early['stopped']: print('Early stopping already completed; keeping best.pt',flush=True);return
         if start>=args.steps: print(f'Already completed {start} steps; no online workers started',flush=True);return
     selected=validation_sample(validation,args.val_samples)
+    metric_rows=validation_sample(selected,min(args.policy_metric_samples,len(selected)),seed=90211) if args.policy_metric_samples else []
+    metric_targets=validation_target_states(metric_rows,out,signatures['val'],cfg.stylesheets) if metric_rows else []
     write_json(out/'manifest.json',{'kind':KIND,'config':asdict(cfg),'settings':vars(args),'data':signatures,
                                  'parameters':sum(p.numel() for p in net.parameters()),
                                  'online_target_pages':len(targets) if targets else 0})
@@ -283,6 +367,8 @@ def train(args):
                 args.online_workers,args.online_prefetch,args.online_attempts,args.online_timeout,cursor))
         wait_seconds=0.;producer_seconds=0.;sample_count=0;retry_count=0;remove_count=0;remaining_total=0;recent_errors=[]
         rule_count=0;probe_rejections=0
+        property_counts={field:0 for field in FIELDS};path_length_total=0;mutation_total=0
+        if device.startswith('cuda'):torch.cuda.reset_peak_memory_stats(device)
         started=time.perf_counter()
         for step in range(start+1,args.steps+1):
             net.train();optimizer.zero_grad(set_to_none=True);total=0.
@@ -295,6 +381,8 @@ def train(args):
                         info=row['online'];sample_count+=1;retry_count+=info['retries']
                         remove_count+=not row['replacement_edit'][2]
                         remaining_total+=row['symbolic_distance']
+                        property_counts[row['replacement_edit'][1]]+=1
+                        path_length_total+=info['path_length'];mutation_total+=len(info['corruptions'])
                         producer_seconds+=info['seconds']
                         recent_errors=(recent_errors+info['errors'])[-5:]
                         rule_count+=info.get('teacher_owner')=='rule'
@@ -304,13 +392,21 @@ def train(args):
                 (value/args.accumulation).backward();total+=float(value.detach())/args.accumulation
             nn.utils.clip_grad_norm_(net.parameters(),1.);optimizer.step()
             if step%args.log_every==0 or step==args.steps:
-                metrics={'step':step,'loss':total,'token_ce':total,'elapsed_s':time.perf_counter()-started}
+                elapsed=time.perf_counter()-started;session_examples=(step-start)*args.batch_size*args.accumulation
+                metrics={'step':step,'loss':total,'token_ce':total,'elapsed_s':elapsed,
+                         'learning_rate':optimizer.param_groups[0]['lr'],
+                         'examples_seen':step*args.batch_size*args.accumulation,
+                         'examples_per_second':session_examples/max(elapsed,1e-9)}
+                if device.startswith('cuda'):metrics['peak_cuda_bytes']=torch.cuda.max_memory_allocated(device)
                 if stream:
                     metrics.update(online_corruption_contract=ONLINE_CONTRACT,
                         online_samples=stream.cursor,data_wait_s=wait_seconds,
                         producer_seconds=producer_seconds,online_retries=retry_count,
                         online_teacher_remove_rate=remove_count/max(1,sample_count),
                         online_mean_remaining_edits=remaining_total/max(1,sample_count),
+                        online_mean_path_length=path_length_total/max(1,sample_count),
+                        online_mean_mutations=mutation_total/max(1,sample_count),
+                        online_teacher_property_distribution={field:property_counts[field]/max(1,sample_count) for field in FIELDS},
                         online_recent_errors=recent_errors)
                     if cfg.stylesheets:metrics.update(online_teacher_rule_rate=rule_count/max(1,sample_count),
                         online_probe_rejections=probe_rejections)
@@ -338,6 +434,11 @@ def train(args):
                 metrics={'step':step,'validation_loss':val,'validation_tokens':count,
                          'validation_n':len(selected),'best':best,'early_stopping':early}
                 if cfg.stylesheets:metrics['validation_by_teacher']=breakdown
+                if metric_rows:
+                    metric_started=time.perf_counter()
+                    metrics.update(symbolic_policy_metrics(net,metric_rows,metric_targets,device,
+                                                           args.predicted_targets,amp))
+                    metrics['symbolic_metric_seconds']=time.perf_counter()-metric_started
                 log('train.jsonl',metrics)
                 with (out/'validation.jsonl').open('a') as validation_file: validation_file.write(json.dumps(metrics)+'\n')
                 state={'kind':KIND,'config':config,'model':net.state_dict(),'optimizer':optimizer.state_dict(),

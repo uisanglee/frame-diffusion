@@ -214,7 +214,8 @@ def prepare(args):
                             'teacher_edits','improving_edits','tree_path_edits','tree_edit_distance',
                             'teacher_strategy','corruption_edit','policy_subset')}
                         new.update(teacher_strategy=contract, declaration_state=current['state'],
-                                   replacement_edit=path[0], symbolic_distance=len(path), target_elements=target_elements)
+                                   target_declaration_state=target['state'], replacement_edit=path[0],
+                                   symbolic_distance=len(path), target_elements=target_elements)
                         if stylesheets:
                             new.update(css_owners=current['owners'],target_html=clean['current_html'])
                         kept.append(new); counts['edit_rows'] += 1

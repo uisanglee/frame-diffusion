@@ -49,6 +49,8 @@ def add_parsers(sub):
                 p.add_argument('--predicted-targets',action='store_true',help='Use frozen detector cache rather than DOM target masks')
                 p.add_argument('--online-corruption',action='store_true',help='Generate fresh CPU-browser corruption/path states during training only')
                 p.add_argument('--online-targets',help='Training pages manifest containing clean tagged HTML; not initial_html')
+                p.add_argument('--policy-metric-samples',type=int,default=128,
+                               help='Fixed validation states for symbolic one-step policy diagnostics; 0 disables')
                 for key,default in [('online-workers',2),('online-prefetch',4),('online-max-noise',4),('online-attempts',8)]:
                     p.add_argument('--'+key,type=int,default=default)
                 p.add_argument('--online-timeout',type=float,default=180.)
