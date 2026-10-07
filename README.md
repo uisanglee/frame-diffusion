@@ -14,6 +14,10 @@ W/H/X/Y의 15개 손상 조합별 CSS 복구 실험은 [Synthetic Action Composi
 
 Inline과 `<style>` 규칙을 함께 훼손·복구하는 `css-owner-tree-v2` 경로를 추가했습니다.
 [Stylesheet 정책 준비·GPU 1/3 학습·평가](docs/stylesheet-policy.md)를 참고하세요.
+
+기존 학습과 독립적인 수치 CSS diffusion 실험은
+[CSS diffusion 준비·학습·복구 평가](docs/css-diffusion.md)를 참고하세요.
+별도 데이터와 체크포인트를 사용하며, 기존 TUIDE 실행 옵션은 바꾸지 않습니다.
 기존 detector와 목표 이미지 캐시를 재사용하며, 새 정책과 고정 val/test 훼손 상태는 별도 경로에 생성합니다.
 
 현재 학습 경로는 **CSS 선언 교체 → 단일 교사 토큰 CE → 실행 이미지 평가**를 분리한

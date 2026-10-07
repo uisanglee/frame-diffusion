@@ -2,6 +2,8 @@
 
 
 def add_parsers(sub):
+    from .css_diffusion_experiment import add_parsers as add_css_diffusion_parsers
+    add_css_diffusion_parsers(sub)
     from .composition import add_parsers as add_composition_parsers
     add_composition_parsers(sub)
     p=sub.add_parser('visual-subset-numeric',help='Filter cached trajectories without rendering or changing source assets')
@@ -94,6 +96,9 @@ def add_parsers(sub):
 
 
 def run(args):
+    if args.command.startswith('visual-css-diffusion-'):
+        from .css_diffusion_experiment import run as run_css_diffusion
+        return run_css_diffusion(args)
     if args.command in ('visual-composition-build', 'visual-composition-evaluate'):
         from .composition import build, evaluate
         return (build if args.command.endswith('build') else evaluate)(args)
