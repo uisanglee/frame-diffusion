@@ -13,7 +13,7 @@ export POLICY_SCALE=$scale
 export CSS_STYLESHEETS=1 ONLINE_CORRUPTION=1 PREPARE_DATA=0 POLICY_HEADS=replacement
 export POLICY_MODES=${POLICY_MODES:-abstract}
 case "$POLICY_MODES" in abstract|screenshot) ;; *) echo 'Choose POLICY_MODES=abstract or screenshot' >&2; exit 2;; esac
-export POLICY_RUN_DIR=${5:-runs/tuide-measured-inline-$scale-$POLICY_MODES}
+export POLICY_RUN_DIR=${5:-runs/tuide-targeted-inline-$scale-$POLICY_MODES}
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 export DEVICE=${DEVICE:-cuda}
 export POLICY_STAGE1_STEPS=${POLICY_STAGE1_STEPS:-30000}
@@ -27,6 +27,6 @@ export EVAL_EVERY=${EVAL_EVERY:-500}
 export EARLY_STOP_PATIENCE=${EARLY_STOP_PATIENCE:-10}
 echo "Training TUIDE-$scale ($POLICY_MODES), visible GPU=$CUDA_VISIBLE_DEVICES -> $POLICY_RUN_DIR"
 exec bash scripts/train_numeric_policy.sh \
-  "${2:-data/webui-css-owners-v9-measured-inline}" \
+  "${2:-data/webui-css-owners-v10-targeted-inline}" \
   "${3:-runs/webui-10k-v3-nospacing-fresh-webui/detector/best.pt}" \
-  "${4:-runs/css-owners-v9-measured-inline-shared}"
+  "${4:-runs/css-owners-v10-targeted-inline-shared}"

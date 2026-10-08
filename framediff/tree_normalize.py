@@ -15,7 +15,7 @@ from .visual import annotate, elements
 from .visual_data import validate_splits
 from .web_experiment import digest, guard_run
 
-CONTRACT = 'parent-preserved-measured-inline-v3'
+CONTRACT = 'parent-preserved-targeted-inline-v4'
 
 
 def prepare(args):
@@ -56,7 +56,7 @@ def prepare(args):
                 folder=out/'normalized-pages'/split/hashlib.sha256(page_id.encode()).hexdigest()
                 folder.mkdir(parents=True,exist_ok=True)
                 html_path=Path(row['current_html'] if row['id'].endswith('/clean') else row['target_html'])
-                cache=folder/'record.json';sampler=None;stage='source'
+                cache=folder/'record.json';sampler=None;stage='source';qa=None
                 try:
                     signature=digest(html_path)
                     if args.resume and cache.exists():
@@ -75,8 +75,11 @@ def prepare(args):
                                 if status['source_sha']!=signature or status['sha']!=digest(normalized):
                                     raise ValueError('Normalized HTML changed; use a new output directory')
                             else:
+                                nodes=row['current']['nodes'][1:]
+                                action_ids=[n['id'] for n in nodes if n.get('visual_class',1)>0]
                                 qa=convert(browser,html_path.read_text(),row['viewport'],folder,mode='sizes',
-                                           max_pixel_mae=args.max_pixel_mae,max_box_error=args.max_box_error)
+                                           max_pixel_mae=args.max_pixel_mae,max_box_error=args.max_box_error,
+                                           action_ids=action_ids)
                                 if not qa['accepted']:raise ValueError('Normalization changed rendering; see page report.json')
                                 write_json(stamp,{'source_sha':signature,'sha':digest(normalized)})
                             qa=read_json(folder/'report.json')
@@ -120,6 +123,10 @@ def prepare(args):
                                'normalization_stats':new.get('normalization_stats')})
                 except Exception as exc:
                     failure={'id':page_id,'stage':stage,'error':str(exc)}
+                    if stage=='normalization' and qa is not None:
+                        failure['diagnostics']={'pixel_mae':qa.get('pixel_mae'),
+                            'max_box_error_px':qa.get('max_box_error_px'),
+                            'first_element_failures':qa.get('element_failures',[])[:3]}
                     errors.append(failure)
                     reasons[stage+': '+str(exc).splitlines()[0]]+=1
                     with rejection_path.open('a') as log:

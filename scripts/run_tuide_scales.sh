@@ -6,10 +6,10 @@ cd "$repo_root"
 [[ $# == 2 ]] || { echo 'Usage: bash scripts/run_tuide_scales.sh PREPARED_JSONL OUTPUT_ROOT' >&2; exit 2; }
 data=$1;output=$2
 detector=${DETECTOR_CHECKPOINT:-runs/webui-10k-v3-nospacing-fresh-webui/detector/best.pt}
-raw=${RAW_CHECKPOINT:-runs/tuide-measured-inline-s-screenshot/replacement/raw-stage2/best.pt}
-s=${TUIDE_S_CHECKPOINT:-runs/tuide-measured-inline-s-abstract/replacement/abstract-stage2/best.pt}
-m=${TUIDE_M_CHECKPOINT:-runs/tuide-measured-inline-m-abstract/replacement/abstract-stage2/best.pt}
-l=${TUIDE_L_CHECKPOINT:-runs/tuide-measured-inline-l-abstract/replacement/abstract-stage2/best.pt}
+raw=${RAW_CHECKPOINT:-runs/tuide-targeted-inline-s-screenshot/replacement/raw-stage2/best.pt}
+s=${TUIDE_S_CHECKPOINT:-runs/tuide-targeted-inline-s-abstract/replacement/abstract-stage2/best.pt}
+m=${TUIDE_M_CHECKPOINT:-runs/tuide-targeted-inline-m-abstract/replacement/abstract-stage2/best.pt}
+l=${TUIDE_L_CHECKPOINT:-runs/tuide-targeted-inline-l-abstract/replacement/abstract-stage2/best.pt}
 for path in "$data" "$detector" "$raw" "$s" "$m" "$l"; do
   [[ -f "$path" ]] || { echo "Missing input: $path" >&2; exit 2; }
 done

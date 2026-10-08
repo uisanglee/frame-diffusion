@@ -46,20 +46,16 @@ and stacking are not represented exactly by box abstractions.
 
 ## Explicit style normalization
 
-`prepare_stylesheet_policy.sh` now runs `visual-tree-normalize` first in `sizes`
-mode. The measured-inline-v3 normalizer preserves original stylesheets, DOM,
-pseudo-elements, flow, padding, display and gap. It snapshots eligible layout
-elements (including untagged dependencies) BEFORE any style edits, then applies
-all measured border-box px sizes together. Min/max and flex sizing are
-neutralized on these elements; measurable px margins are materialized too.
-Transformed subtrees, native inline/table elements, embedded content and auto
-margins remain read-only. No recursive group bisection or per-node rollback is
-performed. An independent reload checks geometry, clipping and global/local
-pixels against the original; unstable or changed pages are rejected.
-Actions address only explicitly materialized inline fields, never shadowed
-stylesheet declarations. Original logical declarations such as margin-inline
-are preserved rather than causing page-wide parsing failure. The generic
-non-normalized parser masks ambiguous fields only, preserving other candidates.
+`prepare_stylesheet_policy.sh` runs `visual-tree-normalize` on a copy of the
+clean HTML. The targeted-inline-v4 normalizer reads the original page once and
+adds editable inline values only to tagged nodes that appear as visible
+abstraction boxes. It retains their original box sizing, DOM structure and CSS.
+Browser probes test whether min/max or flex sizing blocks a size edit; only
+observed blockers are neutralized. Unsupported logical declarations such as
+`margin-inline` are retained, with only their conflicting physical fields
+excluded from actions. Transformed, inline, table and embedded nodes remain
+read-only. An independent reload checks geometry, clipping and global/local
+pixels against the original; changed pages are rejected.
 Accepted normalized HTML and screenshots are saved once and reused on resume.
 Geometry and global/per-element pixel checks reject changes to the clean view.
 This changes the controlled learning environment; it does not establish
@@ -80,7 +76,7 @@ For a separately chosen explicit-style experiment:
       --width 1280 --height 720 --mode boxes
 
 The supported modes are sizes and boxes. Both retain existing element parents.
-sizes selectively freezes border-box dimensions but retains flow/padding. boxes additionally
+sizes materializes selected CSS dimensions but retains flow/padding. boxes additionally
 uses absolute positions under the SAME parent and bakes removed padding offsets
 into positions; it does not preserve original responsive layout rules.
 Single-line direct text may be wrapped locally without moving it outside its
@@ -128,8 +124,8 @@ CACHE_GPU=4 bash scripts/prepare_stylesheet_policy.sh
 CUDA_VISIBLE_DEVICES=3 bash scripts/train_tuide_scale.sh s
 ```
 
-Defaults use data/webui-css-owners-v9-measured-inline and runs/css-owners-v9-measured-inline-shared;
-training uses runs/tuide-measured-inline-s-abstract (POLICY_MODES=screenshot selects RGB).
+Defaults use data/webui-css-owners-v10-targeted-inline and runs/css-owners-v10-targeted-inline-shared;
+training uses runs/tuide-targeted-inline-s-abstract (POLICY_MODES=screenshot selects RGB).
 Old output directories are not deleted. Target detector predictions may be
 reused by the cache command when their provenance matches. Train corruptions
 are generated online, while held-out size/margin examples are fixed during preparation.
@@ -160,7 +156,7 @@ directory (20 per split, not training-ready benchmark data):
 ```bash
 python -m framediff visual-tree-normalize \
   --rendered data/webui-10k-v5-improvement-distribution/rendered \
-  --out data/webui-measured-inline-smoke --limit-pages 20 --resume
+  --out data/webui-targeted-inline-smoke --limit-pages 20 --resume
 ```
 
 Inspect prepare-report.json, progress-{split}.json and rejections-{split}.jsonl.
@@ -170,4 +166,4 @@ lists normalized and preserved elements and rendering errors. Normalization
 uses one batch application instead of repeated rollback trials. Do not loosen visual QA to
 increase the acceptance rate. Server WebUI coverage must be measured; local
 regression fixtures do not establish that coverage. Existing v7 artifacts are
-preserved but are not reused as v9 normalization results.
+preserved but are not reused as v10 normalization results.

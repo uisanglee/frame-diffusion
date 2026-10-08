@@ -16,8 +16,8 @@ def test_preserves_complex_content_and_only_freezes_safe_nodes(tmp_path):
     .transformed{transform:scale(.8);width:200px;height:40px}
     .hidden{display:none}.hidden::before{content:"hidden"}
     </style></head><body>
-    <div class="card"><span>Text</span></div>
-    <div class="transformed"><div id="nested" style="width:80px;height:30px">T</div></div>
+    <div class="card" data-fd-id="card"><span>Text</span></div>
+    <div class="transformed"><div id="nested" data-fd-id="nested" style="width:80px;height:30px">T</div></div>
     <div class="hidden"></div><div style="width:70px"><span id="multiline">one two three four five six seven</span></div>
     <canvas width="30" height="20"></canvas></body></html>'''
     with HtmlBrowser() as b:
@@ -39,8 +39,8 @@ def test_changed_batch_is_rejected_without_partial_freezing(tmp_path):
     html='''<html><head><style>
     .safe,.unsafe{position:absolute;width:80px;height:40px;background:red}
     .unsafe{top:100px}
-    .unsafe[style*="box-sizing"]{padding-left:200px!important}
-    </style></head><body><div class="safe">A</div><div class="unsafe">B</div></body></html>'''
+    .unsafe[style*="width"]{padding-left:200px!important}
+    </style></head><body><div class="safe" data-fd-id="safe">A</div><div class="unsafe" data-fd-id="unsafe">B</div></body></html>'''
     with HtmlBrowser() as b:
         report=convert(b,html,[400,240],tmp_path,mode='sizes')
         assert not report['accepted'],report
@@ -58,16 +58,16 @@ def test_no_eligible_elements_is_explicit_unchanged_fallback(tmp_path):
 
 
 @pytest.mark.browser
-def test_snapshot_includes_untagged_percentage_dependencies(tmp_path):
+def test_untagged_percentage_dependency_is_left_alone_and_changed_page_rejected(tmp_path):
     html='''<!DOCTYPE html><style>body{margin:0}.parent{height:auto;width:200px}
     .child{height:100%;width:100%}.sibling{height:100px}</style>
     <div class="parent" data-fd-id="parent"><div class="child">Text</div>
     <div class="sibling"></div></div>'''
     with HtmlBrowser() as b:
         report=convert(b,html,[400,300],tmp_path,mode='sizes')
-        assert report['accepted'],report
-        assert b.page.locator('.child').get_attribute('data-tuide-explicit-id') is not None
-        assert b.page.locator('.child').bounding_box()['height']<30
+        assert not report['accepted'],report
+        assert b.page.locator('.child').get_attribute('data-tuide-explicit-id') is None
+        assert not (tmp_path/'normalized.html').exists()
         assert b.page.locator('.parent > .child').count()==1
 
 
@@ -83,6 +83,10 @@ def test_logical_css_and_shadowed_percentage_rules_are_readonly(tmp_path):
         parsed=css_owners.read(b,tree)
         assert [o['kind'] for o in parsed['owners']]==['root','inline']
         assert parsed['state'][1][0][0]=='200px'
+        from framediff.tree_edits import FIELDS
+        assert not parsed['state'][1][FIELDS.index('margin-left')][0]
+        assert not parsed['state'][1][FIELDS.index('margin-right')][0]
+        assert parsed['state'][1][FIELDS.index('margin-top')][0]
         css_owners.execute(b,parsed['owners'],[1,'width','180px','important'])
         assert b.page.locator('.card').bounding_box()['width']==180
         assert '50%' in b.page.locator('style:not([data-framediff-static])').text_content()
@@ -92,8 +96,8 @@ def test_logical_css_and_shadowed_percentage_rules_are_readonly(tmp_path):
 @pytest.mark.browser
 def test_clipping_change_is_rejected_even_on_white_background(tmp_path):
     html='''<!DOCTYPE html><style>body{margin:0}.parent{position:relative;width:100px;height:40px}
-    .parent[style*="box-sizing"]{overflow:hidden}.child{position:absolute;left:90px;width:20px;height:10px}</style>
-    <div class="parent"><div class="child"></div></div>'''
+    .parent[style*="width"]{overflow:hidden}.child{position:absolute;left:90px;width:20px;height:10px}</style>
+    <div class="parent" data-fd-id="parent"><div class="child"></div></div>'''
     with HtmlBrowser() as b:
         report=convert(b,html,[400,200],tmp_path,mode='sizes')
         assert not report['accepted'],report
@@ -108,7 +112,51 @@ def test_generic_logical_css_masks_only_ambiguous_fields():
         b.load('<div data-fd-id="card" style="width:100px;margin-inline:4px;margin-top:2px"></div>',[400,200])
         parsed=css_owners.read(b,{'nodes':[{'id':'root'},{'id':'card'}]})
         assert parsed['state'][1][0][0]=='100px'
-        assert all(not value for value,priority in parsed['state'][1][2:])
+        from framediff.tree_edits import FIELDS
+        assert parsed['state'][1][FIELDS.index('margin-top')][0]=='2px'
+        assert not parsed['state'][1][FIELDS.index('margin-left')][0]
+        assert not parsed['state'][1][FIELDS.index('margin-right')][0]
+
+
+@pytest.mark.browser
+def test_vertical_logical_margin_masks_vertical_fields_only(tmp_path):
+    from framediff import css_owners
+    from framediff.tree_edits import FIELDS
+    html='''<!DOCTYPE html><style>.card{writing-mode:vertical-rl;margin-inline:4px;
+    width:80px;height:40px;background:red}</style><div class="card" data-fd-id="card">A</div>'''
+    with HtmlBrowser() as b:
+        report=convert(b,html,[400,200],tmp_path,mode='sizes',action_ids=['card'])
+        assert report['accepted'],report
+        parsed=css_owners.read(b,{'nodes':[{'id':'root'},{'id':'card'}]})
+        assert not parsed['state'][1][FIELDS.index('margin-top')][0]
+        assert not parsed['state'][1][FIELDS.index('margin-bottom')][0]
+        assert parsed['state'][1][FIELDS.index('margin-left')][0]
+
+
+@pytest.mark.browser
+def test_unbound_constraints_and_untagged_geometry_remain_unchanged(tmp_path):
+    html='''<!DOCTYPE html><style>body{margin:0}.card{width:100px;height:40px;
+    min-width:50px;max-width:200px;background:red}.other{width:25px;height:25px}</style>
+    <div class="card" data-fd-id="card">A</div><div class="other">B</div>'''
+    with HtmlBrowser() as b:
+        report=convert(b,html,[400,200],tmp_path,mode='sizes',action_ids=['card'])
+        assert report['accepted'],report
+        assert report['normalized_elements']==1
+        assert b.page.locator('.other').get_attribute('data-tuide-explicit-id') is None
+        assert b.page.locator('.card').evaluate('e=>getComputedStyle(e).maxWidth')=='200px'
+        assert b.page.locator('.card').evaluate('e=>getComputedStyle(e).minWidth')=='50px'
+
+
+@pytest.mark.browser
+def test_abstraction_excluded_id_is_not_modified(tmp_path):
+    html='''<!DOCTYPE html><style>.card{width:100px;height:40px;background:red}
+    .other{width:20px;height:10px}</style><div class="card" data-fd-id="card"></div>
+    <div class="other" data-fd-id="other"></div>'''
+    with HtmlBrowser() as b:
+        report=convert(b,html,[400,200],tmp_path,mode='sizes',action_ids=['card'])
+        assert report['accepted'],report
+        assert b.page.locator('.card').get_attribute('data-tuide-editable-fields')
+        assert b.page.locator('.other').get_attribute('data-tuide-editable-fields') is None
 
 
 def test_preparation_records_errors_before_split_completion(tmp_path,monkeypatch):

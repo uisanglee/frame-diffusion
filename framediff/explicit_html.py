@@ -18,13 +18,15 @@ def reject_flat_html(html):
 
 
 def explicit_size_limits(browser, ids):
-    """Current physical border+padding floors; only normalized elements opt in."""
+    """Minimum CSS width/height in the element's unchanged box-sizing mode."""
     return browser.page.evaluate('''ids=>Object.fromEntries(ids.map(id=>{
       const e=[...document.querySelectorAll('[data-fd-id]')].find(e=>e.dataset.fdId===id);
       if(!e||!e.hasAttribute('data-tuide-explicit-id'))return [id,null];
       const s=getComputedStyle(e),n=k=>parseFloat(s[k])||0;
-      return [id,{width:n('borderLeftWidth')+n('borderRightWidth')+n('paddingLeft')+n('paddingRight'),
-                  height:n('borderTopWidth')+n('borderBottomWidth')+n('paddingTop')+n('paddingBottom')}];
+      return [id,s.boxSizing==='border-box'?
+        {width:n('borderLeftWidth')+n('borderRightWidth')+n('paddingLeft')+n('paddingRight'),
+         height:n('borderTopWidth')+n('borderBottomWidth')+n('paddingTop')+n('paddingBottom')}:
+        {width:0,height:0}];
     }))''',ids)
 
 
@@ -114,7 +116,8 @@ def compare_renders(before, after, before_png, after_png, max_box_error=1., max_
         local=float(delta[top:bottom,left:right].mean()) if right>left and bottom>top else 0.
         clip_error=max((abs(a-b) for a,b in zip(r.get('visible_clip',[]),other.get('visible_clip',[]))),default=0.)
         if error>max_box_error or local>max_pixel_mae or clip_error>max_box_error:
-            failures.append(dict(id=r['id'],box_error=error,local_pixel_mae=local,clip_error=clip_error))
+            failures.append(dict(id=r['id'],fd_id=r.get('fd_id'),box_error=error,
+                                 local_pixel_mae=local,clip_error=clip_error))
     return dict(accepted=not failures and mae<=max_pixel_mae,pixel_mae=mae,max_box_error_px=box_error,
                 element_failures=failures,max_pixel_mae=max_pixel_mae,max_box_error=max_box_error)
 
@@ -216,19 +219,61 @@ SIZE_GEOMETRY_JS = r'''(e,id)=>{
    if(['hidden','clip','scroll','auto'].includes(s.overflowY)){
      t=Math.max(t,b.top+p.clientTop);bb=Math.min(bb,b.top+p.clientTop+p.clientHeight);}
  }
- return {id,box:[r.x,r.y,r.width,r.height],
+ return {id,fd_id:e.getAttribute('data-fd-id'),box:[r.x,r.y,r.width,r.height],
    visible_clip:[l,t,Math.max(0,rr-l),Math.max(0,bb-t)]};
 }'''
 
-SIZE_SNAPSHOT_JS = '() => { const geometry='+SIZE_GEOMETRY_JS+r''';
+SIZE_SNAPSHOT_JS = '(actionIds) => { const geometry='+SIZE_GEOMETRY_JS+r''';
  const all=[...document.querySelectorAll('*')].filter(e=>
    !['STYLE','SCRIPT','LINK','META','NOSCRIPT','HEAD','TITLE'].includes(e.tagName));
+ const allowed=actionIds===null?null:new Set(actionIds);
  const candidates=[],skipped=[];
+ const fields=['width','height','margin-top','margin-right','margin-bottom','margin-left'];
+ const conflictingRules=[];
+ function rules(items){
+   for(const rule of items){
+     if(rule.type===CSSRule.STYLE_RULE)conflictingRules.push(rule);
+     else if(rule.cssRules && (rule.type!==CSSRule.MEDIA_RULE || matchMedia(rule.conditionText).matches) &&
+       (rule.type!==CSSRule.SUPPORTS_RULE || CSS.supports(rule.conditionText)))rules(rule.cssRules);
+   }
+ }
+ for(const sheet of document.styleSheets){
+   if(sheet.ownerNode?.hasAttribute?.('data-framediff-static'))continue;
+   try{rules(sheet.cssRules)}catch{ /* Inaccessible sheets remain untouched. */ }
+ }
+ function conflicts(e,s){
+   const blocked=new Set(),horizontal=s.writingMode.startsWith('horizontal'),rtl=s.direction==='rtl';
+   const inline=horizontal?(rtl?['margin-right','margin-left']:['margin-left','margin-right']):
+      (rtl?['margin-bottom','margin-top']:['margin-top','margin-bottom']);
+   const block=horizontal?['margin-top','margin-bottom']:
+      (s.writingMode.endsWith('-lr')?['margin-left','margin-right']:['margin-right','margin-left']);
+   const sizeInline=horizontal?'width':'height',sizeBlock=horizontal?'height':'width';
+   function visit(style){
+     if(style.getPropertyValue('all'))fields.forEach(p=>blocked.add(p));
+     for(const [name,targets] of [
+       ['margin-inline',inline],['margin-block',block],
+       ['margin-inline-start',[inline[0]]],['margin-inline-end',[inline[1]]],
+       ['margin-block-start',[block[0]]],['margin-block-end',[block[1]]],
+       ['inline-size',[sizeInline]],['block-size',[sizeBlock]],
+       ['min-inline-size',[sizeInline]],['max-inline-size',[sizeInline]],
+       ['min-block-size',[sizeBlock]],['max-block-size',[sizeBlock]]])
+       if(style.getPropertyValue(name))targets.forEach(p=>blocked.add(p));
+   }
+   visit(e.style);
+   for(const rule of conflictingRules){
+     try{if(e.matches(rule.selectorText))visit(rule.style)}catch{}
+   }
+   return blocked;
+ }
  const before=all.map((e,i)=>{
    const s=getComputedStyle(e),r=e.getBoundingClientRect();
+   const observed=geometry(e,String(i));
    let reason=null;
    if(e.namespaceURI!=='http://www.w3.org/1999/xhtml')reason='non_html';
    else if(['HTML','BODY','IFRAME','CANVAS'].includes(e.tagName)||e.shadowRoot)reason='root_or_embedded';
+   else if(!e.hasAttribute('data-fd-id')||(allowed&&!allowed.has(e.getAttribute('data-fd-id'))))
+     reason='not_action_target';
+   else if(!observed.visible_clip[2]||!observed.visible_clip[3])reason='not_visible_in_abstraction';
    else if(!r.width||!r.height||s.visibility!=='visible'||s.display==='none')reason='not_visible';
    else if(s.display==='inline'||s.display==='contents'||s.display.startsWith('table')||e.getClientRects().length!==1)reason='inline_or_table';
    else {
@@ -239,11 +284,59 @@ SIZE_SNAPSHOT_JS = '() => { const geometry='+SIZE_GEOMETRY_JS+r''';
      }
    }
    if(reason)skipped.push({id:String(i),reason});
-   else candidates.push({id:String(i),width:r.width,height:r.height,
-     margins:Object.fromEntries(['margin-top','margin-right','margin-bottom','margin-left']
-       .map(p=>[p,s.getPropertyValue(p)]).filter(([p,v])=>/^-?[\d.]+px$/.test(v)))});
-   return geometry(e,String(i));
+   else {
+     const blocked=conflicts(e,s),n=p=>parseFloat(s.getPropertyValue(p))||0;
+     const insetX=n('padding-left')+n('padding-right')+n('border-left-width')+n('border-right-width');
+     const insetY=n('padding-top')+n('padding-bottom')+n('border-top-width')+n('border-bottom-width');
+     const width=Math.max(0,r.width-(s.boxSizing==='border-box'?0:insetX));
+     const height=Math.max(0,r.height-(s.boxSizing==='border-box'?0:insetY));
+     const margins=Object.fromEntries(['margin-top','margin-right','margin-bottom','margin-left']
+       .filter(p=>!blocked.has(p)).map(p=>[p,s.getPropertyValue(p)])
+       .filter(([p,v])=>/^-?[\d.]+px$/.test(v)));
+     candidates.push({id:String(i),width,height,margins,
+       editable:fields.filter(p=>!blocked.has(p)),constraints:{}});
+   }
+   return observed;
  });
+ // Probe each selected box in the unmodified page. Remove only a constraint
+ // that actually prevents a small width/height edit from changing the box.
+ for(const a of candidates){
+   const e=all[Number(a.id)],saved=e.getAttribute('style'),s=getComputedStyle(e);
+   const restore=()=>saved===null?e.removeAttribute('style'):e.setAttribute('style',saved);
+   const measure=(field,value,extra=null)=>{
+     restore();e.style.setProperty(field,value+'px','important');
+     for(const [p,v] of Object.entries(a.constraints))e.style.setProperty(p,v,'important');
+     if(extra)e.style.setProperty(extra[0],extra[1],'important');
+     const r=e.getBoundingClientRect();return field==='width'?r.width:r.height;
+   };
+   for(const field of ['width','height']){
+     if(!a.editable.includes(field))continue;
+     const original=field==='width'?a.width:a.height;
+     const base=field==='width'?before[Number(a.id)].box[2]:before[Number(a.id)].box[3];
+     const delta=16;
+     const max='max-'+field,min='min-'+field;
+     if(s.getPropertyValue(max)!=='none'){
+       const up=measure(field,original+delta);
+       if(up<base+delta-1 && measure(field,original+delta,[max,'none'])>up+1)
+         a.constraints[max]='none';
+     }
+     if(parseFloat(s.getPropertyValue(min))>0){
+       const smaller=Math.max(0,original-delta),down=measure(field,smaller);
+       if(down>Math.max(0,base-delta)+1 && measure(field,smaller,[min,'0px'])<down-1)
+         a.constraints[min]='0px';
+     }
+     const parentDisplay=e.parentElement?getComputedStyle(e.parentElement).display:'';
+     if(parentDisplay.includes('flex') &&
+        (parseFloat(s.flexGrow)>0||parseFloat(s.flexShrink)>0)){
+       const larger=original+Math.max(16,original*.5),wanted=base+larger-original;
+       const flexResult=measure(field,larger);
+       if(Math.abs(flexResult-wanted)>1 &&
+          Math.abs(measure(field,larger,['flex','0 0 auto'])-wanted)<Math.abs(flexResult-wanted)-1)
+         a.constraints.flex='0 0 auto';
+     }
+   }
+   restore();
+ }
  // Measure the complete source before adding even verification attributes.
  all.forEach((e,i)=>e.setAttribute('data-tuide-verify-id',String(i)));
  return {before,candidates,skipped};
@@ -255,17 +348,12 @@ SIZE_BOXES_JS = '() => { const geometry='+SIZE_GEOMETRY_JS+r''';
 }'''
 
 
-def normalize_sizes(browser, html, viewport, out, max_pixel_mae, max_box_error):
-    """Measure once, apply together, verify once; preserve DOM and stylesheets.
-
-    Snapshot untagged layout dependencies too, before changing any CSS. Native
-    inline/table/transformed boxes stay read-only. Never mix separately accepted
-    subsets of the snapshot, which can change percentage resolution.
-    """
+def normalize_sizes(browser, html, viewport, out, max_pixel_mae, max_box_error, action_ids=None):
+    """Normalize only tagged abstraction boxes and verify the complete render."""
     out=Path(out);out.mkdir(parents=True,exist_ok=True)
     browser.reset_context();browser.load(html,viewport)
     before_png=browser.page.screenshot(animations='disabled')
-    snapshot=browser.page.evaluate(SIZE_SNAPSHOT_JS)
+    snapshot=browser.page.evaluate(SIZE_SNAPSHOT_JS,action_ids)
     baseline=browser.page.content()
     (out/'before.png').write_bytes(before_png)
 
@@ -279,47 +367,50 @@ def normalize_sizes(browser, html, viewport, out, max_pixel_mae, max_box_error):
     # Do not claim successful normalization for a source that cannot replay.
     initial,_=assess(baseline)
     if not initial['accepted']:
-        report={**initial,'mode':'sizes','normalization_strategy':'measured-inline-v3',
+        report={**initial,'mode':'sizes','normalization_strategy':'targeted-inline-v4',
                 'error':'Original HTML is not stable across reloads','normalized_elements':0}
         write_json(out/'report.json',report)
         return report
 
     browser.load(baseline,viewport)
     browser.page.evaluate(r'''group=>{
-          document.documentElement.setAttribute('data-tuide-inline-actions','measured-v1');
+          document.documentElement.setAttribute('data-tuide-inline-actions','targeted-v2');
           for(const a of group){
             const e=document.querySelector('[data-tuide-verify-id="'+a.id+'"]');
             const set=(p,v)=>e.style.setProperty(p,String(v),'important');
-            e.setAttribute('data-tuide-explicit-id',a.id);
-            set('box-sizing','border-box');set('width',a.width+'px');set('height',a.height+'px');
-            set('min-width','0px');set('min-height','0px');
-            set('max-width','none');set('max-height','none');
-            set('flex','0 0 auto');set('aspect-ratio','auto');
+            if(a.editable.includes('width')||a.editable.includes('height'))
+              e.setAttribute('data-tuide-explicit-id',a.id);
+            for(const p of ['width','height'])if(a.editable.includes(p))set(p,a[p]+'px');
+            for(const [p,v] of Object.entries(a.constraints))set(p,v);
             for(const [p,v] of Object.entries(a.margins))set(p,v);
             e.setAttribute('data-tuide-editable-fields',
-              ['width','height',...Object.keys(a.margins)].join(' '));
+              [...['width','height'].filter(p=>a.editable.includes(p)),...Object.keys(a.margins)].join(' '));
           }
         }''',snapshot['candidates'])
     candidate=browser.page.content()
     qa,png=assess(candidate)
     accepted=[a['id'] for a in snapshot['candidates']]
-    report={**qa,'mode':'sizes','normalization_strategy':'measured-inline-v3',
+    report={**qa,'mode':'sizes','normalization_strategy':'targeted-inline-v4',
             'normalized_elements':len(accepted),'normalized_ids':accepted,
-            'preserved_elements':snapshot['skipped'],'verification_trials':1,
+            'preserved_elements':[r for r in snapshot['skipped'] if r['reason']!='not_action_target'],
+            'skipped_not_action_target':sum(r['reason']=='not_action_target' for r in snapshot['skipped']),
+            'neutralized_constraints':{p:sum(p in a['constraints'] for a in snapshot['candidates'])
+                                       for p in ('min-width','max-width','min-height','max-height','flex')},
+            'verification_trials':1,
             'viewport':viewport,'partial_normalization':False,
-            'warning':'Original stylesheets remain read-only. Unsupported layout nodes and auto margins are not editable; changed pages are rejected, not partially frozen.'}
+            'warning':'Original CSS stays intact. Only tagged boxes receive editable inline values; changed pages are rejected.'}
     write_json(out/'report.json',report)
     (out/'after.png').write_bytes(png)
     (out/('normalized.html' if qa['accepted'] else 'rejected.html')).write_text(candidate)
     return report
 
 
-def convert(browser, html, viewport, out, mode='boxes', max_pixel_mae=.01, max_box_error=1.):
+def convert(browser, html, viewport, out, mode='boxes', max_pixel_mae=.01, max_box_error=1., action_ids=None):
     """Emit normalized.html only when a fresh reload passes geometry/pixel QA."""
     if mode not in ('boxes','sizes'):raise ValueError('Parent separation was removed; use boxes or sizes')
     reject_flat_html(html)
     if mode=='sizes':
-        return normalize_sizes(browser,html,viewport,out,max_pixel_mae,max_box_error)
+        return normalize_sizes(browser,html,viewport,out,max_pixel_mae,max_box_error,action_ids)
     out=Path(out);out.mkdir(parents=True,exist_ok=True)
     browser.reset_context();browser.load(html,viewport)
     browser.page.screenshot(path=str(out/'before.png'),animations='disabled')

@@ -16,21 +16,37 @@ READ_JS = r'''({html, ids, fields, fixed=false}) => {
  const doc = html === null ? document : new DOMParser().parseFromString(html,'text/html');
  const tagged = [...doc.querySelectorAll('[data-fd-id]')];
  if(new Set(tagged.map(e=>e.dataset.fdId)).size!==tagged.length)throw Error('Duplicate DOM IDs');
- const inlineOnly=doc.documentElement.getAttribute('data-tuide-inline-actions')==='measured-v1';
- function editable(style,p,el=null) {
+ const inlineOnly=doc.documentElement.getAttribute('data-tuide-inline-actions')==='targeted-v2';
+ function ambiguous(style,p,elements){
+   if(style.getPropertyValue('all'))return true;
+   const samples=elements.length?elements:[null];
+   return samples.some(el=>{
+     const s=el?.isConnected?getComputedStyle(el):el?.style;
+     const horizontal=!(s?.writingMode||'horizontal-tb').startsWith('vertical');
+     const rtl=(s?.direction||'ltr')==='rtl';
+     const inline=horizontal?(rtl?['margin-right','margin-left']:['margin-left','margin-right']):
+       (rtl?['margin-bottom','margin-top']:['margin-top','margin-bottom']);
+     const block=horizontal?['margin-top','margin-bottom']:
+       ((s?.writingMode||'vertical-rl').endsWith('-lr')?['margin-left','margin-right']:['margin-right','margin-left']);
+     const mappings=[
+       ['margin-inline',inline],['margin-block',block],
+       ['margin-inline-start',[inline[0]]],['margin-inline-end',[inline[1]]],
+       ['margin-block-start',[block[0]]],['margin-block-end',[block[1]]],
+       ['inline-size',[horizontal?'width':'height']],['block-size',[horizontal?'height':'width']],
+       ['min-inline-size',[horizontal?'width':'height']],['max-inline-size',[horizontal?'width':'height']],
+       ['min-block-size',[horizontal?'height':'width']],['max-block-size',[horizontal?'height':'width']]];
+     return mappings.some(([name,fields])=>fields.includes(p)&&style.getPropertyValue(name));
+   });
+ }
+ function editable(style,p,el=null,matches=null) {
    if(inlineOnly)return !!el?.getAttribute('data-tuide-editable-fields')?.split(' ').includes(p);
-   // Preserve unfamiliar declarations, excluding only ambiguous physical slots.
-   // Logical axes depend on writing-mode, so conservatively mask both axes.
-   const conflicts=p.startsWith('margin-')?
-     ['all','margin-inline','margin-block','margin-inline-start','margin-inline-end','margin-block-start','margin-block-end']:
-     ['all','inline-size','block-size'];
-   return !conflicts.some(a=>style.getPropertyValue(a));
+   return !ambiguous(style,p,matches|| (el?[el]:[]));
  }
- function read(style,el=null) {
-   return fields.map(p=>editable(style,p,el)?[style.getPropertyValue(p),style.getPropertyPriority(p)]:['','']);
+ function read(style,el=null,matches=null) {
+   return fields.map(p=>editable(style,p,el,matches)?[style.getPropertyValue(p),style.getPropertyPriority(p)]:['','']);
  }
- function strip(style,el=null){
-   for(const p of fields)if(editable(style,p,el))style.removeProperty(p);
+ function strip(style,el=null,matches=null){
+   for(const p of fields)if(editable(style,p,el,matches))style.removeProperty(p);
  }
  const owners=[{kind:'root',matches:[]}],state=[fields.map(()=>['',''])];
  for(const id of ids) {
@@ -51,12 +67,14 @@ READ_JS = r'''({html, ids, fields, fixed=false}) => {
        if(rule.type===CSSRule.STYLE_RULE) {
          if(rule.cssRules?.length)throw Error('Nested CSS style rules are not supported');
          // Pseudo-elements cannot be addressed as DOM boxes. Leave untouched.
-         let matched=[];try{matched=[...doc.querySelectorAll(rule.selectorText)]
-           .map(e=>e.getAttribute('data-fd-id')).filter(id=>ids.includes(id));}catch{}
+         let matched=[],matching=[];try{
+           matching=[...doc.querySelectorAll(rule.selectorText)].filter(e=>ids.includes(e.getAttribute('data-fd-id')));
+           matched=matching.map(e=>e.getAttribute('data-fd-id'));
+         }catch{}
          if(!matched.length)return;
          owners.push({kind:'rule',block,path:next,selector:rule.selectorText,conditions,matches:matched});
-         state.push(read(rule.style));
-         if(fixed)strip(rule.style);
+         state.push(read(rule.style,null,matching));
+         if(fixed)strip(rule.style,null,matching);
        } else if(rule.cssRules && (rule.type===CSSRule.MEDIA_RULE || rule.type===CSSRule.SUPPORTS_RULE ||
                    rule.constructor.name==='CSSLayerBlockRule')) {
          walk(rule.cssRules,next,[...conditions,rule.cssText.split('{')[0].trim()]);
@@ -92,7 +110,7 @@ def execute(browser, owners, edit):
     check_explicit_edit(browser,owners[index].get('matches',[]),field,value)
     browser.page.evaluate(r'''({owner,field,value,priority})=>{
       let style,sheet,el;
-      const inlineOnly=document.documentElement.getAttribute('data-tuide-inline-actions')==='measured-v1';
+      const inlineOnly=document.documentElement.getAttribute('data-tuide-inline-actions')==='targeted-v2';
       if(inlineOnly&&owner.kind!=='inline')throw Error('Normalized stylesheets are read-only');
       if(owner.kind==='inline') {
         el=[...document.querySelectorAll('[data-fd-id]')].find(e=>e.dataset.fdId===owner.id);
