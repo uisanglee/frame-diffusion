@@ -8,11 +8,11 @@ if [[ $# -gt 4 ]]; then
 fi
 source_corpus=${1:-data/webui-10k-v5-improvement-distribution}
 detector=${2:-runs/webui-10k-v3-nospacing-fresh-webui/detector/best.pt}
-data_out=${3:-data/webui-css-owners-v8-selective-size-margin}
-cache_out=${4:-runs/css-owners-v8-selective-size-margin-shared}
+data_out=${3:-data/webui-css-owners-v9-measured-inline}
+cache_out=${4:-runs/css-owners-v9-measured-inline-shared}
 [[ -f "$source_corpus/rendered/policy-train.jsonl" ]] && source_corpus="$source_corpus/rendered"
-# Selectively freeze safe sizes once, preserving original CSS and DOM.
-# Old whole-page normalization outputs are not compatible.
+# Snapshot layout dependencies once, apply sizes together, preserve CSS/DOM.
+# Old selectively frozen outputs have a different action space.
 labels=${SOURCE_LABELS:-${data_out}-labels}
 python -m framediff visual-tree-normalize --rendered "$source_corpus" \
   --out "$labels" --max-css-owners "${MAX_CSS_OWNERS:-512}" \

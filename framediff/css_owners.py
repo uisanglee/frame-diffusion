@@ -16,19 +16,29 @@ READ_JS = r'''({html, ids, fields, fixed=false}) => {
  const doc = html === null ? document : new DOMParser().parseFromString(html,'text/html');
  const tagged = [...doc.querySelectorAll('[data-fd-id]')];
  if(new Set(tagged.map(e=>e.dataset.fdId)).size!==tagged.length)throw Error('Duplicate DOM IDs');
- const aliases=['all','inline-size','block-size','margin-inline','margin-block',
-   'margin-inline-start','margin-inline-end','margin-block-start','margin-block-end'];
- function read(style) {
-   if(aliases.some(p=>style.getPropertyValue(p)))throw Error('Unsupported overlapping CSS declarations');
-   return fields.map(p=>[style.getPropertyValue(p),style.getPropertyPriority(p)]);
+ const inlineOnly=doc.documentElement.getAttribute('data-tuide-inline-actions')==='measured-v1';
+ function editable(style,p,el=null) {
+   if(inlineOnly)return !!el?.getAttribute('data-tuide-editable-fields')?.split(' ').includes(p);
+   // Preserve unfamiliar declarations, excluding only ambiguous physical slots.
+   // Logical axes depend on writing-mode, so conservatively mask both axes.
+   const conflicts=p.startsWith('margin-')?
+     ['all','margin-inline','margin-block','margin-inline-start','margin-inline-end','margin-block-start','margin-block-end']:
+     ['all','inline-size','block-size'];
+   return !conflicts.some(a=>style.getPropertyValue(a));
+ }
+ function read(style,el=null) {
+   return fields.map(p=>editable(style,p,el)?[style.getPropertyValue(p),style.getPropertyPriority(p)]:['','']);
+ }
+ function strip(style,el=null){
+   for(const p of fields)if(editable(style,p,el))style.removeProperty(p);
  }
  const owners=[{kind:'root',matches:[]}],state=[fields.map(()=>['',''])];
  for(const id of ids) {
    const el=tagged.find(e=>e.dataset.fdId===id);if(!el)throw Error('Missing DOM ID: '+id);
-   owners.push({kind:'inline',id,matches:[id]});state.push(read(el.style));
-   if(fixed)for(const p of fields)el.style.removeProperty(p);
+   owners.push({kind:'inline',id,matches:[id]});state.push(read(el.style,el));
+   if(fixed)strip(el.style,el);
  }
- const styles=[...doc.querySelectorAll('style:not([data-framediff-static])')];
+ const styles=inlineOnly?[]:[...doc.querySelectorAll('style:not([data-framediff-static])')];
  styles.forEach((el,block)=>{
    let sheet=el.sheet;
    if(html!==null){sheet=new CSSStyleSheet();sheet.replaceSync(el.textContent);}
@@ -46,7 +56,7 @@ READ_JS = r'''({html, ids, fields, fixed=false}) => {
          if(!matched.length)return;
          owners.push({kind:'rule',block,path:next,selector:rule.selectorText,conditions,matches:matched});
          state.push(read(rule.style));
-         if(fixed)for(const p of fields)rule.style.removeProperty(p);
+         if(fixed)strip(rule.style);
        } else if(rule.cssRules && (rule.type===CSSRule.MEDIA_RULE || rule.type===CSSRule.SUPPORTS_RULE ||
                    rule.constructor.name==='CSSLayerBlockRule')) {
          walk(rule.cssRules,next,[...conditions,rule.cssText.split('{')[0].trim()]);
@@ -82,9 +92,13 @@ def execute(browser, owners, edit):
     check_explicit_edit(browser,owners[index].get('matches',[]),field,value)
     browser.page.evaluate(r'''({owner,field,value,priority})=>{
       let style,sheet,el;
+      const inlineOnly=document.documentElement.getAttribute('data-tuide-inline-actions')==='measured-v1';
+      if(inlineOnly&&owner.kind!=='inline')throw Error('Normalized stylesheets are read-only');
       if(owner.kind==='inline') {
         el=[...document.querySelectorAll('[data-fd-id]')].find(e=>e.dataset.fdId===owner.id);
         if(!el)throw Error('Missing inline owner');style=el.style;
+        if(inlineOnly&&!el.getAttribute('data-tuide-editable-fields')?.split(' ').includes(field))
+          throw Error('Normalized field is read-only');
       } else if(owner.kind==='rule') {
         el=document.querySelectorAll('style:not([data-framediff-static])')[owner.block];
         if(!el?.sheet)throw Error('Missing stylesheet owner');sheet=el.sheet;

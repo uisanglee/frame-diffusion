@@ -15,7 +15,7 @@ from .visual import annotate, elements
 from .visual_data import validate_splits
 from .web_experiment import digest, guard_run
 
-CONTRACT = 'parent-preserved-selective-sizes-v2'
+CONTRACT = 'parent-preserved-measured-inline-v3'
 
 
 def prepare(args):

@@ -7,7 +7,9 @@ from framediff.tree_policy import TreeConfig, TreePolicy, resolve_policy_scale
 from framediff.css_owners import CONTRACT
 
 
-@pytest.mark.parametrize('scale,expected', [('s',4766449),('m',15532325),('l',67087477)])
+# The existing occupancy+boundary representation has 8 channels per image
+# (24 pair/difference channels), not the former 4-channel representation.
+@pytest.mark.parametrize('scale,expected', [('s',4804081),('m',15569957),('l',67125109)])
 def test_scale_parameters_and_decoder_gradient(scale, expected):
     args=SimpleNamespace(policy_scale=scale,hidden=1,layers=1,heads=1)
     resolve_policy_scale(args)

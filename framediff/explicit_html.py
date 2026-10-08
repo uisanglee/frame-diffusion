@@ -206,18 +206,29 @@ FREEZE_JS = r'''(mode) => {
 }'''
 
 
-SIZE_SNAPSHOT_JS = r'''() => {
+SIZE_GEOMETRY_JS = r'''(e,id)=>{
+ const r=e.getBoundingClientRect();let l=Math.max(0,r.left),t=Math.max(0,r.top),
+   rr=Math.min(innerWidth,r.right),bb=Math.min(innerHeight,r.bottom);
+ for(let p=e.parentElement;p;p=p.parentElement){
+   const s=getComputedStyle(p),b=p.getBoundingClientRect();
+   if(['hidden','clip','scroll','auto'].includes(s.overflowX)){
+     l=Math.max(l,b.left+p.clientLeft);rr=Math.min(rr,b.left+p.clientLeft+p.clientWidth);}
+   if(['hidden','clip','scroll','auto'].includes(s.overflowY)){
+     t=Math.max(t,b.top+p.clientTop);bb=Math.min(bb,b.top+p.clientTop+p.clientHeight);}
+ }
+ return {id,box:[r.x,r.y,r.width,r.height],
+   visible_clip:[l,t,Math.max(0,rr-l),Math.max(0,bb-t)]};
+}'''
+
+SIZE_SNAPSHOT_JS = '() => { const geometry='+SIZE_GEOMETRY_JS+r''';
  const all=[...document.querySelectorAll('*')].filter(e=>
    !['STYLE','SCRIPT','LINK','META','NOSCRIPT','HEAD','TITLE'].includes(e.tagName));
- const tagged=all.some(e=>e.hasAttribute('data-fd-id'));
  const candidates=[],skipped=[];
  const before=all.map((e,i)=>{
-   e.setAttribute('data-tuide-verify-id',String(i));
    const s=getComputedStyle(e),r=e.getBoundingClientRect();
    let reason=null;
    if(e.namespaceURI!=='http://www.w3.org/1999/xhtml')reason='non_html';
    else if(['HTML','BODY','IFRAME','CANVAS'].includes(e.tagName)||e.shadowRoot)reason='root_or_embedded';
-   else if(tagged&&!e.hasAttribute('data-fd-id'))reason='not_policy_node';
    else if(!r.width||!r.height||s.visibility!=='visible'||s.display==='none')reason='not_visible';
    else if(s.display==='inline'||s.display==='contents'||s.display.startsWith('table')||e.getClientRects().length!==1)reason='inline_or_table';
    else {
@@ -228,31 +239,35 @@ SIZE_SNAPSHOT_JS = r'''() => {
      }
    }
    if(reason)skipped.push({id:String(i),reason});
-   else candidates.push({id:String(i),width:r.width,height:r.height});
-   return {id:String(i),box:[r.x,r.y,r.width,r.height]};
+   else candidates.push({id:String(i),width:r.width,height:r.height,
+     margins:Object.fromEntries(['margin-top','margin-right','margin-bottom','margin-left']
+       .map(p=>[p,s.getPropertyValue(p)]).filter(([p,v])=>/^-?[\d.]+px$/.test(v)))});
+   return geometry(e,String(i));
  });
+ // Measure the complete source before adding even verification attributes.
+ all.forEach((e,i)=>e.setAttribute('data-tuide-verify-id',String(i)));
  return {before,candidates,skipped};
 }'''
 
-SIZE_BOXES_JS = r'''() => [...document.querySelectorAll('[data-tuide-verify-id]')].map(e=>{
- const r=e.getBoundingClientRect();return {id:e.dataset.tuideVerifyId,box:[r.x,r.y,r.width,r.height]};
-})'''
+SIZE_BOXES_JS = '() => { const geometry='+SIZE_GEOMETRY_JS+r''';
+ return [...document.querySelectorAll('[data-tuide-verify-id]')]
+   .map(e=>geometry(e,e.dataset.tuideVerifyId));
+}'''
 
 
 def normalize_sizes(browser, html, viewport, out, max_pixel_mae, max_box_error):
-    """Conservative opt-in size freezing. Preserve CSS/DOM, rollback failed groups.
+    """Measure once, apply together, verify once; preserve DOM and stylesheets.
 
-    Inline important sizes win the author cascade; original rules (including
-    pseudo-elements) are not deleted. Unsafe nodes remain untouched. Every
-    accepted group is compared with the ORIGINAL page after a fresh reload.
+    Snapshot untagged layout dependencies too, before changing any CSS. Native
+    inline/table/transformed boxes stay read-only. Never mix separately accepted
+    subsets of the snapshot, which can change percentage resolution.
     """
     out=Path(out);out.mkdir(parents=True,exist_ok=True)
     browser.reset_context();browser.load(html,viewport)
+    before_png=browser.page.screenshot(animations='disabled')
     snapshot=browser.page.evaluate(SIZE_SNAPSHOT_JS)
     baseline=browser.page.content()
-    before_png=browser.page.screenshot(animations='disabled')
     (out/'before.png').write_bytes(before_png)
-    accepted_html=baseline;accepted=[];rejected=[];trials=0
 
     def assess(candidate):
         browser.reset_context();browser.load(candidate,viewport)
@@ -264,16 +279,14 @@ def normalize_sizes(browser, html, viewport, out, max_pixel_mae, max_box_error):
     # Do not claim successful normalization for a source that cannot replay.
     initial,_=assess(baseline)
     if not initial['accepted']:
-        report={**initial,'mode':'sizes','normalization_strategy':'selective-sizes-v2',
+        report={**initial,'mode':'sizes','normalization_strategy':'measured-inline-v3',
                 'error':'Original HTML is not stable across reloads','normalized_elements':0}
         write_json(out/'report.json',report)
         return report
 
-    def attempt(group):
-        nonlocal accepted_html,trials
-        if not group:return
-        browser.load(accepted_html,viewport)
-        browser.page.evaluate(r'''group=>{
+    browser.load(baseline,viewport)
+    browser.page.evaluate(r'''group=>{
+          document.documentElement.setAttribute('data-tuide-inline-actions','measured-v1');
           for(const a of group){
             const e=document.querySelector('[data-tuide-verify-id="'+a.id+'"]');
             const set=(p,v)=>e.style.setProperty(p,String(v),'important');
@@ -282,29 +295,22 @@ def normalize_sizes(browser, html, viewport, out, max_pixel_mae, max_box_error):
             set('min-width','0px');set('min-height','0px');
             set('max-width','none');set('max-height','none');
             set('flex','0 0 auto');set('aspect-ratio','auto');
+            for(const [p,v] of Object.entries(a.margins))set(p,v);
+            e.setAttribute('data-tuide-editable-fields',
+              ['width','height',...Object.keys(a.margins)].join(' '));
           }
-        }''',group)
-        candidate=browser.page.content();trials+=1
-        qa,_=assess(candidate)
-        if qa['accepted']:
-            accepted_html=candidate;accepted.extend(a['id'] for a in group)
-        elif len(group)>1:
-            middle=len(group)//2;attempt(group[:middle]);attempt(group[middle:])
-        else:
-            rejected.append({'id':group[0]['id'],'reason':'render_changed',
-                             'pixel_mae':qa['pixel_mae'],'max_box_error_px':qa['max_box_error_px']})
-
-    attempt(snapshot['candidates'])
-    # Final independent replay, including the zero-normalized fallback case.
-    qa,png=assess(accepted_html)
-    report={**qa,'mode':'sizes','normalization_strategy':'selective-sizes-v2',
+        }''',snapshot['candidates'])
+    candidate=browser.page.content()
+    qa,png=assess(candidate)
+    accepted=[a['id'] for a in snapshot['candidates']]
+    report={**qa,'mode':'sizes','normalization_strategy':'measured-inline-v3',
             'normalized_elements':len(accepted),'normalized_ids':accepted,
-            'preserved_elements':snapshot['skipped']+rejected,'verification_trials':trials,
-            'viewport':viewport,'partial_normalization':True,
-            'warning':'Original stylesheets and unsafe nodes are retained; constraints are neutralized only on accepted nodes.'}
+            'preserved_elements':snapshot['skipped'],'verification_trials':1,
+            'viewport':viewport,'partial_normalization':False,
+            'warning':'Original stylesheets remain read-only. Unsupported layout nodes and auto margins are not editable; changed pages are rejected, not partially frozen.'}
     write_json(out/'report.json',report)
     (out/'after.png').write_bytes(png)
-    (out/('normalized.html' if qa['accepted'] else 'rejected.html')).write_text(accepted_html)
+    (out/('normalized.html' if qa['accepted'] else 'rejected.html')).write_text(candidate)
     return report
 
 
