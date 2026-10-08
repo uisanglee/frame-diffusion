@@ -11,9 +11,9 @@ from framediff.tree_online import target_pool,OnlineSampler,abstraction,changed
 
 def make_rows(tmp_path):
     bodies={
-        'inert':'<div style="display:flex;gap:10px"><button>A</button></div>',
-        'hidden':'<button style="display:flex;min-width:200px;min-height:60px;gap:10px"><span>A</span><span>B</span></button>',
-        'active':'<div style="display:flex;gap:10px"><button>A</button><button>B</button></div>',
+        'inert':'<span style="width:100px">A</span>',
+        'hidden':'<button style="min-width:200px;min-height:60px;max-width:200px;max-height:60px"><span style="margin-left:10px">A</span></button>',
+        'active':'<div style="display:flex;gap:10px"><button style="width:80px">A</button><button>B</button></div>',
     }
     rows=[]
     with HtmlBrowser() as b:
@@ -34,7 +34,7 @@ def test_preparsed_inert_and_unobservable_pages_excluded_and_cached(tmp_path,mon
     rows=make_rows(tmp_path);cache=tmp_path/'cache'
     pool=target_pool(rows,cache_dir=cache,observation_size=64)
     assert [p['id'] for p in pool]==['active']
-    assert {e[1] for e in pool[0]['visible_candidates']}=={'column-gap'}
+    assert {e[1] for e in pool[0]['visible_candidates']}=={'width'}
     import framediff.tree_online as online
     with monkeypatch.context() as patch:
         patch.setattr(online,'HtmlBrowser',lambda:pytest.fail('Cached pages must not open Chromium'))
@@ -64,7 +64,7 @@ def test_every_sample_and_teacher_change_abstraction_in_both_modes(tmp_path):
                 repaired,_,_=abstraction(b,tree,viewport,64)
                 assert changed(frame,repaired)
                 assert row['online']['abstraction_max_difference']>0
-                assert row['replacement_edit'][1]=='column-gap'
+                assert row['replacement_edit'][1]=='width'
                 b.load(Path(row['target_html']).read_text(),viewport)
                 previous,_,_=abstraction(b,tree,viewport,64)
                 for edit in row['online']['corruptions']:

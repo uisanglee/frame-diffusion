@@ -44,10 +44,24 @@ screenshots. Abstract visible rectangles use ancestor overflow bounds while full
 box geometry remains available for actions. Rounded/complex clipping, opacity,
 and stacking are not represented exactly by box abstractions.
 
-## Optional explicit style normalization
+## Explicit style normalization
 
-Normalization is NOT automatically inserted into ordinary training/evaluation.
-Original HTML keeps its original flow, flex/grid, padding and parent relations.
+`prepare_stylesheet_policy.sh` now runs `visual-tree-normalize` first in `sizes`
+mode. It bakes clean computed styles into inline CSS, fixes border-box sizes in
+px, removes author stylesheets and min/max size constraints, and preserves DOM
+parents, flow, padding, display and gap. Flex sizing is frozen with `flex:0 0 auto`.
+Accepted normalized HTML and screenshots are saved once and reused on resume.
+Geometry and global/per-element pixel checks reject changes to the clean view.
+This changes the controlled learning environment; it does not establish
+performance on arbitrary unnormalized VLM HTML.
+
+Each normalized page produces a fresh seed corruption. Old corruption labels,
+CSS owners and screenshot caches are not copied across the normalization.
+Fixed val/test states are generated from these new clean targets. Train noise
+is online and never runs normalization again. Detector weights are reused;
+target prediction caches are reused only when image hashes/provenance match.
+The new data, cache and policy output paths prevent resuming an old run silently.
+Direct real-web evaluation does not automatically normalize VLM-generated HTML.
 
 For a separately chosen explicit-style experiment:
 
@@ -79,29 +93,24 @@ semantics and browser layout constraints.
 On rollout failure, logs/time/execution counts and the last available HTML are
 retained with failed=true. There is no restoration stage or restoration cost.
 
-## Gap-enabled training
+## Size and margin actions
 
-Replacement policies now edit eight fields: width, height, four margins,
-row-gap and column-gap. CSSOM expands `gap:10px 20px` into row-gap=10px and
-column-gap=20px, preserving priority. An action changes one longhand, leaving
-the other gap dimension, display, grid tracks and DOM parents intact. Changing
-both dimensions can require two actions. Negative gap values and `auto` are
-illegal; `normal` is supported by replacement decoding. Finite-state diffusion
-also supports nonnegative numeric gap slots (px/%), not keyword slots.
+Replacement policies edit six fields: width, height and four margins.
+Row-gap and column-gap are excluded from corruption, labels, decoding and
+finite-state diffusion slots. Existing gap CSS remains fixed, along with
+display, grid tracks and DOM parents. A width edit does not remove gap.
 
-Online corruption samples existing supported declarations, including gap
-longhands. Candidate inspection probes up to four deterministic values per
+Online corruption samples existing supported size/margin declarations.
+Candidate inspection probes up to four deterministic values per
 owner/property and caches edits witnessed to change both layout and the clipped
 occupancy/boundary tensor. Pages without a witnessed candidate are excluded.
 This is finite probing, not a proof that no conceivable CSS value could work.
-It does not invent overrides
-or impose a gap sampling quota. Data without active gap declarations will not
-teach gap repair. Use original flex/grid HTML, not optional absolute-box
-normalization, for this experiment. Inspect online_teacher_property_distribution,
+It does not invent overrides. Gap-only pages have no supported mutation sites.
+Inspect online_teacher_property_distribution,
 symbolic_by_predicted_property and freeze-report property counts for coverage.
 
 The action/state schema changed. Do not resume old policy weights or reuse
-six-field labels. Reuse the original non-flat HTML/images and detector weights,
+eight-field labels. Reuse the original non-flat HTML/images and detector weights,
 but reparse CSS labels and regenerate fixed validation/test corruptions:
 
 ```bash
@@ -109,11 +118,11 @@ CACHE_GPU=4 bash scripts/prepare_stylesheet_policy.sh
 CUDA_VISIBLE_DEVICES=3 bash scripts/train_tuide_scale.sh s
 ```
 
-Defaults use data/webui-css-owners-v5-visible and runs/css-owners-v5-visible-shared;
-training uses runs/tuide-visible-s-abstract (POLICY_MODES=screenshot selects RGB).
+Defaults use data/webui-css-owners-v7-size-margin and runs/css-owners-v7-size-margin-shared;
+training uses runs/tuide-size-margin-s-abstract (POLICY_MODES=screenshot selects RGB).
 Old output directories are not deleted. Target detector predictions may be
 reused by the cache command when their provenance matches. Train corruptions
-are generated online, while held-out gap examples are fixed during preparation.
+are generated online, while held-out size/margin examples are fixed during preparation.
 
 The first eligibility inspection is slower: it executes actual candidate edits.
 Entries under .online-target-cache include successful candidates and exclusions,

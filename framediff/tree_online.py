@@ -27,7 +27,7 @@ from .ir import read_jsonl
 from .tree_edits import FIELDS, CONTRACT, current_state, execute, extract, repair_path, value_valid
 from .web_experiment import digest
 
-ONLINE_CONTRACT = 'online-css-visible-values-v5'
+ONLINE_CONTRACT = 'online-css-visible-values-v6-size-margin'
 SAMPLING_CONTRACT = 'property-first-owner-uniform-v1'
 # Bump when eligibility semantics change; old syntax-only caches are invalid.
 INSPECTION_LOGIC_VERSION = 'visible-candidates-v1-four-probes'
@@ -38,7 +38,7 @@ ABSTRACTION_EPS = 1e-6
 def mutation_sites(state):
     """Editable, present declarations eligible for value replacement."""
     if any(len(props)!=len(FIELDS) for props in state):
-        raise ValueError('Old CSS declaration fields; reprepare labels with row-gap/column-gap support')
+        raise ValueError('CSS field schema changed; prepare six-field size/margin labels')
     return [(node,field,value,priority)
             for node in range(1,len(state))
             for field,(value,priority) in zip(FIELDS,state[node])
@@ -164,7 +164,7 @@ def target_pool(rows, manifest=None, cache_dir=None, observation_size=384):
         target = {k:copy.deepcopy(row[k]) for k in ('group','split','source_sha','viewport','current',
                   'target_image','target_elements')}
         for key in ('predicted_target_elements','parser_provenance','parser_sha','css_owners',
-                    'target_declaration_state'):
+                    'target_declaration_state','normalization_contract'):
             if key in row: target[key] = row[key]
         target.update(id=page_id,target_html=str(Path(html).resolve()),corruption_observation_size=observation_size)
         clean_state=row.get('target_declaration_state')
@@ -213,6 +213,7 @@ def target_pool(rows, manifest=None, cache_dir=None, observation_size=384):
                     # persisted as permanently unusable source pages.
                     if error is None:save_inspection(entry,state,**metadata)
             if error is not None:
+                print({'online_target_inspection_error':page_id,'error':error},flush=True)
                 del targets[page_id]
                 excluded += 1
                 inspection_errors += 1
@@ -276,11 +277,7 @@ def sample_mutation(state, viewport, rng, explicit=False, sites=None):
     existing=mutation_sites(state) if sites is None else sites
     if not existing: raise ValueError('No supported existing CSS values to corrupt')
     node,field,old,priority=choose_mutation_site(existing,rng)
-    axis=viewport[0 if field in ('width','margin-left','margin-right','column-gap') else 1]
-    if field in ('row-gap','column-gap'):
-        value=f'{round(rng.uniform(0,.15)*axis,3):g}px'
-        if value==old:value='1px' if old!='1px' else '2px'
-        return [node,field,value,priority]
+    axis=viewport[0 if field in ('width','margin-left','margin-right') else 1]
     if rng.random()<.2 and not explicit:
         value=f'{rng.randint(5,95) if field in ("width","height") else rng.randint(-15,15)}%'
     else:

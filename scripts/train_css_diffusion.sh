@@ -3,11 +3,11 @@
 set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
-data=${1:-data/webui-css-diffusion-v2-gap}
+data=${1:-data/webui-css-diffusion-v3-size-margin}
 mode=${POLICY_MODES:-abstract}
 scale=${POLICY_SCALE:-s}
 target=${TARGET_SOURCE:-oracle}
-out=${2:-runs/css-diffusion-v2-gap-$scale-$mode-$target}
+out=${2:-runs/css-diffusion-v3-size-margin-$scale-$mode-$target}
 for split in train val; do
   if [[ ! -s "$data/$split.jsonl" ]]; then
     echo "Missing $data/$split.jsonl; run visual-css-diffusion-prepare first." >&2

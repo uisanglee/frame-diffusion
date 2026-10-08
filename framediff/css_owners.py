@@ -8,7 +8,7 @@ import json
 
 from .tree_edits import FIELDS, validate_edit
 
-CONTRACT = 'css-owner-tree-v3-gap'
+CONTRACT = 'css-owner-tree-v4-size-margin'
 
 # Only embedded stylesheets are editable. External sheets keep participating in
 # browser layout. Group rules preserve their index paths when values change.

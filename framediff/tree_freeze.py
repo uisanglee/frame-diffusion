@@ -20,7 +20,7 @@ def freeze(args):
         'observation_size':getattr(args,'observation_size',384)},args.resume)
     # Online training needs clean targets, not fresh stored train screenshots.
     if any(r.get('teacher_strategy')!=CONTRACT for r in read_jsonl(source/'policy-train.jsonl')):
-        raise ValueError('Prepare --stylesheets labels with the current gap action contract first')
+        raise ValueError('Prepare --stylesheets labels with the current size/margin action contract first')
     for kind in ('policy','pages'):
         write_jsonl(out/f'{kind}-train.jsonl',list(read_jsonl(source/f'{kind}-train.jsonl')))
     report={}

@@ -8,17 +8,19 @@ import re
 import torch
 from torch import nn
 
-CONTRACT = 'css-value-d3pm-v2-gap'
+CONTRACT = 'css-value-d3pm-v3-size-margin'
 
 
 def grid(field, unit, bins):
     """Global grids, never centered on an unavailable ground-truth value."""
+    from .tree_edits import FIELDS
+    if field not in FIELDS:raise ValueError('Unsupported size/margin diffusion field')
     if bins < 3 or bins % 2 != 1:
         raise ValueError('bins must be odd and >=3')
     if unit not in ('px', '%'):
         raise ValueError('Only px and % are diffused; other declarations stay fixed')
     extent = 2048. if unit == 'px' else 200.
-    return torch.linspace(0, extent, bins, dtype=torch.float64) if field in ('width', 'height', 'row-gap', 'column-gap') else torch.linspace(-extent/2, extent/2, bins, dtype=torch.float64)
+    return torch.linspace(0, extent, bins, dtype=torch.float64) if field in ('width', 'height') else torch.linspace(-extent/2, extent/2, bins, dtype=torch.float64)
 
 
 def numeric_slots(state, fields, bins, minimums=None):

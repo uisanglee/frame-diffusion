@@ -15,11 +15,10 @@ from .ir import read_json, read_jsonl, write_json, write_jsonl
 from .visual import NUMERIC_FIELDS, elements
 from .web_experiment import digest, guard_run
 
-CONTRACT = 'css-declaration-tree-v2-gap'
-# Use longhands: gap:10px 20px becomes two independently editable slots.
-# Legacy numeric-head policies retain their original NUMERIC_FIELDS contract.
-FIELDS = (*NUMERIC_FIELDS, 'row-gap', 'column-gap')
-NONNEGATIVE_FIELDS = ('width', 'height', 'row-gap', 'column-gap')
+CONTRACT = 'css-declaration-tree-v3-size-margin'
+# Gap remains fixed CSS context; only sizes and four margins are editable.
+FIELDS = tuple(NUMERIC_FIELDS)
+NONNEGATIVE_FIELDS = ('width', 'height')
 UNITS = ('px', '%', 'em', 'rem', 'vw', 'vh', 'vmin', 'vmax', 'ch', 'ex', 'cm', 'mm', 'in', 'pt', 'pc', 'q')
 KEYWORDS = ('auto', 'inherit', 'initial', 'unset', 'revert', 'revert-layer')
 MAX_VALUE = 32
@@ -51,12 +50,11 @@ def bounded_px_prefix(value, minimum):
 
 
 def keywords(field):
-    if field in ('row-gap','column-gap'):
-        return tuple(k for k in KEYWORDS if k!='auto') + ('normal',)
     return KEYWORDS + (('min-content', 'max-content', 'fit-content') if field in ('width', 'height') else ())
 
 
 def value_valid(value, field):
+    if field not in FIELDS: return False
     if not isinstance(value, str) or len(value) > MAX_VALUE: return False
     if value in keywords(field): return True
     m = re.fullmatch(r'([+-]?(?:\d+(?:\.\d*)?|\.\d+))([a-z%]*)', value)
@@ -67,6 +65,7 @@ def value_valid(value, field):
 
 
 def value_prefix(value, field):
+    if field not in FIELDS: return False
     if len(value) > MAX_VALUE: return False
     if any(k.startswith(value) for k in keywords(field)): return True
     sign = r'[+]?' if field in NONNEGATIVE_FIELDS else r'[+-]?'

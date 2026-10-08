@@ -101,7 +101,7 @@ class TreePolicy(nn.Module):
         for i,state in enumerate(states):
             if len(state)>self.cfg.max_nodes: raise ValueError('Too many DOM nodes')
             for j,props in enumerate(state):
-                if len(props)!=len(FIELDS):raise ValueError('CSS field schema changed; reprepare gap-enabled labels')
+                if len(props)!=len(FIELDS):raise ValueError('CSS field schema changed; prepare six-field size/margin labels')
                 for k,(value,priority) in enumerate(props):
                     # Current CSS is context, not target CSS. Unsupported unchanged
                     # values remain visible as bytes; only replacements use grammar.
@@ -308,6 +308,11 @@ def train(args):
     if getattr(args,'prediction_probability',0): raise ValueError('Use --predicted-targets; stochastic legacy target mixing is retired')
     training=list(read_jsonl(args.train));validation=list(read_jsonl(args.val))
     if not training or not validation: raise ValueError('Nonempty train and validation data required')
+    normalizations={r.get('normalization_contract') for r in training+validation}
+    if len(normalizations)>1:raise ValueError('Mixed normalized/original policy data; prepare matching train and validation')
+    if next(iter(normalizations)) is not None:
+        print({'normalization_contract':next(iter(normalizations)),
+               'normalized_training_pages':len({r['id'].rsplit('/',1)[0] for r in training})},flush=True)
     validate_splits(training+validation)
     if any(r['split']!='train' for r in training) or any(r['split']!='val' for r in validation): raise ValueError('Wrong split files')
     cfg=TreeConfig(**{k:getattr(args,k) for k in ('mode','size','hidden','layers','heads','max_nodes','token_grid')})
@@ -323,7 +328,7 @@ def train(args):
         if len(row['declaration_state'])!=node_count or node_count>cfg.max_nodes:
             raise ValueError('Invalid declaration state node count')
         if any(len(p)!=len(FIELDS) for p in row['declaration_state']):
-            raise ValueError('CSS field schema changed; reprepare gap-enabled labels')
+            raise ValueError('CSS field schema changed; reprepare six-field size/margin labels')
         tok.encode(row['replacement_edit'],node_count)
         from .explicit_html import check_record_edit
         check_record_edit(row,row['replacement_edit'])
