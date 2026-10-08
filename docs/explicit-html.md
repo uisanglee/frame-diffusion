@@ -47,9 +47,19 @@ and stacking are not represented exactly by box abstractions.
 ## Explicit style normalization
 
 `prepare_stylesheet_policy.sh` now runs `visual-tree-normalize` first in `sizes`
-mode. It bakes clean computed styles into inline CSS, fixes border-box sizes in
-px, removes author stylesheets and min/max size constraints, and preserves DOM
-parents, flow, padding, display and gap. Flex sizing is frozen with `flex:0 0 auto`.
+mode. The selective-sizes-v2 normalizer preserves original stylesheets, DOM,
+pseudo-elements, flow, padding, display and gap. It tries inline important
+border-box px dimensions, neutralizes min/max constraints, and freezes flex
+sizing ONLY on eligible elements. Original rule constraints are retained but
+overridden on accepted elements; this is not global cascade removal.
+Transformed subtrees, fragmented/inline elements and embedded content are left
+untouched, not used as a reason to reject the whole page. Failed groups are
+bisected and individual unsafe edits rolled back. Every trial and final reload
+is checked against the original geometry and global/per-element pixels using
+the same tolerances, never against a progressively drifting intermediate image.
+Unstable sources are rejected. A page with zero normalized elements may remain
+usable if its original CSS has a visible mutation candidate; this fallback is
+explicitly counted separately, not claimed as successful size freezing.
 Accepted normalized HTML and screenshots are saved once and reused on resume.
 Geometry and global/per-element pixel checks reject changes to the clean view.
 This changes the controlled learning environment; it does not establish
@@ -70,18 +80,18 @@ For a separately chosen explicit-style experiment:
       --width 1280 --height 720 --mode boxes
 
 The supported modes are sizes and boxes. Both retain existing element parents.
-sizes freezes border-box dimensions but retains flow/padding. boxes additionally
+sizes selectively freezes border-box dimensions but retains flow/padding. boxes additionally
 uses absolute positions under the SAME parent and bakes removed padding offsets
 into positions; it does not preserve original responsive layout rules.
 Single-line direct text may be wrapped locally without moving it outside its
 original UI component. Controls' descendant text remains suppressed by the
 control abstraction rule.
 
-Computed styles are captured before edits, then author stylesheets are removed.
+In the separate boxes mode, computed styles are captured before edits, then author stylesheets are removed.
 Verification compares element geometry and global/per-element image differences.
 Only accepted pages produce normalized.html; originals are never overwritten.
-Generated pseudo-elements, transforms, fragmented text, and unsupported embedded
-content are rejected. External resources must be bundled; browser requests remain
+In boxes mode, generated pseudo-elements, transforms, fragmented text, and unsupported embedded
+content are rejected. Sizes mode preserves these instead. External resources must be bundled; browser requests remain
 blocked. This is a single-viewport conversion, not responsive reconstruction.
 
 For explicit boxes, width/height cannot be smaller than border+retained-padding
@@ -118,8 +128,8 @@ CACHE_GPU=4 bash scripts/prepare_stylesheet_policy.sh
 CUDA_VISIBLE_DEVICES=3 bash scripts/train_tuide_scale.sh s
 ```
 
-Defaults use data/webui-css-owners-v7-size-margin and runs/css-owners-v7-size-margin-shared;
-training uses runs/tuide-size-margin-s-abstract (POLICY_MODES=screenshot selects RGB).
+Defaults use data/webui-css-owners-v8-selective-size-margin and runs/css-owners-v8-selective-size-margin-shared;
+training uses runs/tuide-selective-size-margin-s-abstract (POLICY_MODES=screenshot selects RGB).
 Old output directories are not deleted. Target detector predictions may be
 reused by the cache command when their provenance matches. Train corruptions
 are generated online, while held-out size/margin examples are fixed during preparation.
@@ -143,3 +153,21 @@ edits can therefore be excluded even when full screenshots differ.
 These checks apply to replacement-policy online corruption and frozen held-out
 states. The separate finite-state CSS diffusion experiment retains its specified
 transition kernel: rejection filtering would change that probabilistic model.
+
+Before processing the full server corpus, smoke-check real pages in a separate
+directory (20 per split, not training-ready benchmark data):
+
+```bash
+python -m framediff visual-tree-normalize \
+  --rendered data/webui-10k-v5-improvement-distribution \
+  --out data/webui-selective-sizes-smoke --limit-pages 20 --resume
+```
+
+Inspect prepare-report.json, progress-{split}.json and rejections-{split}.jsonl.
+Failures include their stage and are saved immediately, along with per-page
+page-status.json; no need to wait for the split to finish. Per-page report.json
+lists normalized and preserved elements and rendering errors. Rendering can be
+expensive on pages requiring many rollback trials. Do not loosen visual QA to
+increase the acceptance rate. Server WebUI coverage must be measured; local
+regression fixtures do not establish that coverage. Existing v7 artifacts are
+preserved but are not reused as v8 normalization results.

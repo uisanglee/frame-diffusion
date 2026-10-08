@@ -4,13 +4,14 @@
 def add_parsers(sub):
     from .explicit_html import add_parser as add_explicit_parser
     add_explicit_parser(sub)
-    p=sub.add_parser('visual-tree-normalize',help='Bake clean computed CSS and sizes once before online corruption')
+    p=sub.add_parser('visual-tree-normalize',help='Selectively freeze safe sizes while preserving original CSS and DOM')
     p.add_argument('--rendered',required=True);p.add_argument('--out',required=True)
     p.add_argument('--resume',action='store_true');p.add_argument('--seed',type=int,default=42)
     p.add_argument('--max-css-owners',type=int,default=512)
     p.add_argument('--observation-size',type=int,default=384)
     p.add_argument('--max-pixel-mae',type=float,default=.01)
     p.add_argument('--max-box-error',type=float,default=1.)
+    p.add_argument('--limit-pages',type=int,default=0,help='Smoke check: maximum pages per split; 0 means all')
     from .css_diffusion_experiment import add_parsers as add_css_diffusion_parsers
     add_css_diffusion_parsers(sub)
     from .composition import add_parsers as add_composition_parsers

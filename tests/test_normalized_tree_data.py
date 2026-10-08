@@ -34,13 +34,13 @@ def test_normalize_then_corrupt_and_resume(tmp_path, monkeypatch):
     with HtmlBrowser() as browser:
         from pathlib import Path
         browser.load(Path(row['target_html']).read_text(),row['viewport'])
-        assert browser.page.locator('style:not([data-framediff-static])').count()==0
+        assert browser.page.locator('style:not([data-framediff-static])').count()==1
         assert browser.page.locator('.row > .card').count()==2
         assert browser.page.locator('.row').evaluate('e=>getComputedStyle(e).display')=='flex'
         assert browser.page.locator('.card').first.evaluate('e=>e.style.width')=='200px'
-        assert browser.page.locator('.card').first.evaluate('e=>e.style.maxWidth')==''
-        assert browser.page.locator('.card').first.evaluate('e=>e.style.maxHeight')==''
-        browser.page.locator('.card').first.evaluate("e=>e.style.width='300px'")
+        assert browser.page.locator('.card').first.evaluate('e=>getComputedStyle(e).maxWidth')=='none'
+        assert browser.page.locator('.card').first.evaluate('e=>getComputedStyle(e).maxHeight')=='none'
+        browser.page.locator('.card').first.evaluate("e=>e.style.setProperty('width','300px','important')")
         assert browser.page.locator('.card').first.bounding_box()['width']==300
         assert browser.page.locator('.card').nth(1).bounding_box()['x']==320
     pool=target_pool([row],cache_dir=out/'.online-target-cache',observation_size=96)

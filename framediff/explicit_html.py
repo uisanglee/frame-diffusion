@@ -206,10 +206,114 @@ FREEZE_JS = r'''(mode) => {
 }'''
 
 
+SIZE_SNAPSHOT_JS = r'''() => {
+ const all=[...document.querySelectorAll('*')].filter(e=>
+   !['STYLE','SCRIPT','LINK','META','NOSCRIPT','HEAD','TITLE'].includes(e.tagName));
+ const tagged=all.some(e=>e.hasAttribute('data-fd-id'));
+ const candidates=[],skipped=[];
+ const before=all.map((e,i)=>{
+   e.setAttribute('data-tuide-verify-id',String(i));
+   const s=getComputedStyle(e),r=e.getBoundingClientRect();
+   let reason=null;
+   if(e.namespaceURI!=='http://www.w3.org/1999/xhtml')reason='non_html';
+   else if(['HTML','BODY','IFRAME','CANVAS'].includes(e.tagName)||e.shadowRoot)reason='root_or_embedded';
+   else if(tagged&&!e.hasAttribute('data-fd-id'))reason='not_policy_node';
+   else if(!r.width||!r.height||s.visibility!=='visible'||s.display==='none')reason='not_visible';
+   else if(s.display==='inline'||s.display==='contents'||s.display.startsWith('table')||e.getClientRects().length!==1)reason='inline_or_table';
+   else {
+     for(let p=e;p;p=p.parentElement){
+       const ps=getComputedStyle(p);
+       if(ps.transform!=='none'||ps.rotate!=='none'||ps.scale!=='none'||ps.translate!=='none'||
+          !['1','normal'].includes(ps.zoom)){reason='transformed_ancestry';break;}
+     }
+   }
+   if(reason)skipped.push({id:String(i),reason});
+   else candidates.push({id:String(i),width:r.width,height:r.height});
+   return {id:String(i),box:[r.x,r.y,r.width,r.height]};
+ });
+ return {before,candidates,skipped};
+}'''
+
+SIZE_BOXES_JS = r'''() => [...document.querySelectorAll('[data-tuide-verify-id]')].map(e=>{
+ const r=e.getBoundingClientRect();return {id:e.dataset.tuideVerifyId,box:[r.x,r.y,r.width,r.height]};
+})'''
+
+
+def normalize_sizes(browser, html, viewport, out, max_pixel_mae, max_box_error):
+    """Conservative opt-in size freezing. Preserve CSS/DOM, rollback failed groups.
+
+    Inline important sizes win the author cascade; original rules (including
+    pseudo-elements) are not deleted. Unsafe nodes remain untouched. Every
+    accepted group is compared with the ORIGINAL page after a fresh reload.
+    """
+    out=Path(out);out.mkdir(parents=True,exist_ok=True)
+    browser.reset_context();browser.load(html,viewport)
+    snapshot=browser.page.evaluate(SIZE_SNAPSHOT_JS)
+    baseline=browser.page.content()
+    before_png=browser.page.screenshot(animations='disabled')
+    (out/'before.png').write_bytes(before_png)
+    accepted_html=baseline;accepted=[];rejected=[];trials=0
+
+    def assess(candidate):
+        browser.reset_context();browser.load(candidate,viewport)
+        png=browser.page.screenshot(animations='disabled')
+        qa=compare_renders(snapshot['before'],browser.page.evaluate(SIZE_BOXES_JS),
+                           before_png,png,max_box_error,max_pixel_mae)
+        return qa,png
+
+    # Do not claim successful normalization for a source that cannot replay.
+    initial,_=assess(baseline)
+    if not initial['accepted']:
+        report={**initial,'mode':'sizes','normalization_strategy':'selective-sizes-v2',
+                'error':'Original HTML is not stable across reloads','normalized_elements':0}
+        write_json(out/'report.json',report)
+        return report
+
+    def attempt(group):
+        nonlocal accepted_html,trials
+        if not group:return
+        browser.load(accepted_html,viewport)
+        browser.page.evaluate(r'''group=>{
+          for(const a of group){
+            const e=document.querySelector('[data-tuide-verify-id="'+a.id+'"]');
+            const set=(p,v)=>e.style.setProperty(p,String(v),'important');
+            e.setAttribute('data-tuide-explicit-id',a.id);
+            set('box-sizing','border-box');set('width',a.width+'px');set('height',a.height+'px');
+            set('min-width','0px');set('min-height','0px');
+            set('max-width','none');set('max-height','none');
+            set('flex','0 0 auto');set('aspect-ratio','auto');
+          }
+        }''',group)
+        candidate=browser.page.content();trials+=1
+        qa,_=assess(candidate)
+        if qa['accepted']:
+            accepted_html=candidate;accepted.extend(a['id'] for a in group)
+        elif len(group)>1:
+            middle=len(group)//2;attempt(group[:middle]);attempt(group[middle:])
+        else:
+            rejected.append({'id':group[0]['id'],'reason':'render_changed',
+                             'pixel_mae':qa['pixel_mae'],'max_box_error_px':qa['max_box_error_px']})
+
+    attempt(snapshot['candidates'])
+    # Final independent replay, including the zero-normalized fallback case.
+    qa,png=assess(accepted_html)
+    report={**qa,'mode':'sizes','normalization_strategy':'selective-sizes-v2',
+            'normalized_elements':len(accepted),'normalized_ids':accepted,
+            'preserved_elements':snapshot['skipped']+rejected,'verification_trials':trials,
+            'viewport':viewport,'partial_normalization':True,
+            'warning':'Original stylesheets and unsafe nodes are retained; constraints are neutralized only on accepted nodes.'}
+    write_json(out/'report.json',report)
+    (out/'after.png').write_bytes(png)
+    (out/('normalized.html' if qa['accepted'] else 'rejected.html')).write_text(accepted_html)
+    return report
+
+
 def convert(browser, html, viewport, out, mode='boxes', max_pixel_mae=.01, max_box_error=1.):
     """Emit normalized.html only when a fresh reload passes geometry/pixel QA."""
     if mode not in ('boxes','sizes'):raise ValueError('Parent separation was removed; use boxes or sizes')
     reject_flat_html(html)
+    if mode=='sizes':
+        return normalize_sizes(browser,html,viewport,out,max_pixel_mae,max_box_error)
     out=Path(out);out.mkdir(parents=True,exist_ok=True)
     browser.reset_context();browser.load(html,viewport)
     browser.page.screenshot(path=str(out/'before.png'),animations='disabled')

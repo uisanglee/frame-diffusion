@@ -8,11 +8,11 @@ if [[ $# -gt 4 ]]; then
 fi
 source_corpus=${1:-data/webui-10k-v5-improvement-distribution}
 detector=${2:-runs/webui-10k-v3-nospacing-fresh-webui/detector/best.pt}
-data_out=${3:-data/webui-css-owners-v7-size-margin}
-cache_out=${4:-runs/css-owners-v7-size-margin-shared}
+data_out=${3:-data/webui-css-owners-v8-selective-size-margin}
+cache_out=${4:-runs/css-owners-v8-selective-size-margin-shared}
 [[ -f "$source_corpus/rendered/policy-train.jsonl" ]] && source_corpus="$source_corpus/rendered"
-# Normalize clean targets once; old corruption images/labels cannot be reused
-# after baking cascade and removing size constraints.
+# Selectively freeze safe sizes once, preserving original CSS and DOM.
+# Old whole-page normalization outputs are not compatible.
 labels=${SOURCE_LABELS:-${data_out}-labels}
 python -m framediff visual-tree-normalize --rendered "$source_corpus" \
   --out "$labels" --max-css-owners "${MAX_CSS_OWNERS:-512}" \
