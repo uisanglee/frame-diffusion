@@ -4,6 +4,7 @@ import io
 import shutil
 import statistics
 import time
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +23,67 @@ from .web_experiment import digest, guard_run, signature
 
 
 KIND = 'frozen-webui-css-rollout-v1'
+
+
+def coverage_provenance(data_path, evaluated_rows, results, methods):
+    """Recover test attrition from normalization and frozen-corruption reports."""
+    data_dir=Path(data_path).resolve().parent
+    freeze_path=data_dir/'freeze-report.json';freeze=read_json(freeze_path) if freeze_path.is_file() else {}
+    config_path=data_dir/'config.json';labels=None
+    if config_path.is_file():
+        config=read_json(config_path)
+        for path in config.get('data',{}):
+            candidate=Path(path).resolve().parent
+            if (candidate/'prepare-report.json').is_file():labels=candidate;break
+    if labels is None:
+        candidate=data_dir.with_name(data_dir.name+'-labels')
+        if (candidate/'prepare-report.json').is_file():labels=candidate
+    prepare=read_json(labels/'prepare-report.json') if labels else {}
+    test_prepare=prepare.get('test',{});test_freeze=freeze.get('test',{})
+    available=int(test_prepare.get('source_pages',test_prepare.get('clean_pages',
+        test_freeze.get('pages',len({r['id'].rsplit('/',1)[0] for r in evaluated_rows})))))
+    source_n=test_prepare.get('selected_pages')
+    # Backward-compatible provenance recovery for already-prepared corpora:
+    # follow the normalization config to visual_data's split_coverage report.
+    if source_n is None and labels and (labels/'config.json').is_file():
+        labels_config=read_json(labels/'config.json')
+        for path in labels_config.get('sources',{}):
+            upstream=Path(path).resolve().parent/'report.json'
+            if upstream.is_file():
+                source_n=read_json(upstream).get('split_coverage',{}).get('test',{}).get('selected')
+                if source_n is not None:break
+    source_n=int(source_n if source_n is not None else available)
+    normalization_input=int(test_prepare.get('clean_pages',available))
+    normalized=int(test_prepare.get('kept',normalization_input))
+    frozen=int(test_freeze.get('pages',normalized))
+    evaluated_pages=len({r['id'].rsplit('/',1)[0] for r in evaluated_rows})
+    result_by_method={method:[r for r in results if r['method']==method] for method in methods}
+    info={'source_test_pages':source_n,
+        'upstream_available_pages':available,
+        'upstream_unavailable':max(0,source_n-available),
+        'missing_clean_records':max(0,available-normalization_input),
+        'normalization_input_pages':normalization_input,
+        'normalization_kept_pages':normalized,
+        'normalization_rejected_pages':int(test_prepare.get('rejected',max(0,normalization_input-normalized))),
+        'fixed_corruption_kept_pages':frozen,
+        'fixed_corruption_rejected_pages':int(test_freeze.get('failed_pages',max(0,normalized-frozen))),
+        'evaluated_pages':evaluated_pages,
+        'evaluation_limit_excluded_pages':max(0,frozen-evaluated_pages),
+        'preprocessing_coverage':frozen/source_n if source_n else 0.,
+        'evaluated_coverage':evaluated_pages/source_n if source_n else 0.,
+        'normalization_top_errors':test_prepare.get('top_errors',[]),'methods':{}}
+    rejection_path=data_dir/'rejections-test.jsonl'
+    if rejection_path.is_file():
+        reasons=Counter(str(r.get('error','unknown')).splitlines()[0] for r in read_jsonl(rejection_path))
+        info['fixed_corruption_top_errors']=[[reason,count] for reason,count in reasons.most_common(20)]
+    for method,group in result_by_method.items():
+        trials={}
+        for row in group:trials.setdefault(row['page_id'],[]).append(row)
+        successful={page_id for page_id,page_trials in trials.items() if all(not r['failed'] for r in page_trials)}
+        info['methods'][method]={'source_n':source_n,'successful_pages':len(successful),
+            'rollout_failed_trials':sum(bool(r['failed']) for r in group),
+            'end_to_end_success_rate':len(successful)/source_n if source_n else 0.}
+    return info
 
 
 def state_distance(a, b):
@@ -149,6 +211,8 @@ def evaluate(args):
         item['symbolic_improvement_rate']=statistics.mean(r['final_symbolic_distance']<r['initial_symbolic_distance'] for r in selected)
         summary.append(item)
     write_json(out/'summary.json',summary)
+    coverage=coverage_provenance(args.data,rows,results,methods)
+    write_json(out/'coverage.json',coverage)
     lines=['# Frozen held-out WebUI CSS rollout','',
            'Fixed test corruptions only; no VLM generation and no target state is used for action selection.','',
            '| Method | n | failed | initial IoU | final IoU | pixel MAE | symbolic before | symbolic after | actions | seconds |',
@@ -157,5 +221,23 @@ def evaluate(args):
         lines.append(f'| {s["method"]} | {s["n"]} | {s["failure_rate"]:.3f} | {s["initial_box_iou"]:.4f} | '
                      f'{s["final_box_iou"]:.4f} | {s["pixel_mae"]:.4f} | {s["initial_symbolic_distance"]:.3f} | '
                      f'{s["final_symbolic_distance"]:.3f} | {s["actions"]:.2f} | {s["seconds"]:.3f} |')
+    lines += ['', '## Dataset coverage and failures','',
+        'The denominator is the originally selected WebUI test pool. Quality above is evaluated on available frozen corruptions; coverage below reports every preprocessing exclusion.','',
+        '| Stage | input n | kept/evaluated n | excluded/failed n | coverage |',
+        '|---|---:|---:|---:|---:|',
+        f'| Upstream corpus construction | {coverage["source_test_pages"]} | {coverage["upstream_available_pages"]} | {coverage["upstream_unavailable"]} | {coverage["upstream_available_pages"]/coverage["source_test_pages"] if coverage["source_test_pages"] else 0.:.3f} |',
+        f'| Clean target availability | {coverage["upstream_available_pages"]} | {coverage["normalization_input_pages"]} | {coverage["missing_clean_records"]} | {coverage["normalization_input_pages"]/coverage["upstream_available_pages"] if coverage["upstream_available_pages"] else 0.:.3f} |',
+        f'| Rendering-preserving normalization | {coverage["normalization_input_pages"]} | {coverage["normalization_kept_pages"]} | {coverage["normalization_rejected_pages"]} | {coverage["normalization_kept_pages"]/coverage["normalization_input_pages"] if coverage["normalization_input_pages"] else 0.:.3f} |',
+        f'| Fixed test corruption | {coverage["normalization_kept_pages"]} | {coverage["fixed_corruption_kept_pages"]} | {coverage["fixed_corruption_rejected_pages"]} | {coverage["preprocessing_coverage"]:.3f} |',
+        f'| Rollout selection | {coverage["fixed_corruption_kept_pages"]} | {coverage["evaluated_pages"]} | {coverage["evaluation_limit_excluded_pages"]} | {coverage["evaluated_coverage"]:.3f} |']
+    for method in methods:
+        item=coverage['methods'][method]
+        lines.append(f'| {method}: end-to-end success | {coverage["source_test_pages"]} | {item["successful_pages"]} | {coverage["source_test_pages"]-item["successful_pages"]} | {item["end_to_end_success_rate"]:.3f} |')
+    if coverage['normalization_top_errors']:
+        lines += ['', 'Top normalization rejection reasons: '+', '.join(
+            f'`{reason}`={count}' for reason,count in coverage['normalization_top_errors'][:5])+'.']
+    if coverage.get('fixed_corruption_top_errors'):
+        lines += ['', 'Top fixed-corruption rejection reasons: '+', '.join(
+            f'`{reason}`={count}' for reason,count in coverage['fixed_corruption_top_errors'][:5])+'.']
     (out/'report.md').write_text('\n'.join(lines)+'\n')
     return results

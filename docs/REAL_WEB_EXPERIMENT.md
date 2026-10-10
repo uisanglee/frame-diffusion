@@ -349,6 +349,13 @@ bash scripts/run_real_web.sh "$D2C_ROOT" runs/web-feedback-validated runs/main/b
 사용하며 `page_ids`/`n` 또는 지표별 `*_n`을 확인해야 합니다. 공통 성공 집합은 성공 조건부 결과라서
 전체 데이터셋 성능을 대신하지 않습니다. `report.md`에서 두 집계를 함께 보여줍니다.
 
+`prepare/prepare-summary.json`은 선택된 원래 test 표본 수, 준비 단계별 실패 수와 상위 사유를 보존합니다.
+최종 `evaluation/coverage.json`과 `evaluation/report.md`는 이 원래 분모를 이어 받아 준비 탈락/실패,
+방법별 rollout 실패, metric 계산 실패와 end-to-end 성공률을 함께 보고합니다. 반복 실험은 trial 수를
+페이지 수로 오인하지 않도록 페이지별로 묶고, 한 페이지의 반복 중 하나라도 실패하면 그 페이지를
+end-to-end 성공으로 세지 않습니다. 품질 지표는 측정 가능한 표본에서 계산하며, 탈락 표본을 0점으로
+바꾸지 않습니다.
+
 ## 공식 지표 연동 범위 (상세)
 
 [공식 코드](https://github.com/NoviScl/Design2Code)의 `visual_eval_v3_multi`와 OCR-free block extraction,

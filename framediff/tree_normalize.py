@@ -20,6 +20,7 @@ CONTRACT = 'parent-preserved-targeted-inline-v4'
 
 def prepare(args):
     source=Path(args.rendered).resolve();out=Path(args.out).resolve()
+    upstream_report=read_json(source/'report.json') if (source/'report.json').is_file() else {}
     limit=getattr(args,'limit_pages',0)
     if limit<0:raise ValueError('limit-pages must be nonnegative')
     if source==out or source in out.parents:
@@ -44,6 +45,7 @@ def prepare(args):
                     clean[page_id]=row
             validate_splits(list(clean.values()))
             source_pages=len(pages)
+            selected_pages=upstream_report.get('split_coverage',{}).get(split,{}).get('selected',source_pages)
             if limit:
                 clean=dict(list(clean.items())[:limit])
                 pages={k:v for k,v in pages.items() if k in clean}
@@ -143,7 +145,7 @@ def prepare(args):
             write_jsonl(out/f'policy-{split}.jsonl',kept)
             write_jsonl(out/f'pages-{split}.jsonl',selected)
             write_jsonl(out/f'rejections-{split}.jsonl',errors)
-            report[split]={'source_pages':source_pages,'clean_pages':len(clean),'kept':len(kept),
+            report[split]={'selected_pages':selected_pages,'source_pages':source_pages,'clean_pages':len(clean),'kept':len(kept),
                 'rejected':len(errors),'top_errors':reasons.most_common(10),
                 'kept_with_frozen_sizes':sum((r.get('normalization_stats',{}).get('normalized_elements') or 0)>0 for r in kept),
                 'kept_without_frozen_sizes':sum((r.get('normalization_stats',{}).get('normalized_elements') or 0)==0 for r in kept)}

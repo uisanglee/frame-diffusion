@@ -131,6 +131,14 @@ states. The number of independent pages is in `freeze-report.json`, not the
 page × repeat count. Old inline-only and new mixed-corruption test scores are
 different tasks and should not be presented as a direct policy improvement.
 
+For the held-out controlled WebUI test, prefer `visual-test-rollout`. Its
+`coverage.json` and `report.md` recover the complete provenance chain:
+originally selected test pages, upstream corpus failures, normalization
+rejections, fixed-corruption rejections, evaluation-limit exclusions, rollout
+failures, and per-method end-to-end page success. `summary.json` remains the
+quality/cost summary on the actually evaluated fixed corruptions; do not report
+it without the accompanying coverage table.
+
 ## Supported scope
 
 Embedded ordinary style rules and nested `@media`, `@supports`, and `@layer`

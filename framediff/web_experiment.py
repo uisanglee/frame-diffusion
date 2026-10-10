@@ -10,6 +10,7 @@ import json
 import math
 import statistics
 import time
+from collections import Counter
 from pathlib import Path
 
 from PIL import Image
@@ -352,6 +353,21 @@ def prepare(args):
             record['frame_browser_executions'] = browser.executions-before
             write_json(cache,record); rows.append(record); write_jsonl(out/'prepared.jsonl',rows)
             print(f'[{index+1}/{len(items)}] {item["id"]}: prepared, errors={record["errors"]}',flush=True)
+    stage_failures=Counter(k for row in rows for k in row.get('errors',{}))
+    reason_counts=Counter(
+        f'{stage}: {str(error).splitlines()[0]}'
+        for row in rows for stage,error in row.get('errors',{}).items())
+    failed_records=sum(bool(row.get('errors')) for row in rows)
+    write_json(out/'prepare-summary.json',{
+        'dataset':getattr(args,'dataset','design2code'),
+        'source_kind':'root' if args.root else 'manifest',
+        'source_selected':len(items),'records_retained':len(rows),
+        'records_dropped':len(items)-len(rows),
+        'records_with_preparation_failure':failed_records,
+        'preparation_success':len(rows)-failed_records,
+        'preparation_success_rate':(len(rows)-failed_records)/len(items),
+        'stage_failures':dict(stage_failures),
+        'top_failure_reasons':[{'reason':reason,'count':count} for reason,count in reason_counts.most_common(20)]})
     return rows
 
 
@@ -591,6 +607,35 @@ def evaluate_pages(args):
             result[key+'_n'] = len(values)
         successful.append(result)
     write_json(out/'summary-common-success.json',successful)
+    # Coverage/failure accounting uses the original selected evaluation pool as
+    # denominator. Quality metrics above remain conditional on an available
+    # measurement, so a missing page is never silently converted to score zero.
+    prepare_summary_path=Path(args.data).resolve().parent.parent/'prepare'/'prepare-summary.json'
+    prepare_summary=read_json(prepare_summary_path) if prepare_summary_path.is_file() else None
+    source_selected=(prepare_summary or {}).get('source_selected',len(records))
+    prepared_records=(prepare_summary or {}).get('records_retained',len(records))
+    prepare_failed=(prepare_summary or {}).get('records_with_preparation_failure',
+        sum(bool(r.get('errors')) for r in records))
+    coverage={'source_selected':source_selected,'prepared_records':prepared_records,
+        'preparation_dropped':max(0,source_selected-prepared_records),
+        'preparation_failed_retained':prepare_failed,
+        'preparation_success':max(0,prepared_records-prepare_failed),
+        'evaluated_records':len(records),'methods':{},
+        'preparation_stage_failures':(prepare_summary or {}).get('stage_failures',{}),
+        'preparation_top_failure_reasons':(prepare_summary or {}).get('top_failure_reasons',[])}
+    for method in methods:
+        group=[r for r in rows if r['method']==method]
+        pipeline_failed=sum(bool(r['failed']) for r in group)
+        evaluation_failed=sum(r['evaluation_error'] is not None for r in group)
+        trials={}
+        for row in group:trials.setdefault(row.get('page_id',row['id']),[]).append(row)
+        successful_ids={page_id for page_id,page_trials in trials.items()
+            if all(not r['failed'] and r['evaluation_error'] is None for r in page_trials)}
+        coverage['methods'][method]={'source_n':source_selected,'pipeline_failed':pipeline_failed,
+            'pipeline_failed_trials':pipeline_failed,'evaluation_failed_trials':evaluation_failed,
+            'evaluated_pages':len(trials),'successful_pages':len(successful_ids),
+            'end_to_end_success_rate':len(successful_ids)/source_selected if source_selected else 0.}
+    write_json(out/'coverage.json',coverage)
     # Paired comparisons use the same pages, never separate successful subsets.
     paired = []
     by_id = {(r['id'],r['method']):r for r in rows}
@@ -642,6 +687,19 @@ def evaluate_pages(args):
     for s in summary:
         lines.append(f'| {s["method"]} | {s["n"]} | {s["failure_rate"]:.3f} | {s.get("dom_box_iou",s.get("webui_box_iou",float("nan"))):.4f} | '
                      f'{s.get("pixel_mae",float("nan")):.4f} | {s["pipeline_seconds"]:.3f} | {s["vlm_calls"]:.1f} |')
+    lines += ['', '## Dataset coverage and failures','',
+              'The denominator is the complete selected test pool, including preparation failures. Preparation failures are retained with fallback HTML when possible.','',
+              '| Stage | input n | retained/success n | failed or dropped n | rate |',
+              '|---|---:|---:|---:|---:|',
+              f'| Dataset selection | {source_selected} | {prepared_records} | {max(0,source_selected-prepared_records)} | {prepared_records/source_selected if source_selected else 0.:.3f} |',
+              f'| Preparation | {prepared_records} | {max(0,prepared_records-prepare_failed)} | {prepare_failed} | {(prepared_records-prepare_failed)/prepared_records if prepared_records else 0.:.3f} |']
+    for method in methods:
+        item=coverage['methods'][method]
+        failed=source_selected-item['successful_pages']
+        lines.append(f'| {method}: end-to-end | {source_selected} | {item["successful_pages"]} | {failed} | {item["end_to_end_success_rate"]:.3f} |')
+    if coverage['preparation_stage_failures']:
+        lines += ['', 'Preparation failures by stage: '+', '.join(
+            f'`{key}`={value}' for key,value in sorted(coverage['preparation_stage_failures'].items()))+'.']
     lines += ['', 'Common successful pages (all methods succeeded; conditional on success).', '',
               '| Method | n | geometry IoU | pixel MAE |', '|---|---:|---:|---:|']
     for s in successful:
