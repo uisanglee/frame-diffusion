@@ -4,8 +4,14 @@ if [[ $# -ne 3 ]]; then echo 'Usage: bash scripts/run_visual_web.sh DATASET_ROOT
 dataset_root=$1
 output_root=$2
 train_root=$3
-source_options=(--root "$dataset_root" --dataset "${WEB_DATASET:-design2code}" --webui-view "${WEBUI_VIEW:-default_1280-720}")
-if [[ -n "${PAGE_MANIFEST:-}" ]]; then source_options=(--manifest "$PAGE_MANIFEST"); fi
+if [[ -n "${PAGE_MANIFEST:-}" ]]; then
+  [[ -f "$PAGE_MANIFEST" ]] || { echo "Missing PAGE_MANIFEST: $PAGE_MANIFEST" >&2; exit 2; }
+  source_options=(--manifest "$PAGE_MANIFEST")
+else
+  [[ -n "$dataset_root" ]] || { echo 'Dataset root is empty. Export D2C_ROOT/WEBUI_ROOT or pass an explicit directory.' >&2; exit 2; }
+  [[ -d "$dataset_root" ]] || { echo "Missing dataset root: $dataset_root" >&2; exit 2; }
+  source_options=(--root "$dataset_root" --dataset "${WEB_DATASET:-design2code}" --webui-view "${WEBUI_VIEW:-default_1280-720}")
+fi
 vlm_options=(--backend "${VLM_BACKEND:-qwen}" --model "${VLM_MODEL:-Qwen/Qwen3-VL-8B-Instruct}"
   --endpoint "${VLM_ENDPOINT:-http://localhost:8000/v1/chat/completions}"
   --api-key-env "${VLM_API_KEY_ENV:-VLM_API_KEY}")

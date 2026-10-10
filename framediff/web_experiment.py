@@ -118,6 +118,8 @@ def prepare(args):
     if retries < 0: raise ValueError('vlm-retries must be nonnegative')
     if args.rounds < 0 or not 2 <= args.max_nodes <= 256 or args.max_pixels < 1 or args.max_new_tokens < 1 or args.limit < 0:
         raise ValueError('Invalid rounds/node/token/pixel/limit setting')
+    if bool(args.root) == bool(args.manifest):
+        raise ValueError('Provide exactly one nonempty dataset source: --root DIRECTORY or --manifest FILE')
     if args.root:
         if getattr(args,'dataset','design2code')=='webui':
             from .webui_pages import discover_webui

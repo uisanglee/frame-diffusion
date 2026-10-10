@@ -78,6 +78,14 @@ def test_html_answer_rejects_truncation():
     with pytest.raises(ValueError): html_answer('<html><body>partial')
 
 
+@pytest.mark.parametrize(('root','manifest'),[(None,None),('',None),('dataset','pages.jsonl')])
+def test_prepare_requires_exactly_one_nonempty_dataset_source(tmp_path,root,manifest):
+    args=SimpleNamespace(root=root,manifest=manifest,out=str(tmp_path/'out'),rounds=0,
+        max_nodes=16,max_pixels=1048576,max_new_tokens=8192,limit=0,vlm_retries=0)
+    with pytest.raises(ValueError,match='exactly one nonempty dataset source'):
+        prepare(args)
+
+
 @pytest.mark.browser
 def test_html_bridge_nested_transfer_and_noop():
     with HtmlBrowser() as b:
