@@ -100,6 +100,17 @@ def add_parsers(sub):
     p.add_argument('--oracle-ablation',action='store_true',help='Controlled visual-build-data pages ONLY')
     p.add_argument('--resume',action='store_true')
     for k,v in [('steps',20),('repeats',3),('warmup',1),('limit',0),('seed',42),('cpu-threads',4)]:p.add_argument('--'+k,type=int,default=v)
+    p=sub.add_parser('visual-test-rollout',help='Evaluate frozen held-out WebUI CSS corruptions and export repaired HTML/PNG')
+    p.add_argument('--data',required=True,help='Frozen policy-test.jsonl')
+    p.add_argument('--pages',required=True,help='Matching frozen pages-test.jsonl with exact clean boxes')
+    p.add_argument('--out',required=True)
+    p.add_argument('--raw-checkpoint');p.add_argument('--abstract-checkpoint');p.add_argument('--detector-checkpoint')
+    p.add_argument('--device',default='auto');p.add_argument('--threshold',type=float,default=.4)
+    p.add_argument('--goal-threshold',type=float,default=-1)
+    p.add_argument('--abstract-goal-threshold',type=float,default=-1)
+    p.add_argument('--time-budget',type=float,default=0.)
+    p.add_argument('--resume',action='store_true')
+    for k,v in [('steps',20),('repeats',1),('limit',0),('cpu-threads',4)]:p.add_argument('--'+k,type=int,default=v)
     p=sub.add_parser('visual-figures',help='Generate paper-ready training and denoising figures')
     p.add_argument('--run-root',required=True,help='Root containing detector and policy stage directories')
     p.add_argument('--out',required=True)
@@ -161,6 +172,9 @@ def run(args):
         return evaluate_detector(args)
     if args.command=='visual-evaluate':
         from .visual_experiment import evaluate
+        return evaluate(args)
+    if args.command=='visual-test-rollout':
+        from .fixed_test import evaluate
         return evaluate(args)
     if args.command=='visual-figures':
         from .visual_figures import generate
