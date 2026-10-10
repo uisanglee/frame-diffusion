@@ -61,6 +61,13 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
            'actions':0,'mode':cfg.mode,'stop_reason':'steps','history':[],
            'observation_contract':cfg.observation_contract,'goal_threshold':goal_threshold,
            'pair_encoding_seconds':0.,'pair_image_encodings':0,'dom_queries':0,'failed':False,'error':None})
+    # The deployed TUIDE policy is the abstract replacement policy.  Its edit is
+    # committed only when the resulting abstraction does not move farther from
+    # the target.  Legacy numeric heads and the RGB comparison baseline retain
+    # their original rollout behavior.
+    monotonic_abstract=cfg.mode=='abstract' and cfg.policy_head=='replacement'
+    stats.update(monotonic_abstract_mae=monotonic_abstract,attempted_actions=0,
+                 rolled_back_actions=0,best_state_restored=False)
     t=time.perf_counter()
     if cfg.mode=='abstract':
         if oracle_elements is None:
@@ -84,6 +91,7 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
     t=time.perf_counter();browser.load(html,viewport);stats['layout_seconds']+=time.perf_counter()-t
     stats['_loaded']=True
     current_html=html;current_tree=copy.deepcopy(tree)
+    best_html=html;best_goal_mae=None;current_goal_mae=None
     for step in range(steps):
         if time_budget and time.perf_counter()-start>=time_budget:stats['stop_reason']='time_budget';break
         t=time.perf_counter();boxes=browser.tagged_boxes(ids);boxes[root]=[0,0,*viewport]
@@ -103,6 +111,10 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
         current_tensor=(current_image if cfg.semantic else image_tensor(current_image,cfg.size))[None].to(device)
         if cfg.policy_head in ('autoregressive','replacement'):
             goal_mae=observation_mae(target_tensor,current_tensor,cfg.semantic)
+            current_goal_mae=goal_mae
+            if monotonic_abstract and (best_goal_mae is None or goal_mae<best_goal_mae):
+                best_goal_mae=goal_mae;best_html=current_html
+                if 'initial_goal_mae' not in stats:stats['initial_goal_mae']=goal_mae
             if goal_threshold>=0 and goal_mae<=goal_threshold:
                 stats['history'].append({'step':step,'action':None,'boxes':boxes,
                     'goal_mae':goal_mae,'elapsed_seconds':time.perf_counter()-start})
@@ -155,12 +167,14 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
                 action=decode_action(int(policy.select(logits)),len(current_tree['nodes']))
         sync(device);stats['policy_seconds']+=time.perf_counter()-t-(pair_elapsed if cfg.policy_head in ('autoregressive','replacement') else 0.)
         history={'step':step,'action':action,'boxes':boxes,'elapsed_seconds':time.perf_counter()-start}
+        if cfg.policy_head in ('autoregressive','replacement'):history['goal_mae_before']=goal_mae
         if cfg.policy_head=='replacement' and getattr(cfg,'stylesheets',False) and action:
             history['css_owner']=owner_state['owners'][action[0]]
         stats['history'].append(history)
         if action is None:stats['stop_reason']='policy_stop';break
         if time_budget and time.perf_counter()-start>=time_budget:stats['stop_reason']='time_budget';break
         t=time.perf_counter()
+        stats['attempted_actions']+=1
         try:
             if cfg.policy_head=='replacement':
                 from .tree_edits import execute
@@ -176,8 +190,59 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
             stats['layout_seconds']+=time.perf_counter()-t
             stats.update(failed=True,error=str(exc),stop_reason='invalid_action')
             break
-        current_html=browser.page.content();stats['layout_seconds']+=time.perf_counter()-t;stats['actions']+=1
-    current_html=browser.page.content()
+        candidate_html=browser.page.content();stats['layout_seconds']+=time.perf_counter()-t
+        if monotonic_abstract:
+            # Evaluate the actual post-edit browser layout.  This is deliberately
+            # based only on the same target abstraction available to the policy;
+            # no oracle boxes, CSS target state, or RGB target score is consulted.
+            t=time.perf_counter();candidate_boxes=browser.tagged_boxes(ids);candidate_boxes[root]=[0,0,*viewport]
+            stats['dom_queries']+=1
+            candidate_tree=refresh_geometry(copy.deepcopy(current_tree),candidate_boxes)
+            from .explicit_html import feedback_metadata
+            candidate_feedback=feedback_metadata(browser,candidate_tree)
+            stats['layout_seconds']+=time.perf_counter()-t
+            t=time.perf_counter()
+            candidate_items=elements(candidate_tree,candidate_boxes,viewport,candidate_feedback.get('current_clip_boxes'))
+            if cfg.semantic:
+                candidate_image=semantic_masks(candidate_items,viewport,cfg.size,
+                    boundaries=semantic_channels(cfg)==8)
+                candidate_tensor=candidate_image[None].to(device)
+            else:
+                candidate_image=abstract_image(candidate_items,viewport,cfg.size)
+                candidate_tensor=image_tensor(candidate_image,cfg.size)[None].to(device)
+            candidate_mae=observation_mae(target_tensor,candidate_tensor,cfg.semantic)
+            stats['current_render_seconds']+=time.perf_counter()-t
+            history['goal_mae_after']=candidate_mae
+            # A tiny tolerance prevents floating-point jitter from triggering a
+            # rollback. Equal-distance edits are allowed, as the guard is meant
+            # to reject worsening actions rather than introduce a new STOP label.
+            if candidate_mae>goal_mae+1e-8:
+                t=time.perf_counter();browser.load(current_html,viewport)
+                stats['layout_seconds']+=time.perf_counter()-t
+                stats['rolled_back_actions']+=1;history['accepted']=False
+                history['rollback_reason']='abstract_mae_worsened'
+                stats['stop_reason']='abstract_mae_rollback'
+                break
+            history['accepted']=True;current_html=candidate_html;current_tree=candidate_tree
+            current_goal_mae=candidate_mae
+            stats['actions']+=1
+            if best_goal_mae is None or candidate_mae<best_goal_mae:
+                best_goal_mae=candidate_mae;best_html=candidate_html
+            if goal_threshold>=0 and candidate_mae<=goal_threshold:
+                stats['stop_reason']='goal';break
+        else:
+            current_html=candidate_html;stats['actions']+=1
+    terminal_html=browser.page.content()
+    if monotonic_abstract:
+        stats['terminal_goal_mae']=current_goal_mae
+        # Equal-distance edits are permitted during the trajectory, but the
+        # returned artifact is always the strictly best state seen so far.
+        if terminal_html!=best_html:
+            t=time.perf_counter();browser.load(best_html,viewport)
+            stats['layout_seconds']+=time.perf_counter()-t
+            stats['best_state_restored']=True
+        current_html=best_html;stats['best_goal_mae']=best_goal_mae
+    else:current_html=terminal_html
     sync(device);stats['seconds']=time.perf_counter()-start
     stats['browser_executions']=browser.executions-before;stats['browser_screenshots']=browser.screenshots-shots
     stats['time_budget_overshoot']=max(0.,stats['seconds']-time_budget) if time_budget else 0.

@@ -85,4 +85,10 @@ def test_build_and_known_reverse_restore_all_combinations(tmp_path):
             steps=1,threshold=.4,geometry_tolerance=1.,limit=1,resume=False))
         result=read_json(run/'summary.json')['overall']
         assert result['failed_rate']==0
-        assert result['actions']==1
+        if mode=='screenshot':
+            assert result['actions']==1
+        else:
+            # Random abstract policies make no quality claim: the proposed
+            # edit is either committed or rejected by the monotonic-MAE
+            # rollout guard.
+            assert result['actions'] in (0,1)

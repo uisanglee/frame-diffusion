@@ -189,6 +189,8 @@ def evaluate(args):
                         initial_symbolic_distance=state_distance(row['declaration_state'],row['target_declaration_state']),
                         final_symbolic_distance=state_distance(final_state,row['target_declaration_state']),
                         actions=stats.get('actions',0),seconds=stats.get('seconds',time.perf_counter()-started),
+                        attempted_actions=stats.get('attempted_actions',stats.get('actions',0)),
+                        rolled_back_actions=stats.get('rolled_back_actions',0),
                         browser_executions=stats.get('browser_executions',0),
                         browser_screenshots=stats.get('browser_screenshots',0))
                     record={'id':row['id'],'page_id':page_id,'method':method,'repeat':repeat,
@@ -205,7 +207,8 @@ def evaluate(args):
               'failure_rate':statistics.mean(r['failed'] for r in selected)}
         for key in ('initial_box_iou','final_box_iou','initial_center_error','final_center_error',
                     'initial_size_error','final_size_error','pixel_mae','initial_symbolic_distance',
-                    'final_symbolic_distance','actions','seconds','browser_executions','browser_screenshots'):
+                    'final_symbolic_distance','actions','attempted_actions','rolled_back_actions',
+                    'seconds','browser_executions','browser_screenshots'):
             item[key]=statistics.mean(r[key] for r in selected)
         item['geometry_improvement_rate']=statistics.mean(r['final_box_iou']>r['initial_box_iou'] for r in selected)
         item['symbolic_improvement_rate']=statistics.mean(r['final_symbolic_distance']<r['initial_symbolic_distance'] for r in selected)
@@ -215,12 +218,13 @@ def evaluate(args):
     write_json(out/'coverage.json',coverage)
     lines=['# Frozen held-out WebUI CSS rollout','',
            'Fixed test corruptions only; no VLM generation and no target state is used for action selection.','',
-           '| Method | n | failed | initial IoU | final IoU | pixel MAE | symbolic before | symbolic after | actions | seconds |',
-           '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|']
+           '| Method | n | failed | initial IoU | final IoU | pixel MAE | symbolic before | symbolic after | actions | attempted | rollback | seconds |',
+           '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|']
     for s in summary:
         lines.append(f'| {s["method"]} | {s["n"]} | {s["failure_rate"]:.3f} | {s["initial_box_iou"]:.4f} | '
                      f'{s["final_box_iou"]:.4f} | {s["pixel_mae"]:.4f} | {s["initial_symbolic_distance"]:.3f} | '
-                     f'{s["final_symbolic_distance"]:.3f} | {s["actions"]:.2f} | {s["seconds"]:.3f} |')
+                     f'{s["final_symbolic_distance"]:.3f} | {s["actions"]:.2f} | {s["attempted_actions"]:.2f} | '
+                     f'{s["rolled_back_actions"]:.2f} | {s["seconds"]:.3f} |')
     lines += ['', '## Dataset coverage and failures','',
         'The denominator is the originally selected WebUI test pool. Quality above is evaluated on available frozen corruptions; coverage below reports every preprocessing exclusion.','',
         '| Stage | input n | kept/evaluated n | excluded/failed n | coverage |',

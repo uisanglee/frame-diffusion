@@ -101,6 +101,20 @@ def test_owner_online_samples_and_policy_rollout(tmp_path):
         index,field,value,priority=row['replacement_edit']
         assert state[index][FIELDS.index(field)]==[value,priority]
 
+    # A replacement that makes the target abstraction worse is rolled back,
+    # and the best HTML (the clean initial state here) is returned.
+    winner=next(i for i,o in enumerate(parsed['owners']) if o.get('selector')=='.container .card')
+    policy.predict=lambda *args,**kw:[winner,'width','450px','']
+    with HtmlBrowser() as browser:
+        result,stats,_=rollout(browser,html.read_text(),tree,[500,300],str(image),policy,
+            oracle_elements=target['target_elements'],steps=2)
+        assert stats['attempted_actions']==1 and stats['actions']==0
+        assert stats['rolled_back_actions']==1 and stats['stop_reason']=='abstract_mae_rollback'
+        assert stats['history'][0]['accepted'] is False
+        assert stats['history'][0]['goal_mae_after']>stats['history'][0]['goal_mae_before']
+        browser.load(result,[500,300])
+        assert css_owners.read(browser,tree)['state']==parsed['state']
+
 
 @pytest.mark.browser
 def test_prepare_freeze_cache_reuse_and_online_resume(tmp_path,monkeypatch):
