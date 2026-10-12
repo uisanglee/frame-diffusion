@@ -35,10 +35,11 @@ def rollout(browser,html,tree,viewport,target_path,policy,parser=None,threshold=
         # A failed render may have a dead page. In that case keep the input,
         # but never invent zero execution costs for work already performed.
         retained=html
-        if stats.get('_loaded'):
+        if stats.get('_loaded') and not stats.get('_scroll_verification_pending'):
             try:retained=browser.page.content()
             except Exception:pass
         stats.pop('_loaded',None)
+        stats.pop('_scroll_verification_pending',None)
         stats.update(failed=True,error=str(exc),stop_reason='rollout_failed',
                      seconds=time.perf_counter()-started,browser_executions=browser.executions-before,
                      browser_screenshots=browser.screenshots-shots)
@@ -91,6 +92,10 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
     t=time.perf_counter();browser.load(html,viewport);stats['layout_seconds']+=time.perf_counter()-t
     stats['_loaded']=True
     current_html=html;current_tree=copy.deepcopy(tree)
+    from .scroll_guard import snapshot as scroll_snapshot, compare as compare_scroll
+    t=time.perf_counter();scroll_before=scroll_snapshot(browser)
+    stats['scroll_guard_seconds']=time.perf_counter()-t
+    stats['_scroll_verification_pending']=True
     best_html=html;best_goal_mae=None;current_goal_mae=None
     for step in range(steps):
         if time_budget and time.perf_counter()-start>=time_budget:stats['stop_reason']='time_budget';break
@@ -243,6 +248,20 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
             stats['best_state_restored']=True
         current_html=best_html;stats['best_goal_mae']=best_goal_mae
     else:current_html=terminal_html
+    t=time.perf_counter()
+    scroll_report=compare_scroll(scroll_before,scroll_snapshot(browser))
+    stats['scroll_preservation']=scroll_report
+    if not scroll_report['accepted']:
+        browser.load(html,viewport);current_html=html
+        stats['stop_reason']='scroll_preservation_rollback'
+        stats['scroll_guard_rolled_back']=True
+        stats['actions_before_scroll_rollback']=stats['actions']
+        stats['actions']=0
+        stats['best_state_restored']=False
+        stats['best_goal_mae']=stats.get('initial_goal_mae')
+    else:stats['scroll_guard_rolled_back']=False
+    stats['scroll_guard_seconds']+=time.perf_counter()-t
+    stats.pop('_scroll_verification_pending',None)
     sync(device);stats['seconds']=time.perf_counter()-start
     stats['browser_executions']=browser.executions-before;stats['browser_screenshots']=browser.screenshots-shots
     stats['time_budget_overshoot']=max(0.,stats['seconds']-time_budget) if time_budget else 0.

@@ -293,7 +293,7 @@ SIZE_SNAPSHOT_JS = '(actionIds) => { const geometry='+SIZE_GEOMETRY_JS+r''';
      reason='not_action_target';
    else if(!observed.visible_clip[2]||!observed.visible_clip[3])reason='not_visible_in_abstraction';
    else if(!r.width||!r.height||s.visibility!=='visible'||s.display==='none')reason='not_visible';
-   else if(s.display==='inline'||s.display==='contents'||s.display.startsWith('table')||e.getClientRects().length!==1)reason='inline_or_table';
+   else if(s.display==='contents')reason='no_own_box';
    else {
      for(let p=e;p;p=p.parentElement){
        const ps=getComputedStyle(p);
@@ -311,7 +311,8 @@ SIZE_SNAPSHOT_JS = '(actionIds) => { const geometry='+SIZE_GEOMETRY_JS+r''';
      const margins=Object.fromEntries(['margin-top','margin-right','margin-bottom','margin-left']
        .filter(p=>!blocked.has(p)).map(p=>[p,s.getPropertyValue(p)])
        .filter(([p,v])=>/^-?[\d.]+px$/.test(v)));
-     candidates.push({id:String(i),width,height,margins,
+     const fieldProbe=s.display==='inline'||s.display.startsWith('table')||e.getClientRects().length!==1;
+     candidates.push({id:String(i),width,height,margins,field_probe:fieldProbe,
        editable:fields.filter(p=>!blocked.has(p)),constraints:{}});
    }
    return observed;
@@ -321,6 +322,35 @@ SIZE_SNAPSHOT_JS = '(actionIds) => { const geometry='+SIZE_GEOMETRY_JS+r''';
  for(const a of candidates){
    const e=all[Number(a.id)],saved=e.getAttribute('style'),s=getComputedStyle(e);
    const restore=()=>saved===null?e.removeAttribute('style'):e.setAttribute('style',saved);
+   if(a.field_probe){
+     // Do not bake inline/table sizes from their bounding union: those values
+     // need not be valid CSS sizes. Keep only witnessed individual fields whose
+     // baseline assignment preserves all geometry, without changing display.
+     a.field_checks=[];a.preserved_values={};
+     const geom=()=>all.map((el,i)=>geometry(el,String(i)));
+     const same=(x,y)=>x.every((v,i)=>v.box.every((n,j)=>Math.abs(n-y[i].box[j])<=.1) &&
+       v.visible_clip.every((n,j)=>Math.abs(n-y[i].visible_clip[j])<=.1));
+     const base=geom();
+     for(const field of [...a.editable]){
+       restore();
+       const value=s.getPropertyValue(field);
+       let reason=null;
+       if(!/^-?[\d.]+px$/.test(value))reason='non_px_baseline';
+       else {
+         e.style.setProperty(field,value,'important');
+         if(!same(base,geom()))reason='baseline_changes_geometry';
+         else {
+           const delta=16,number=parseFloat(value);
+           e.style.setProperty(field,(number+delta)+'px','important');
+           if(same(base,geom()))reason='no_geometry_effect';
+         }
+       }
+       restore();a.field_checks.push({property:field,reason:reason||'eligible',baseline:value});
+       if(reason){a.editable=a.editable.filter(p=>p!==field);delete a.margins[field];}
+       else a.preserved_values[field]=value;
+     }
+     continue;
+   }
    const measure=(field,value,extra=null)=>{
      restore();e.style.setProperty(field,value+'px','important');
      for(const [p,v] of Object.entries(a.constraints))e.style.setProperty(p,v,'important');
@@ -412,6 +442,8 @@ def normalize_sizes(browser, html, viewport, out, max_pixel_mae, max_box_error, 
     # Judge normalization against the accepted replay, not unrelated original
     # non-target geometry drift. Keep full-element checks for new side effects.
     reference=replay_rows;reference_png=replay_png
+    from .scroll_guard import snapshot as scroll_snapshot, compare as compare_scroll
+    scroll_before=scroll_snapshot(browser)
     browser.page.evaluate(r'''group=>{
           document.documentElement.setAttribute('data-tuide-inline-actions','targeted-v2');
           for(const a of group){
@@ -419,7 +451,7 @@ def normalize_sizes(browser, html, viewport, out, max_pixel_mae, max_box_error, 
             const set=(p,v)=>e.style.setProperty(p,String(v),'important');
             if(a.editable.includes('width')||a.editable.includes('height'))
               e.setAttribute('data-tuide-explicit-id',a.id);
-            for(const p of ['width','height'])if(a.editable.includes(p))set(p,a[p]+'px');
+            for(const p of ['width','height'])if(a.editable.includes(p))set(p,a.preserved_values?.[p]||a[p]+'px');
             for(const [p,v] of Object.entries(a.constraints))set(p,v);
             for(const [p,v] of Object.entries(a.margins))set(p,v);
             e.setAttribute('data-tuide-editable-fields',
@@ -428,10 +460,14 @@ def normalize_sizes(browser, html, viewport, out, max_pixel_mae, max_box_error, 
         }''',snapshot['candidates'])
     candidate=browser.page.content()
     qa,png,after_rows=assess(candidate)
+    scroll_report=compare_scroll(scroll_before,scroll_snapshot(browser))
+    qa['scroll_preservation']=scroll_report
+    qa['accepted']=qa['accepted'] and scroll_report['accepted']
     write_json(out/'normalization-geometry.json',{'before':reference,'after':after_rows})
     accepted=[a['id'] for a in snapshot['candidates']]
     report={**qa,'mode':'sizes','normalization_strategy':'targeted-inline-v4',
             'normalized_elements':len(accepted),'normalized_ids':accepted,
+            'field_probe_results':[{'id':a['id'],'fields':a['field_checks']} for a in snapshot['candidates'] if a.get('field_probe')],
             'reload_verification':initial,
             'failure_stage':None if qa['accepted'] else 'normalization_preservation',
             'error_type':None if qa['accepted'] else 'normalization_preservation_failed',

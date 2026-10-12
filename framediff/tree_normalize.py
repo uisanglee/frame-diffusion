@@ -15,7 +15,7 @@ from .visual import annotate, elements
 from .visual_data import validate_splits
 from .web_experiment import digest, guard_run
 
-CONTRACT = 'parent-preserved-targeted-inline-v5-replay-qa'
+CONTRACT = 'parent-preserved-targeted-inline-v6-field-probes-scroll-guard'
 
 
 def prepare(args):

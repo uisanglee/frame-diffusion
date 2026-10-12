@@ -224,3 +224,28 @@ are not proof of the original exclusion cause.
 counts (a page can have multiple causes), plus diagnostic failure counts. Use a
 new audit directory to retain the earlier results. Normalized HTML, detector
 weights, manifests and the action eligibility rules remain unchanged.
+
+### Inline/table fields and below-fold preservation (v6)
+
+Normalization no longer excludes all inline/table/fragmented targets. For these
+elements it tries each unblocked px-valued field separately, checks that assigning
+the baseline leaves geometry unchanged, and requires a +16px probe to change
+geometry. Non-px baselines and inert fields are excluded. It does not change
+display or ancestry, nor bake a fragmented bounding union into width/height.
+The existing candidate inspection then requires an actual policy-abstraction
+change. Per-field decisions are saved in `field_probe_results`. Offscreen targets
+remain excluded. This finite probe can miss valid edits; it is not exhaustive.
+
+Normalization and visual-policy rollout additionally check document-space
+content below the initial viewport. Natural flow translations are permitted.
+New disappearance, increased ancestor clipping, horizontal loss and new overlap
+between previously disjoint below-fold siblings cause rejection (normalization)
+or return of the initial HTML (rollout). The check uses no target state. Both RGB
+and abstract policies use it; its time is included in repair time. Rollout traces
+contain `scroll_preservation`, and frozen-test summaries report `scroll_rollback_rate`.
+
+This is a structural guard, not a guarantee of pixel preservation: it does not
+exhaustively inspect hidden nested-scroll content, pseudo-elements, arbitrary
+cross-parent occlusion or lazy-loaded content. It keeps the viewport fixed and
+does not expand CSS scroll containers. Old data is not rewritten; use new output
+directories to prepare newly eligible fields or evaluate with this guard.
