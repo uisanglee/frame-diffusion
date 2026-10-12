@@ -9,6 +9,45 @@ from framediff.tree_freeze import freeze
 from framediff.visual import annotate
 
 
+def test_resume_retries_rejected_page_without_rebuilding_successes(tmp_path, monkeypatch):
+    import pytest
+    from framediff import tree_normalize as mod
+    from framediff.ir import read_json
+    source=tmp_path/'source';source.mkdir();out=tmp_path/'normalized'
+    with HtmlBrowser() as browser:
+        for split in ('train','val','test'):
+            dom=browser.snapshot('<div style="width:100px;height:40px;background:red">A</div>',
+                                 [400,200],max_nodes=16)
+            tree,boxes,_=dom_tree(dom);annotate(browser,tree)
+            path=source/f'{split}.html';path.write_text(dom['html'])
+            row=dict(id=split+'/clean',group=split,split=split,source_sha=split,
+                     current_html=str(path),current=tree,current_boxes=boxes,viewport=[400,200])
+            write_jsonl(source/f'policy-{split}.jsonl',[row])
+            write_jsonl(source/f'pages-{split}.jsonl',[{**row,'id':split,'html':str(path)}])
+    args=SimpleNamespace(rendered=str(source),out=str(out),resume=True,seed=42,
+                         max_css_owners=64,observation_size=96,max_pixel_mae=.01,max_box_error=1.)
+    original=mod.convert;calls=[]
+    def reject_val(*a,**kw):
+        calls.append(a[3].parent.name)
+        if a[3].parent.name=='val':
+            return dict(accepted=False,failure_stage='normalization_preservation',
+                        error='Simulated old scroll guard rejection')
+        return original(*a,**kw)
+    monkeypatch.setattr(mod,'convert',reject_val)
+    with pytest.raises(ValueError,match='Empty normalized split'):prepare(args)
+    saved=(out/'policy-train.jsonl').read_bytes()
+    calls.clear()
+    def fixed(*a,**kw):
+        calls.append(a[3].parent.name)
+        return original(*a,**kw)
+    monkeypatch.setattr(mod,'convert',fixed)
+    prepare(args)
+    assert calls==['val']
+    assert (out/'policy-train.jsonl').read_bytes()==saved
+    assert not list(read_jsonl(out/'rejections-val.jsonl'))
+    assert read_json(out/'prepare-report.json')['val']['kept']==1
+
+
 def test_normalize_then_corrupt_and_resume(tmp_path, monkeypatch):
     source=tmp_path/'source';source.mkdir();out=tmp_path/'normalized'
     with HtmlBrowser() as browser:

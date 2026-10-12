@@ -68,6 +68,9 @@ def prepare(args):
                             if digest(key)!=sha:raise ValueError('Normalized cache assets changed')
                         new=saved['row'];page=saved['page']
                     else:
+                        # Failed preservation checks never create record.json or
+                        # normalization.json. Resume retries them while keeping
+                        # successful pages and their assets unchanged.
                         stage='normalization'
                         normalized=folder/'normalized.html'
                         stamp=folder/'normalization.json'
@@ -150,6 +153,7 @@ def prepare(args):
                             'max_box_error_px':qa.get('max_box_error_px'),
                             'abstraction_mae':qa.get('abstraction_mae'),
                             'non_target_geometry_changes':len(qa.get('non_target_geometry_changes',[])),
+                            'scroll_preservation':qa.get('scroll_preservation'),
                             'first_element_failures':qa.get('element_failures',[])[:3]}
                     errors.append(failure)
                     reasons[stage+': '+str(exc).splitlines()[0]]+=1

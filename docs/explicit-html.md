@@ -249,3 +249,14 @@ exhaustively inspect hidden nested-scroll content, pseudo-elements, arbitrary
 cross-parent occlusion or lazy-loaded content. It keeps the viewport fixed and
 does not expand CSS scroll containers. Old data is not rewritten; use new output
 directories to prepare newly eligible fields or evaluate with this guard.
+
+The v2 scroll guard rejects horizontal loss only when the element intersected
+the horizontal viewport before the edit. Unchanged pre-existing offscreen
+elements (e.g. carousel slides) are not a horizontal-loss regression.
+For this backward-compatible relaxation, rerun `visual-tree-normalize` with
+the same source, output and settings and `--resume`: successful page records
+are reused, while rejected pages without a successful normalization stamp are
+rechecked. Rejection manifests and summary counts are rebuilt. Do not run this
+concurrently with another preparation using the same output. If recovered pages
+change manifests, use fresh downstream freeze/cache output directories instead
+of resuming caches for the old manifests. No detector retraining is required.

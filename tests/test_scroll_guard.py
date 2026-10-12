@@ -4,6 +4,22 @@ from framediff.scroll_guard import snapshot,compare
 from framediff.explicit_html import convert
 
 
+def test_horizontal_guard_only_rejects_new_offscreen_state():
+    import copy
+    before=dict(viewport_height=720,viewport_width=1280,elements=[
+        dict(id='85',tag='DIV',parent=82,box=[-4912,1520,1200,228],visible_fraction=1)])
+    assert compare(before,copy.deepcopy(before))['accepted']
+    before['elements'][0]['box'][0]=1400
+    assert compare(before,copy.deepcopy(before))['accepted']
+    for x in (0, -100):  # Fully and partially horizontally visible before.
+        before['elements'][0]['box'][0]=x
+        after=copy.deepcopy(before)
+        after['elements'][0]['box'][0]=-4912
+        assert compare(before,after)['failures'][0]['reason']=='outside_horizontal_view'
+        after['elements'][0]['box'][0]=1400
+        assert not compare(before,after)['accepted']
+
+
 @pytest.mark.browser
 def test_inline_field_probes_keep_horizontal_margin_not_sizes(tmp_path):
     with HtmlBrowser() as b:

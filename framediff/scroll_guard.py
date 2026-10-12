@@ -51,7 +51,11 @@ def compare(before,after):
         if new is None or new['tag']!=r['tag']:reason='missing_element'
         elif min(new['box'][2:])<=0 or new['visible_fraction']<=.01:reason='disappeared'
         elif new['visible_fraction']<r['visible_fraction']-.05:reason='increased_clipping'
-        elif new['box'][0]+new['box'][2]<=0 or new['box'][0]>=after['viewport_width']:reason='outside_horizontal_view'
+        elif (r['box'][0]+r['box'][2]>0 and r['box'][0]<before['viewport_width']
+              and (new['box'][0]+new['box'][2]<=0 or new['box'][0]>=after['viewport_width'])):
+            # Detect a regression, not pre-existing offscreen carousel/hidden
+            # content. An unchanged snapshot must always pass this check.
+            reason='outside_horizontal_view'
         if reason:failures.append(dict(id=r['id'],reason=reason,before=r,after=new))
     # New intersections between previously disjoint siblings. Translation of a
     # whole section does not change this relation. Ancestor overlap is normal.
@@ -69,5 +73,5 @@ def compare(before,after):
                 if overlap(a['box'],b['box'])<=1 and overlap(aa['box'],bb['box'])>max(4,.05*area):
                     failures.append(dict(id=a['id'],other_id=b['id'],reason='new_sibling_overlap'))
     return dict(accepted=not failures,checked_elements=checked,failures=failures,
-                contract='below-fold-structural-v1',
+                contract='below-fold-structural-v2',
                 limitations='Not pixel/occlusion equivalence; nested scroller hidden contents are not exhaustively checked.')
