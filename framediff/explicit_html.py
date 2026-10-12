@@ -99,14 +99,15 @@ def feedback_screenshot(browser, **kwargs):
     return browser.page.screenshot(**kwargs)
 
 
-def compare_renders(before, after, before_png, after_png, max_box_error=1., max_pixel_mae=.01):
+def compare_renders(before, after, before_png, after_png, max_box_error=1., max_pixel_mae=.01,
+                    geometry_target_ids=None):
     """Local ROIs prevent a vanished tiny element from hiding in global MAE."""
     actual={r['id']:r for r in after}
     if set(actual)!={r['id'] for r in before}:raise ValueError('Visual verification element IDs changed')
     with Image.open(io.BytesIO(before_png) if isinstance(before_png,bytes) else before_png) as a,Image.open(io.BytesIO(after_png) if isinstance(after_png,bytes) else after_png) as b:
         aa=np.asarray(a.convert('RGB'),dtype=float);bb=np.asarray(b.convert('RGB'),dtype=float)
     if aa.shape!=bb.shape:raise ValueError('Viewport changed during verification')
-    delta=np.abs(aa-bb)/255;mae=float(delta.mean());box_error=0.;failures=[]
+    delta=np.abs(aa-bb)/255;mae=float(delta.mean());box_error=0.;failures=[];diagnostics=[]
     for r in before:
         other=actual[r['id']]
         error=max(abs(x-y) for x,y in zip(r['box'],other['box']));box_error=max(box_error,error)
@@ -115,11 +116,28 @@ def compare_renders(before, after, before_png, after_png, max_box_error=1., max_
         right=min(delta.shape[1],math.ceil(max(x+w,xx+ww)));bottom=min(delta.shape[0],math.ceil(max(y+h,yy+hh)))
         local=float(delta[top:bottom,left:right].mean()) if right>left and bottom>top else 0.
         clip_error=max((abs(a-b) for a,b in zip(r.get('visible_clip',[]),other.get('visible_clip',[]))),default=0.)
-        if error>max_box_error or local>max_pixel_mae or clip_error>max_box_error:
-            failures.append(dict(id=r['id'],fd_id=r.get('fd_id'),box_error=error,
-                                 local_pixel_mae=local,clip_error=clip_error))
+        geometric_change=error>max_box_error or clip_error>max_box_error
+        target=geometry_target_ids is None or r.get('fd_id') in geometry_target_ids
+        detail=dict(id=r['id'],fd_id=r.get('fd_id'),box_error=error,
+                    local_pixel_mae=local,clip_error=clip_error)
+        if geometric_change and not target:diagnostics.append(detail)
+        if (geometric_change and target) or local>max_pixel_mae:
+            failures.append(detail)
     return dict(accepted=not failures and mae<=max_pixel_mae,pixel_mae=mae,max_box_error_px=box_error,
-                element_failures=failures,max_pixel_mae=max_pixel_mae,max_box_error=max_box_error)
+                element_failures=failures,non_target_geometry_changes=diagnostics,
+                max_pixel_mae=max_pixel_mae,max_box_error=max_box_error)
+
+
+def target_abstraction(rows, target_ids, viewport, size, tree=None):
+    """Use the policy's clipped occupancy/boundary raster, not RGB colors."""
+    from .visual import elements, semantic_masks
+    if tree is None:
+        tree={'nodes':[{'id':'__verification_root__'}]+[
+            {'id':id,'visual_class':1} for id in sorted(target_ids)]}
+    boxes={r['fd_id']:r['box'] for r in rows if r.get('fd_id') in target_ids}
+    clips={r['fd_id']:r['visible_clip'] for r in rows if r.get('fd_id') in target_ids}
+    tree={**tree,'nodes':[n for n in tree['nodes'] if n['id'] in boxes]}
+    return semantic_masks(elements(tree,boxes,viewport,clips),viewport,size)
 
 
 FREEZE_JS = r'''(mode) => {
@@ -348,7 +366,8 @@ SIZE_BOXES_JS = '() => { const geometry='+SIZE_GEOMETRY_JS+r''';
 }'''
 
 
-def normalize_sizes(browser, html, viewport, out, max_pixel_mae, max_box_error, action_ids=None):
+def normalize_sizes(browser, html, viewport, out, max_pixel_mae, max_box_error, action_ids=None,
+                    target_tree=None, observation_size=384):
     """Normalize only tagged abstraction boxes and verify the complete render."""
     out=Path(out);out.mkdir(parents=True,exist_ok=True)
     browser.reset_context();browser.load(html,viewport)
@@ -357,22 +376,42 @@ def normalize_sizes(browser, html, viewport, out, max_pixel_mae, max_box_error, 
     baseline=browser.page.content()
     (out/'before.png').write_bytes(before_png)
 
-    def assess(candidate):
+    target_ids=set(action_ids) if action_ids is not None else {
+        r['fd_id'] for r in snapshot['before'] if r.get('fd_id')}
+    reference=snapshot['before'];reference_png=before_png
+
+    def assess(candidate, replay=False):
         browser.reset_context();browser.load(candidate,viewport)
         png=browser.page.screenshot(animations='disabled')
-        qa=compare_renders(snapshot['before'],browser.page.evaluate(SIZE_BOXES_JS),
-                           before_png,png,max_box_error,max_pixel_mae)
-        return qa,png
+        actual=browser.page.evaluate(SIZE_BOXES_JS)
+        qa=compare_renders(reference,actual,reference_png,png,max_box_error,max_pixel_mae,
+                           geometry_target_ids=target_ids if replay else None)
+        before_ids={r.get('fd_id') for r in reference};after_ids={r.get('fd_id') for r in actual}
+        missing=sorted(target_ids-before_ids | target_ids-after_ids)
+        a=target_abstraction(reference,target_ids,viewport,observation_size,target_tree)
+        b=target_abstraction(actual,target_ids,viewport,observation_size,target_tree)
+        abstract_mae=float((a-b).abs().mean())
+        qa.update(abstraction_mae=abstract_mae,max_abstraction_mae=max_pixel_mae,
+                  missing_target_ids=missing,target_count=len(target_ids))
+        qa['accepted']=qa['accepted'] and not missing and abstract_mae<=max_pixel_mae
+        return qa,png,actual
 
     # Do not claim successful normalization for a source that cannot replay.
-    initial,_=assess(baseline)
+    initial,replay_png,replay_rows=assess(baseline,replay=True)
+    write_json(out/'reload-report.json',initial)
+    write_json(out/'reload-geometry.json',{'before':reference,'after':replay_rows})
+    (out/'reloaded.png').write_bytes(replay_png)
+    (out/'baseline.html').write_text(baseline)
     if not initial['accepted']:
         report={**initial,'mode':'sizes','normalization_strategy':'targeted-inline-v4',
-                'error':'Original HTML is not stable across reloads','normalized_elements':0}
+                'error':'Original HTML is not stable across reloads','normalized_elements':0,
+                'failure_stage':'original_reload','error_type':'original_reload_preservation_failed'}
         write_json(out/'report.json',report)
         return report
 
-    browser.load(baseline,viewport)
+    # Judge normalization against the accepted replay, not unrelated original
+    # non-target geometry drift. Keep full-element checks for new side effects.
+    reference=replay_rows;reference_png=replay_png
     browser.page.evaluate(r'''group=>{
           document.documentElement.setAttribute('data-tuide-inline-actions','targeted-v2');
           for(const a of group){
@@ -388,10 +427,14 @@ def normalize_sizes(browser, html, viewport, out, max_pixel_mae, max_box_error, 
           }
         }''',snapshot['candidates'])
     candidate=browser.page.content()
-    qa,png=assess(candidate)
+    qa,png,after_rows=assess(candidate)
+    write_json(out/'normalization-geometry.json',{'before':reference,'after':after_rows})
     accepted=[a['id'] for a in snapshot['candidates']]
     report={**qa,'mode':'sizes','normalization_strategy':'targeted-inline-v4',
             'normalized_elements':len(accepted),'normalized_ids':accepted,
+            'reload_verification':initial,
+            'failure_stage':None if qa['accepted'] else 'normalization_preservation',
+            'error_type':None if qa['accepted'] else 'normalization_preservation_failed',
             'preserved_elements':[r for r in snapshot['skipped'] if r['reason']!='not_action_target'],
             'skipped_not_action_target':sum(r['reason']=='not_action_target' for r in snapshot['skipped']),
             'neutralized_constraints':{p:sum(p in a['constraints'] for a in snapshot['candidates'])
@@ -405,12 +448,14 @@ def normalize_sizes(browser, html, viewport, out, max_pixel_mae, max_box_error, 
     return report
 
 
-def convert(browser, html, viewport, out, mode='boxes', max_pixel_mae=.01, max_box_error=1., action_ids=None):
+def convert(browser, html, viewport, out, mode='boxes', max_pixel_mae=.01, max_box_error=1., action_ids=None,
+            target_tree=None, observation_size=384):
     """Emit normalized.html only when a fresh reload passes geometry/pixel QA."""
     if mode not in ('boxes','sizes'):raise ValueError('Parent separation was removed; use boxes or sizes')
     reject_flat_html(html)
     if mode=='sizes':
-        return normalize_sizes(browser,html,viewport,out,max_pixel_mae,max_box_error,action_ids)
+        return normalize_sizes(browser,html,viewport,out,max_pixel_mae,max_box_error,action_ids,
+                               target_tree,observation_size)
     out=Path(out);out.mkdir(parents=True,exist_ok=True)
     browser.reset_context();browser.load(html,viewport)
     browser.page.screenshot(path=str(out/'before.png'),animations='disabled')

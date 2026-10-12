@@ -167,3 +167,43 @@ uses one batch application instead of repeated rollback trials. Do not loosen vi
 increase the acceptance rate. Server WebUI coverage must be measured; local
 regression fixtures do not establish that coverage. Existing v7 artifacts are
 preserved but are not reused as v10 normalization results.
+
+### Replay verification and normalization verification
+
+The `parent-preserved-targeted-inline-v5-replay-qa` contract separates source
+replay from normalization. Replay checks global/local screenshot MAE, target
+box/clipping errors and the policy's occupancy/boundary abstraction MAE (at the
+configured observation resolution, using the pixel-MAE tolerance). Non-target
+geometry changes alone are diagnostic, not rejection grounds. Local screenshot
+checks still protect small visible non-target elements. Missing target IDs fail.
+
+`reload-report.json`, `reload-geometry.json`, `baseline.html`, and `reloaded.png`
+are saved beside `before.png`. After successful replay, normalization is checked
+against that replay with full-element geometry/local visual checks, plus target
+abstraction checks. Thus new non-target side effects of normalization still fail.
+`normalization-geometry.json` records that second comparison.
+
+Rejections distinguish `original_reload` / `original_reload_preservation_failed`
+from `normalization_preservation` / `normalization_preservation_failed` in
+`stage` / `error_type`. Browser exceptions remain separate technical failures.
+Use a new normalization output directory after this contract change; old results
+are neither overwritten nor silently treated as having passed the new checks.
+
+### Candidate exclusion diagnostics
+
+`candidate-inspection.json` now distinguishes `no_editable_css`,
+`no_visible_candidate`, and `inspection_error`. Each editable owner/property
+records up to four deterministic probes, their proposed value, abstraction
+difference, and outcome (`visible`, `no_box_change`, `no_abstraction_change`,
+`explicit_constraint_rejected`, or `probe_error`). This is a finite search, not
+proof that no possible CSS edit could work. Inspection errors are not cached as
+permanent exclusions. The two no-candidate counters are now disjoint.
+
+For existing failed runs, use `visual-audit-candidates --normalized <labels-dir>
+--split train --out <new-audit-dir>`. It reads the original source manifest paths
+from that directory's config (override with `--source` after relocating data),
+and reuses `normalized-pages/.../normalized.html`. It does not rerun normalization,
+generate corruptions, invoke the detector, or modify training manifests. It does
+execute candidate edits in Chromium. Results are saved per page and summarized
+in `summary.json`; `audit_setup_error` means the preserved inputs could not be
+loaded/reconstructed, not that the page has no usable edits.

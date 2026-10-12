@@ -30,7 +30,7 @@ from .web_experiment import digest
 ONLINE_CONTRACT = 'online-css-visible-values-v6-size-margin'
 SAMPLING_CONTRACT = 'property-first-owner-uniform-v1'
 # Bump when eligibility semantics change; old syntax-only caches are invalid.
-INSPECTION_LOGIC_VERSION = 'visible-candidates-v1-four-probes'
+INSPECTION_LOGIC_VERSION = 'visible-candidates-v2-diagnostics-four-probes'
 PROBES_PER_SITE = 4
 ABSTRACTION_EPS = 1e-6
 
@@ -103,7 +103,13 @@ def changed(a,b):
     return bool((a-b).abs().max().item()>ABSTRACTION_EPS)
 
 
-def inspect_candidates(browser,target,html):
+class EmptyTargetPoolError(ValueError):
+    def __init__(self, diagnostics):
+        super().__init__('Empty online target pool after filtering pages without witnessed abstraction-changing edits')
+        self.diagnostics=diagnostics
+
+
+def inspect_candidates(browser,target,html,diagnostics=None):
     """Find witnessed visible edits; finite probing is not exhaustive CSS search."""
     from . import css_owners
     from .visual import annotate
@@ -118,27 +124,42 @@ def inspect_candidates(browser,target,html):
     def apply(edit):
         return css_owners.execute(browser,target['css_owners'],edit) if owner_mode else execute(browser,tree,edit)
     before,boxes,items=abstraction(browser,tree,viewport,target.get('corruption_observation_size',384))
-    candidates=[]
-    for site in mutation_sites(state):
+    candidates=[];sites=mutation_sites(state)
+    diagnostics=diagnostics if diagnostics is not None else {}
+    diagnostics.update(editable_sites=len(sites),probes_per_site=PROBES_PER_SITE,sites=[],
+                       finite_probe_search=True)
+    for site in sites:
         node,field,value,priority=site
+        detail={'owner':node,'property':field,'original_value':value,'probes':[]}
+        diagnostics['sites'].append(detail)
         rng=random.Random(hashlib.sha256(f'{node}:{field}:{value}'.encode()).digest())
         for _ in range(PROBES_PER_SITE):
             edit=sample_mutation(state,viewport,rng,explicit='data-tuide-explicit-id' in html,sites=[site])
+            probe={'edit':edit};detail['probes'].append(probe)
             try:
                 apply(edit)
                 after,new_boxes,_=abstraction(browser,tree,viewport,target.get('corruption_observation_size',384))
                 visible=new_boxes!=boxes and changed(before,after)
+                probe.update(outcome='visible' if visible else (
+                    'no_box_change' if new_boxes==boxes else 'no_abstraction_change'),
+                    abstraction_max_difference=float((before-after).abs().max()))
             except ValueError as exc:
+                probe.update(outcome='probe_error',error=str(exc))
                 if 'Explicit ' not in str(exc):raise
+                probe['outcome']='explicit_constraint_rejected'
                 visible=False
+            except Exception as exc:
+                probe.update(outcome='probe_error',error=f'{type(exc).__name__}: {exc}')
+                raise
             finally:apply([node,field,value,priority])
             if visible:
                 candidates.append(edit);break
     return state,dict(visible_candidates=candidates,target_elements=items,
-                     visual_classes=[n.get('visual_class',0) for n in tree['nodes']])
+                     visual_classes=[n.get('visual_class',0) for n in tree['nodes']],
+                     inspection_diagnostics=diagnostics)
 
 
-def target_pool(rows, manifest=None, cache_dir=None, observation_size=384):
+def target_pool(rows, manifest=None, cache_dir=None, observation_size=384, diagnostics=None):
     if observation_size<1:raise ValueError('Invalid corruption observation size')
     if cache_dir is None and manifest:
         cache_dir = Path(manifest).resolve().parent/'.online-target-cache'
@@ -147,6 +168,11 @@ def target_pool(rows, manifest=None, cache_dir=None, observation_size=384):
     seen = set()
     excluded = 0
     inspection_errors = 0
+    no_editable=0;no_visible=0
+    records=[]
+    def record(detail):
+        records.append(detail)
+        if diagnostics is not None:diagnostics.append(detail)
     for row in rows:
         if row.get('hierarchy'):raise ValueError('Flat targets are retired; use original parent-preserving HTML')
         if row['split'] != 'train': raise ValueError('Online corruption only accepts training pages')
@@ -173,6 +199,8 @@ def target_pool(rows, manifest=None, cache_dir=None, observation_size=384):
         # of permanently unusable pages from terminating online training.
         if clean_state is not None and not mutation_sites(clean_state):
             excluded += 1
+            no_editable+=1
+            record(dict(id=page_id,status='excluded',reason='no_editable_css',editable_sites=0))
             continue
         targets[page_id] = target
     # Even preparsed declarations need execution probes. Cache accepted and
@@ -195,7 +223,7 @@ def target_pool(rows, manifest=None, cache_dir=None, observation_size=384):
                         else:
                             if not isinstance(state,list): raise ValueError('Invalid cached state')
                             mutation_sites(state)
-                            metadata={k:saved[k] for k in ('visible_candidates','target_elements','visual_classes')}
+                            metadata={k:saved[k] for k in ('visible_candidates','target_elements','visual_classes','inspection_diagnostics')}
                             if not isinstance(metadata['visible_candidates'],list):raise ValueError('Invalid candidate cache')
                         cached = True
                     except (ValueError, KeyError, TypeError): state = None
@@ -206,7 +234,9 @@ def target_pool(rows, manifest=None, cache_dir=None, observation_size=384):
                     try:
                         if browser is None: browser = HtmlBrowser().__enter__()
                         else: browser.reset_context()
-                        state,metadata=inspect_candidates(browser,target,html)
+                        detail={}
+                        metadata['inspection_diagnostics']=detail
+                        state,metadata=inspect_candidates(browser,target,html,detail)
                     except Exception as exc:
                         error = f'{type(exc).__name__}: {exc}'
                     # Transient browser failures must be retried next run, not
@@ -217,28 +247,35 @@ def target_pool(rows, manifest=None, cache_dir=None, observation_size=384):
                 del targets[page_id]
                 excluded += 1
                 inspection_errors += 1
+                reason='inspection_error'
             elif not metadata['visible_candidates']:
                 del targets[page_id]
                 excluded += 1
+                reason='no_editable_css' if not mutation_sites(state) else 'no_visible_candidate'
+                if reason=='no_editable_css':no_editable+=1
+                else:no_visible+=1
             else:
+                reason='usable'
                 target['target_declaration_state'] = state
-                target.update(metadata)
+                target.update({k:v for k,v in metadata.items() if k!='inspection_diagnostics'})
                 for node,label in zip(target['current']['nodes'],metadata['visual_classes']):node['visual_class']=label
+            record(dict(id=page_id,status='kept' if reason=='usable' else 'excluded',reason=reason,
+                        error=error,cache_hit=cached,**metadata.get('inspection_diagnostics',{})))
             processed = inspected + cache_hits
             if processed == 1 or processed % 100 == 0:
                 print({'online_target_inspection': inspected, 'cache_hits': cache_hits,
-                       'excluded_no_editable_css': excluded-inspection_errors,
-                       'excluded_no_visible_candidate':excluded-inspection_errors,
+                       'excluded_no_editable_css': no_editable,
+                       'excluded_no_visible_candidate':no_visible,
                        'excluded_inspection_error': inspection_errors}, flush=True)
     finally:
         if browser is not None: browser.__exit__(None,None,None)
     print({'online_target_filter': {'pages': len(seen), 'kept': len(targets),
           'visible_candidates':sum(len(t['visible_candidates']) for t in targets.values()),
-          'excluded_no_editable_css': excluded-inspection_errors,
-          'excluded_no_visible_candidate':excluded-inspection_errors,
+          'excluded_no_editable_css': no_editable,
+          'excluded_no_visible_candidate':no_visible,
           'excluded_inspection_error': inspection_errors, 'inspected_missing_states': inspected,
           'cache_hits': cache_hits, 'cache_dir': str(cache_dir) if cache_dir is not None else None}}, flush=True)
-    if not targets: raise ValueError('Empty online target pool after filtering pages without witnessed abstraction-changing edits')
+    if not targets: raise EmptyTargetPoolError(records)
     # Stable order makes sample indices independent of repeated offline examples.
     return [targets[k] for k in sorted(targets)]
 

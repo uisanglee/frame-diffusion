@@ -15,7 +15,7 @@ from .visual import annotate, elements
 from .visual_data import validate_splits
 from .web_experiment import digest, guard_run
 
-CONTRACT = 'parent-preserved-targeted-inline-v4'
+CONTRACT = 'parent-preserved-targeted-inline-v5-replay-qa'
 
 
 def prepare(args):
@@ -81,8 +81,11 @@ def prepare(args):
                                 action_ids=[n['id'] for n in nodes if n.get('visual_class',1)>0]
                                 qa=convert(browser,html_path.read_text(),row['viewport'],folder,mode='sizes',
                                            max_pixel_mae=args.max_pixel_mae,max_box_error=args.max_box_error,
-                                           action_ids=action_ids)
-                                if not qa['accepted']:raise ValueError('Normalization changed rendering; see page report.json')
+                                           action_ids=action_ids,target_tree=row['current'],
+                                           observation_size=args.observation_size)
+                                if not qa['accepted']:
+                                    stage=qa.get('failure_stage') or 'normalization_preservation'
+                                    raise ValueError(qa.get('error') or 'Normalization changed rendering; see page report.json')
                                 write_json(stamp,{'source_sha':signature,'sha':digest(normalized)})
                             qa=read_json(folder/'report.json')
                             stats={k:qa.get(k) for k in ('normalized_elements','partial_normalization','verification_trials')}
@@ -104,8 +107,13 @@ def prepare(args):
                         # target_pool caches visibility probes; train and evaluation
                         # use only this verified normalized clean program.
                         stage='visible_candidate_inspection'
-                        pool=target_pool([{**seed,'split':'train'}],cache_dir=out/'.online-target-cache',
-                                         observation_size=args.observation_size)
+                        write_json(folder/'inspection-input.json',seed)
+                        inspection=[]
+                        try:
+                            pool=target_pool([{**seed,'split':'train'}],cache_dir=out/'.online-target-cache',
+                                             observation_size=args.observation_size,diagnostics=inspection)
+                        finally:
+                            write_json(folder/'candidate-inspection.json',inspection)
                         stage='seed_corruption'
                         sampler=OnlineSampler(pool,'screenshot',seed=args.seed,max_noise=1)
                         new=sampler.generate(index)
@@ -125,9 +133,15 @@ def prepare(args):
                                'normalization_stats':new.get('normalization_stats')})
                 except Exception as exc:
                     failure={'id':page_id,'stage':stage,'error':str(exc)}
-                    if stage=='normalization' and qa is not None:
+                    if stage=='visible_candidate_inspection' and hasattr(exc,'diagnostics'):
+                        failure['inspection_reasons']=[r['reason'] for r in exc.diagnostics]
+                        failure['inspection_report']=str(folder/'candidate-inspection.json')
+                    if qa is not None and not qa.get('accepted',True):
+                        failure['error_type']=qa.get('error_type')
                         failure['diagnostics']={'pixel_mae':qa.get('pixel_mae'),
                             'max_box_error_px':qa.get('max_box_error_px'),
+                            'abstraction_mae':qa.get('abstraction_mae'),
+                            'non_target_geometry_changes':len(qa.get('non_target_geometry_changes',[])),
                             'first_element_failures':qa.get('element_failures',[])[:3]}
                     errors.append(failure)
                     reasons[stage+': '+str(exc).splitlines()[0]]+=1

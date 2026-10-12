@@ -32,7 +32,12 @@ def make_rows(tmp_path):
 @pytest.mark.browser
 def test_preparsed_inert_and_unobservable_pages_excluded_and_cached(tmp_path,monkeypatch):
     rows=make_rows(tmp_path);cache=tmp_path/'cache'
-    pool=target_pool(rows,cache_dir=cache,observation_size=64)
+    diagnostics=[]
+    pool=target_pool(rows,cache_dir=cache,observation_size=64,diagnostics=diagnostics)
+    assert [r['reason'] for r in diagnostics]==['no_visible_candidate','no_visible_candidate','usable']
+    assert all(r['sites'] for r in diagnostics)
+    assert all(p['outcome'] in ('no_box_change','no_abstraction_change','visible','explicit_constraint_rejected')
+               for r in diagnostics for s in r['sites'] for p in s['probes'])
     assert [p['id'] for p in pool]==['active']
     assert {e[1] for e in pool[0]['visible_candidates']}=={'width'}
     import framediff.tree_online as online
@@ -47,6 +52,53 @@ def test_preparsed_inert_and_unobservable_pages_excluded_and_cached(tmp_path,mon
     assert len(list(cache.glob('*.json')))==count*2
     target_pool([{**r,'viewport':[500,300]} for r in rows],cache_dir=cache,observation_size=64)
     assert len(list(cache.glob('*.json')))==count*3
+
+
+@pytest.mark.browser
+def test_inspection_failures_are_separate_and_not_cached(tmp_path,monkeypatch,capsys):
+    import framediff.tree_online as online
+    rows=make_rows(tmp_path)
+    rows[0]['target_declaration_state']=[[['',''] for _ in online.FIELDS] for _ in rows[0]['current']['nodes']]
+    def fail(*args,**kwargs):raise RuntimeError('capture fixture')
+    monkeypatch.setattr(online,'inspect_candidates',fail)
+    diagnostics=[]
+    with pytest.raises(online.EmptyTargetPoolError) as exc:
+        target_pool(rows,cache_dir=tmp_path/'cache',diagnostics=diagnostics)
+    assert exc.value.diagnostics==diagnostics
+    assert [r['reason'] for r in diagnostics]==['no_editable_css','inspection_error','inspection_error']
+    assert not list((tmp_path/'cache').glob('*.json'))
+    log=capsys.readouterr().out
+    assert "'excluded_no_editable_css': 1" in log
+    assert "'excluded_no_visible_candidate': 0" in log
+    assert "'excluded_inspection_error': 2" in log
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize('saved_input',[True,False])
+def test_candidate_audit_reuses_saved_inputs_without_normalizing(tmp_path,monkeypatch,saved_input):
+    import hashlib
+    from types import SimpleNamespace
+    from framediff.ir import write_json,write_jsonl,read_json
+    from framediff.candidate_audit import run
+    import framediff.explicit_html as explicit
+    rows=make_rows(tmp_path)
+    root=tmp_path/'normalized';root.mkdir();out=tmp_path/'audit'
+    rejections=[]
+    for row in rows:
+        id=row['id'].rsplit('/',1)[0]
+        folder=root/'normalized-pages'/'train'/hashlib.sha256(id.encode()).hexdigest()
+        folder.mkdir(parents=True)
+        if saved_input:write_json(folder/'inspection-input.json',row)
+        else:(folder/'normalized.html').write_text(Path(row['target_html']).read_text())
+        rejections.append(dict(id=id,stage='visible_candidate_inspection'))
+    write_jsonl(root/'rejections-train.jsonl',rejections)
+    source=tmp_path/'source';source.mkdir()
+    write_jsonl(source/'policy-train.jsonl',rows)
+    write_json(root/'config.json',{'sources':{str(source/'policy-train.jsonl'):'unused'}})
+    monkeypatch.setattr(explicit,'convert',lambda *a,**k:pytest.fail('Must not normalize'))
+    run(SimpleNamespace(normalized=str(root),out=str(out),split='train',limit=0,
+                        source=None,observation_size=64))
+    assert read_json(out/'summary.json')['reasons']=={'no_visible_candidate':2,'usable':1}
 
 
 @pytest.mark.browser

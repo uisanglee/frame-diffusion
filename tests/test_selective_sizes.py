@@ -47,6 +47,56 @@ def test_changed_batch_is_rejected_without_partial_freezing(tmp_path):
         assert report['verification_trials']==1
         assert not (tmp_path/'normalized.html').exists()
         assert (tmp_path/'rejected.html').exists()
+        assert report['error_type']=='normalization_preservation_failed'
+        assert report['failure_stage']=='normalization_preservation'
+
+
+@pytest.mark.browser
+def test_replay_untagged_offscreen_drift_is_diagnostic_only(tmp_path):
+    html='''<style>body{margin:0}.card{width:100px;height:40px;background:red}
+    .other{position:absolute;top:900px;width:20px;height:20px}
+    .other[data-tuide-verify-id]{top:938px}</style>
+    <div class="card" data-fd-id="card"></div><div class="other"></div>'''
+    with HtmlBrowser() as b:
+        report=convert(b,html,[400,200],tmp_path,mode='sizes',action_ids=['card'])
+    assert report['accepted'],report
+    reload=report['reload_verification']
+    assert reload['pixel_mae']==0 and reload['abstraction_mae']==0
+    assert reload['non_target_geometry_changes']
+    assert not reload['element_failures']
+    assert (tmp_path/'reload-geometry.json').is_file()
+
+
+@pytest.mark.browser
+def test_replay_target_drift_rejected_even_with_identical_pixels(tmp_path):
+    html='''<style>.card{position:absolute;left:0;top:0;width:20px;height:20px}
+    .card[data-tuide-verify-id]{left:38px}</style><div class="card" data-fd-id="card"></div>'''
+    with HtmlBrowser() as b:
+        report=convert(b,html,[400,200],tmp_path,mode='sizes',action_ids=['card'])
+    assert not report['accepted'] and report['pixel_mae']==0
+    assert report['error_type']=='original_reload_preservation_failed'
+    assert report['normalized_elements']==0
+    assert report['abstraction_mae']>0
+    assert (tmp_path/'reloaded.png').exists()
+
+
+@pytest.mark.browser
+def test_replay_untagged_visual_change_still_rejected(tmp_path):
+    html='''<style>.other{width:20px;height:20px;background:red}
+    .other[data-tuide-verify-id]{background:blue}</style><div class="other"></div>'''
+    with HtmlBrowser() as b:
+        report=convert(b,html,[400,200],tmp_path,mode='sizes')
+    assert not report['accepted']
+    assert report['pixel_mae']<.01  # Local ROI protects small visible objects.
+    assert report['failure_stage']=='original_reload'
+
+
+def test_target_abstraction_preserves_policy_classes():
+    from framediff.explicit_html import target_abstraction
+    rows=[dict(id='0',fd_id='a',box=[0,0,20,20],visible_clip=[0,0,20,20])]
+    tree={'nodes':[{'id':'root'},{'id':'a','visual_class':3}]}
+    mask=target_abstraction(rows,{'a'},[100,100],100,tree)
+    assert mask[2].sum()>0 and mask[0].sum()==0
 
 
 @pytest.mark.browser
@@ -185,3 +235,25 @@ def test_preparation_records_errors_before_split_completion(tmp_path,monkeypatch
     with pytest.raises(ValueError,match='Empty normalized split'):
         mod.prepare(args)
     assert len(list(out.glob('normalized-pages/*/*/page-status.json')))==3
+
+
+@pytest.mark.parametrize('stage',['original_reload','normalization_preservation'])
+def test_preparation_preserves_verification_failure_type(tmp_path,monkeypatch,stage):
+    from framediff import tree_normalize as mod
+    from framediff.ir import write_jsonl
+    source=tmp_path/'source';source.mkdir();out=tmp_path/'out'
+    html=source/'clean.html';html.write_text('<div>Hello</div>')
+    for split in ('train','val','test'):
+        row=dict(id=split+'/clean',split=split,group=split,source_sha=split,
+                 current_html=str(html),viewport=[300,100],current={'nodes':[{'id':'root'}]})
+        write_jsonl(source/f'policy-{split}.jsonl',[row])
+        write_jsonl(source/f'pages-{split}.jsonl',[dict(id=split)])
+    monkeypatch.setattr(mod,'HtmlBrowser',lambda:nullcontext(object()))
+    kind=stage+'_failed'
+    monkeypatch.setattr(mod,'convert',lambda *a,**k:dict(accepted=False,
+        failure_stage=stage,error_type=kind,pixel_mae=0,element_failures=[]))
+    args=SimpleNamespace(rendered=str(source),out=str(out),resume=True,seed=42,
+        max_css_owners=64,observation_size=96,max_pixel_mae=.01,max_box_error=1.)
+    with pytest.raises(ValueError,match='Empty normalized split'):mod.prepare(args)
+    row=json.loads((out/'rejections-train.jsonl').read_text())
+    assert row['stage']==stage and row['error_type']==kind
