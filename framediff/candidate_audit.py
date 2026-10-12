@@ -32,6 +32,7 @@ def run(args):
             if id in wanted and (id not in sources or row['id'].endswith('/clean')):sources[id]=row
     out.mkdir(parents=True)
     summary=Counter();probe_counts=Counter();records=[]
+    field_counts=Counter();historical_counts=Counter();historical_pages=Counter();diagnostic_errors=0
     for rejection in rejected:
         id=rejection['id'];key=hashlib.sha256(id.encode()).hexdigest()
         folder=root/'normalized-pages'/args.split/key
@@ -62,14 +63,26 @@ def run(args):
             except EmptyTargetPoolError:
                 pass
             result=diagnostics[0]
+            if result['reason']=='no_editable_css':
+                from .candidate_diagnostics import inspect_saved_target
+                try:result['eligibility']=inspect_saved_target(seed,folder)
+                except Exception as exc:
+                    result['eligibility_error']=f'{type(exc).__name__}: {exc}'
+                    diagnostic_errors+=1
         except Exception as exc:
             result=dict(id=id,reason='audit_setup_error',error=f'{type(exc).__name__}: {exc}')
         write_json(out/f'{key}.json',result)
         summary[result['reason']]+=1
+        eligibility=result.get('eligibility',{})
+        field_counts.update(eligibility.get('field_reasons',{}))
+        historical_counts.update(eligibility.get('historical_skip_reasons',{}))
+        historical_pages.update(eligibility.get('historical_skip_reasons',{}).keys())
         for site in result.get('sites',[]):
             for probe in site['probes']:probe_counts[probe['outcome']]+=1
         records.append(dict(id=id,reason=result['reason'],report=str(out/f'{key}.json')))
         write_jsonl(out/'pages.jsonl',records)
         write_json(out/'summary.json',dict(pages=len(records),reasons=dict(summary),
-            probe_outcomes=dict(probe_counts),finite_probe_search=True))
+            probe_outcomes=dict(probe_counts),finite_probe_search=True,
+            eligibility_field_counts=dict(field_counts),historical_skip_element_counts=dict(historical_counts),
+            historical_skip_page_counts=dict(historical_pages),eligibility_diagnostic_errors=diagnostic_errors))
         print(f'[{len(records)}/{len(rejected)}] {id}: {result["reason"]}',flush=True)

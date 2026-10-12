@@ -207,3 +207,20 @@ generate corruptions, invoke the detector, or modify training manifests. It does
 execute candidate edits in Chromium. Results are saved per page and summarized
 in `summary.json`; `audit_setup_error` means the preserved inputs could not be
 loaded/reconstructed, not that the page has no usable edits.
+
+For `no_editable_css`, the same audit command now adds an `eligibility` section
+even when the target pool exits before executing probes. It reloads the preserved
+HTML read-only and compares saved and freshly parsed state. For each target it
+records the editable attribute, inline/computed values, parsed owner values,
+matching CSS declarations, visible clip and normalization's recorded skip reason.
+Field reasons distinguish missing permissions, disallowed fields, empty values,
+unsupported values and eligible fields. Computed width is not treated as an
+editable declaration. Fresh eligible sites with zero saved sites expose stale
+state rather than silently replacing it. Historical omissions are explicitly
+marked `historical_exclusion_not_recorded`; current layout observations alone
+are not proof of the original exclusion cause.
+
+`summary.json` includes field counts, historical skip element counts and page
+counts (a page can have multiple causes), plus diagnostic failure counts. Use a
+new audit directory to retain the earlier results. Normalized HTML, detector
+weights, manifests and the action eligibility rules remain unchanged.

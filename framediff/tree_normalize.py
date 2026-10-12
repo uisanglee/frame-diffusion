@@ -113,6 +113,14 @@ def prepare(args):
                             pool=target_pool([{**seed,'split':'train'}],cache_dir=out/'.online-target-cache',
                                              observation_size=args.observation_size,diagnostics=inspection)
                         finally:
+                            if any(r['reason']=='no_editable_css' for r in inspection):
+                                from .candidate_diagnostics import inspect_saved_target
+                                try:
+                                    detail=inspect_saved_target(seed,folder)
+                                    for r in inspection:
+                                        if r['reason']=='no_editable_css':r['eligibility']=detail
+                                except Exception as exc:
+                                    for r in inspection:r['eligibility_error']=f'{type(exc).__name__}: {exc}'
                             write_json(folder/'candidate-inspection.json',inspection)
                         stage='seed_corruption'
                         sampler=OnlineSampler(pool,'screenshot',seed=args.seed,max_noise=1)
