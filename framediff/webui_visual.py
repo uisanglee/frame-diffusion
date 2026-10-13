@@ -40,7 +40,7 @@ def _native_elements(ax_path,bb_path,viewport):
     return result
 
 
-def _assign(groups,counts,seed,diagnostics=None):
+def _assign(groups,counts,seed,diagnostics=None,allow_partial=False):
     rng=random.Random(seed);items=list(groups.items());rng.shuffle(items)
     selected={split:[] for split in counts};assigned={}
     for group,rows in items:
@@ -57,7 +57,7 @@ def _assign(groups,counts,seed,diagnostics=None):
             unselected=[{'page_id':r['id'],'group':g,
                          'reason':'domain_split_quota_exhausted' if g in assigned else 'requested_counts_filled'}
                         for g,rows in groups.items() for r in rows if r['id'] not in used])
-    if missing:raise ValueError(f'Not enough domain-disjoint WebUI pages for requested split: {missing}')
+    if missing and not allow_partial:raise ValueError(f'Not enough domain-disjoint WebUI pages for requested split: {missing}')
     return selected,assigned
 
 
@@ -168,7 +168,12 @@ def import_webui(args):
     for row in candidates:grouped[row['group']].append(row)
     counts={'train':args.train_count,'val':args.val_count,'test':args.test_count}
     allocation={}
-    try:selected,assigned=_assign(grouped,counts,args.seed,allocation)
+    reference=getattr(args,'allocation_counts',None)
+    try:
+        selected,assigned=_assign(grouped,reference or counts,args.seed,allocation,allow_partial=bool(reference))
+        actual={s:len(rows) for s,rows in selected.items()}
+        if actual!=counts:
+            raise ValueError(f'Allocation does not match required counts: expected={counts}, actual={actual}')
     except ValueError as exc:
         write_json(out/'selection-failure.json',{'requested':counts,'eligible_unique_pages':len(candidates),
             'eligible_domains':len(grouped),'error':str(exc),'source_scan':str(out/'source-scan.json'),

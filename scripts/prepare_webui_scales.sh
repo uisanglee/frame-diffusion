@@ -11,8 +11,17 @@ raw=$1
 data=$2
 read -r -a sizes <<< "${WEBUI_SIZES:-7000 70000}"
 source "$repo_root/scripts/webui_views.sh"
+split_options=()
+if [[ -n "${MASTER_COUNTS:-}" ]]; then
+  read -r -a master_counts <<< "$MASTER_COUNTS"
+  split_options+=(--master-counts "${master_counts[@]}")
+fi
+if [[ -n "${ALLOCATION_COUNTS:-}" ]]; then
+  read -r -a allocation_counts <<< "$ALLOCATION_COUNTS"
+  split_options+=(--allocation-counts "${allocation_counts[@]}")
+fi
 python -m framediff visual-webui-scales-prepare --root "$raw" --out "$data" \
-  --sizes "${sizes[@]}" --views "${views[@]}" --seed "${SEED:-42}" --resume
+  --sizes "${sizes[@]}" --views "${views[@]}" --seed "${SEED:-42}" "${split_options[@]}" --resume
 # No historical 10K input, detector checkpoint or offline trajectories required.
 python -m framediff visual-build-data --manifest "$data/master/source/manifest.jsonl" \
   --workers "${RENDER_WORKERS:-${PREPARE_WORKERS:-4}}" \

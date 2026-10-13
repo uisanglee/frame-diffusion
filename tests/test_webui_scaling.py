@@ -11,6 +11,34 @@ def sources():
             for s,n in counts(100).items() for i in range(n)]
 
 
+def test_audited_partial_master_and_nested_subset(tmp_path):
+    from PIL import Image
+    from framediff.webui_visual import _assign
+    from framediff.webui_scaling import prepare
+    raw=tmp_path/'raw'
+    for i in range(29):
+        folder=raw/str(i);folder.mkdir(parents=True)
+        Image.new('RGB',(10,10)).save(folder/'phone-screenshot.png')
+        (folder/'phone-html.html').write_text(f'<html>{i}</html>')
+        (folder/'phone-url.txt').write_text(f'https://d{i}.example/')
+    selected,_=_assign({str(i):[{'id':str(i)}] for i in range(29)},
+                       counts(40),42,allow_partial=True)
+    expected=[len(selected[s]) for s in ('train','val','test')]
+    args=SimpleNamespace(root=str(raw),out=str(tmp_path/'out'),sizes=[10,29],
+        master_counts=expected,allocation_counts=[32,4,4],views=['phone'],seed=42,resume=True)
+    prepare(args)
+    prepare(args)
+    report=read_json(tmp_path/'out/split-report.json')
+    assert list(report['sizes']['29'].values())==expected
+    small=list(read_jsonl(tmp_path/'out/10/source/manifest.jsonl'))
+    large=list(read_jsonl(tmp_path/'out/29/source/manifest.jsonl'))
+    assert len(large)==29 and len(small)==10
+    assert {r['id'] for r in small}<={r['id'] for r in large}
+    bad=SimpleNamespace(**{**vars(args),'out':str(tmp_path/'bad'),'master_counts':[21,4,4]})
+    with pytest.raises(ValueError,match='Allocation does not match'):
+        prepare(bad)
+
+
 def test_nested_domain_disjoint_and_exact_counts():
     rows=sources()
     result=nested_sources(rows,[20,50,100],42)

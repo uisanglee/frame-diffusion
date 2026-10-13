@@ -13,13 +13,14 @@ from .webui_visual import import_webui
 SPLITS = ('train', 'val', 'test')
 
 
-def counts(size):
-    if size < 10 or size % 10:
-        raise ValueError('Sizes must be positive multiples of 10')
-    return dict(train=size*8//10, val=size//10, test=size//10)
+def counts(size, overrides=None):
+    if overrides and str(size) in overrides:return overrides[str(size)]
+    if size < 10:
+        raise ValueError('Sizes must be at least 10')
+    return dict(train=size-2*(size//10), val=size//10, test=size//10)
 
 
-def nested_sources(rows, sizes, seed):
+def nested_sources(rows, sizes, seed, overrides=None):
     validate_splits(rows)
     if len({r['id'] for r in rows}) != len(rows):
         raise ValueError('Duplicate source page-view IDs')
@@ -41,7 +42,7 @@ def nested_sources(rows, sizes, seed):
         key=lambda p:hashlib.sha256(f"{seed}:{p['id']}".encode()).hexdigest()) for s in SPLITS}
     result={}
     for size in sorted(set(sizes)):
-        requested=counts(size)
+        requested=counts(size,overrides)
         if any(len(pools[s])<requested[s] for s in SPLITS):
             raise ValueError(f'Insufficient pages for {size}: requested={requested}')
         result[size]=[r for s in SPLITS for page in pools[s][:requested[s]] for r in page['rows']]
@@ -52,25 +53,37 @@ def prepare(args):
     sizes=sorted(set(args.sizes))
     for size in sizes:counts(size)
     out=Path(args.out).resolve()
-    largest=counts(sizes[-1])
+    explicit=getattr(args,'master_counts',None)
+    reference=getattr(args,'allocation_counts',None)
+    overrides={}
+    if explicit:
+        if min(explicit)<1 or sum(explicit)!=sizes[-1]:
+            raise ValueError('Master counts must be positive and sum to the largest size')
+        overrides[str(sizes[-1])]=dict(zip(SPLITS,explicit))
+    if reference and (not explicit or min(reference)<1):
+        raise ValueError('Allocation counts require explicit master counts and positive values')
+    largest=counts(sizes[-1],overrides)
     requested_views=getattr(args,'views',None);legacy_view=getattr(args,'view',None)
     views=requested_views or ([legacy_view] if legacy_view else ['default_1280-720'])
-    guard_run(out,dict(kind='webui-scaling-811-v2-multiview',root=str(Path(args.root).resolve()),
-        sizes=sizes,seed=args.seed,views=views),args.resume)
+    config=dict(kind='webui-scaling-811-v2-multiview',root=str(Path(args.root).resolve()),
+        sizes=sizes,seed=args.seed,views=views)
+    if overrides or reference:config.update(split_counts=overrides,allocation_counts=reference)
+    guard_run(out,config,args.resume)
     master=out/'master/source'
     import_webui(SimpleNamespace(root=args.root,out=str(master),views=views,seed=args.seed,
-        train_count=largest['train'],val_count=largest['val'],test_count=largest['test'],resume=args.resume))
-    selected=nested_sources(list(read_jsonl(master/'manifest.jsonl')),sizes,args.seed)
+        train_count=largest['train'],val_count=largest['val'],test_count=largest['test'],resume=args.resume,
+        allocation_counts=dict(zip(SPLITS,reference)) if reference else None))
+    selected=nested_sources(list(read_jsonl(master/'manifest.jsonl')),sizes,args.seed,overrides)
     for size,rows in selected.items():
         folder=out/str(size)/'source'
         write_jsonl(folder/'manifest.jsonl',rows)
         for split in SPLITS:
             write_jsonl(folder/f'manifest-{split}.jsonl',(r for r in rows if r['split']==split))
-        write_json(folder/'report.json',{'selected':counts(size),
+        write_json(folder/'report.json',{'selected':counts(size,overrides),
             'selected_views':{s:sum(r['split']==s for r in rows) for s in SPLITS},
             'view_distribution':{s:dict(Counter(r.get('view','legacy') for r in rows if r['split']==s)) for s in SPLITS},
             'domains':{s:len({r['group'] for r in rows if r['split']==s}) for s in SPLITS}})
-    write_json(out/'split-report.json',{'sizes':{str(n):counts(n) for n in sizes},
+    write_json(out/'split-report.json',{'sizes':{str(n):counts(n,overrides) for n in sizes},
         'common_test_size':sizes[0]//10,'common_test_scale':sizes[0],
         'protocol':'Custom 8:1:1 split by hostname, nested within a single master split; not official WebUI splits',
         'views':views,'seed':args.seed,'train_sampling':'uniform-page-then-uniform-available-view-v1',
@@ -139,7 +152,7 @@ def subset(args):
         # The fixed-test evaluator follows this pointer to report all attrition.
         write_json(base/'css/config.json',{'kind':'webui-scaling-css-view-v1',
             'data':{str(base/'labels'/f'policy-{s}.jsonl'):digest(base/'labels'/f'policy-{s}.jsonl') for s in SPLITS}})
-        write_json(base/'coverage.json',{'selected':counts(size),'rendering':render_report,
+        write_json(base/'coverage.json',{'selected':counts(size,config.get('split_counts')),'rendering':render_report,
             'normalization':normalize_report,'fixed_corruption':freeze_report,
             'assets_root':str(master),'warning':'Keep master assets; subset manifests reference them.'})
 
@@ -206,6 +219,9 @@ def add_parsers(sub):
     p=sub.add_parser('visual-webui-scales-prepare')
     p.add_argument('--root',required=True);p.add_argument('--out',required=True)
     p.add_argument('--sizes',nargs='+',type=int,default=[7000,70000])
+    p.add_argument('--master-counts',nargs=3,type=int,metavar=('TRAIN','VAL','TEST'))
+    p.add_argument('--allocation-counts',nargs=3,type=int,metavar=('TRAIN','VAL','TEST'),
+                   help='Replay audited allocation quotas; require the resulting counts to equal master-counts')
     p.add_argument('--view',help='Legacy single-view alias; use --views for new experiments')
     p.add_argument('--views',nargs='+');p.add_argument('--seed',type=int,default=42)
     p.add_argument('--resume',action='store_true')
