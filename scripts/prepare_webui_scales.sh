@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Raw WebUI -> shared assets -> nested 8:1:1 dataset manifests.
+set -euo pipefail
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$repo_root"
+if [[ $# != 2 ]]; then
+  echo 'Usage: bash scripts/prepare_webui_scales.sh RAW_WEBUI_ROOT DATA_ROOT' >&2
+  exit 2
+fi
+raw=$1
+data=$2
+read -r -a sizes <<< "${WEBUI_SIZES:-7000 70000 350000}"
+python -m framediff visual-webui-scales-prepare --root "$raw" --out "$data" \
+  --sizes "${sizes[@]}" --view "${WEBUI_VIEW:-default_1280-720}" --seed "${SEED:-42}" --resume
+# No historical 10K input, detector checkpoint or offline trajectories required.
+python -m framediff visual-build-data --manifest "$data/master/source/manifest.jsonl" \
+  --out "$data/master/rendered" --clean-only --abstract-size "${IMAGE_SIZE:-384}" \
+  --seed "${SEED:-42}" --min-elements "${MIN_ELEMENTS:-3}" \
+  --max-source-mae "${MAX_SOURCE_MAE:-1.0}" --resume
+python -m framediff visual-tree-normalize --rendered "$data/master/rendered" \
+  --out "$data/master/labels" --workers "${PREPARE_WORKERS:-4}" \
+  --seed "${SEED:-42}" --max-css-owners "${MAX_CSS_OWNERS:-512}" \
+  --observation-size "${IMAGE_SIZE:-384}" \
+  --max-pixel-mae "${NORMALIZE_MAX_PIXEL_MAE:-0.01}" \
+  --max-box-error "${NORMALIZE_MAX_BOX_ERROR:-1}" --resume
+python -m framediff visual-tree-freeze --rendered "$data/master/labels" \
+  --out "$data/master/css" --workers "${PREPARE_WORKERS:-4}" \
+  --samples-per-page "${FIXED_SAMPLES_PER_PAGE:-1}" --max-noise "${ONLINE_MAX_NOISE:-4}" \
+  --observation-size "${IMAGE_SIZE:-384}" --seed "${TEST_SEED:-90210}" --resume
+python -m framediff visual-webui-scales-subset --data "$data"
+echo "Prepared nested scale datasets in $data. Keep master/ assets."

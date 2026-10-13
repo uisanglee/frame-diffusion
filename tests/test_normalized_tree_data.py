@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import pytest
 
 from framediff.html_bridge import HtmlBrowser
 from framediff.ir import read_jsonl, write_jsonl
@@ -48,7 +49,8 @@ def test_resume_retries_rejected_page_without_rebuilding_successes(tmp_path, mon
     assert read_json(out/'prepare-report.json')['val']['kept']==1
 
 
-def test_normalize_then_corrupt_and_resume(tmp_path, monkeypatch):
+@pytest.mark.parametrize('workers', [1, 2])
+def test_normalize_then_corrupt_and_resume(tmp_path, monkeypatch, workers):
     source=tmp_path/'source';source.mkdir();out=tmp_path/'normalized'
     with HtmlBrowser() as browser:
         for split in ('train','val','test'):
@@ -66,6 +68,7 @@ def test_normalize_then_corrupt_and_resume(tmp_path, monkeypatch):
             write_jsonl(source/f'pages-{split}.jsonl',[{**row,'id':split,'html':str(path)}])
     args=SimpleNamespace(rendered=str(source),out=str(out),resume=True,seed=42,
                          max_css_owners=64,observation_size=96,max_pixel_mae=.01,max_box_error=1.)
+    args.workers=workers
     prepare(args)
     row=list(read_jsonl(out/'policy-train.jsonl'))[0]
     assert row['normalization_contract']==CONTRACT
@@ -101,11 +104,34 @@ def test_normalize_then_corrupt_and_resume(tmp_path, monkeypatch):
     loss.backward()
     assert net.output.weight.grad is not None
     monkeypatch.setattr('framediff.tree_normalize.convert',lambda *a,**k: (_ for _ in ()).throw(AssertionError('renormalized')))
+    checkpoints={p:p.stat().st_mtime_ns for p in out.glob('normalized-pages/*/*/record.json')}
+    args.workers=3-workers
     prepare(args)
     assert list(read_jsonl(out/'policy-train.jsonl'))==[row]
+    assert all(p.stat().st_mtime_ns==mtime for p,mtime in checkpoints.items())
     frozen=tmp_path/'fixed'
-    freeze(SimpleNamespace(rendered=str(out),out=str(frozen),samples_per_page=1,
-                           max_noise=2,seed=90210,observation_size=96,resume=True))
+    freeze_args=SimpleNamespace(rendered=str(out),out=str(frozen),samples_per_page=1,
+                           max_noise=2,seed=90210,observation_size=96,resume=True,workers=workers)
+    freeze(freeze_args)
+    checkpoints={p:p.stat().st_mtime_ns for p in frozen.glob('*/*/record.json')}
+    before={s:(frozen/f'policy-{s}.jsonl').read_bytes() for s in ('train','val','test')}
+    freeze_args.workers=3-workers
+    freeze(freeze_args)
+    assert all(p.stat().st_mtime_ns==mtime for p,mtime in checkpoints.items())
+    assert all((frozen/f'policy-{s}.jsonl').read_bytes()==value for s,value in before.items())
+    # Simulate interruption before one page's completion marker was written.
+    # Regenerate just that page with a different worker count and identical seed.
+    pending=next(frozen.glob('val/*/record.json'))
+    pending.unlink()
+    freeze(freeze_args)
+    import json
+    for split,value in before.items():
+        previous=[json.loads(line) for line in value.splitlines()]
+        current=list(read_jsonl(frozen/f'policy-{split}.jsonl'))
+        for record in previous+current:
+            record.get('online',{}).pop('seconds',None)
+        assert current==previous
+    assert all(p.stat().st_mtime_ns==mtime for p,mtime in checkpoints.items() if p!=pending)
     for split in ('train','val','test'):
         fixed=list(read_jsonl(frozen/f'policy-{split}.jsonl'))[0]
         assert '/normalized-pages/' in fixed['target_html']

@@ -4,12 +4,44 @@ from collections import Counter
 from pathlib import Path
 
 from .css_owners import CONTRACT
-from .ir import read_json,read_jsonl,write_json,write_jsonl
+from .ir import read_json,read_jsonl
 from .tree_online import ONLINE_CONTRACT,OnlineSampler,target_pool,asset_signatures
 from .web_experiment import guard_run,digest
+from .preparation_workers import page_map, write_json, write_jsonl
+
+
+def _freeze_page(task):
+    args,out,split,index,target = task
+    page_dir=out/split/hashlib.sha256(target['id'].encode()).hexdigest()
+    cached=page_dir/'record.json';signature=asset_signatures([target])
+    if args.resume and cached.exists():
+        saved=read_json(cached)
+        if saved['signature']!=signature:raise ValueError('Frozen target assets changed; use a new output directory')
+        new=saved['rows']
+        for row in new:
+            if not Path(row['current_html']).is_file() or not Path(row['current_image']).is_file():
+                raise ValueError('Incomplete frozen page assets')
+    else:
+        sampler=OnlineSampler([target],'screenshot',seed=args.seed,max_noise=args.max_noise)
+        new=[]
+        try:
+            page_dir.mkdir(parents=True,exist_ok=True)
+            for sample in range(args.samples_per_page):
+                row=sampler.generate(index*args.samples_per_page+sample)
+                html=page_dir/f'{sample}.html';png=page_dir/f'{sample}.png'
+                html.write_text(row.pop('current_html_text'));png.write_bytes(row['current_image'])
+                row.update(split=split,current_html=str(html),current_image=str(png))
+                new.append(row)
+            write_json(cached,{'signature':signature,'rows':new})
+        except Exception as exc:
+            return [], {'id':target['id'],'error':str(exc)}
+        finally:sampler.close()
+    return new, None
 
 
 def freeze(args):
+    workers=getattr(args,'workers',1)
+    if workers<1:raise ValueError('workers must be positive')
     source=Path(args.rendered).resolve();out=Path(args.out).resolve()
     if out==source or source in out.parents:raise ValueError('Use a separate frozen-data output directory')
     if args.samples_per_page<1:raise ValueError('samples-per-page must be positive')
@@ -33,31 +65,10 @@ def freeze(args):
                          observation_size=getattr(args,'observation_size',384))
         pages={p['id']:p for p in read_jsonl(source/f'pages-{split}.jsonl')}
         kept=[];selected=[];errors=[];counts=Counter()
-        for index,target in enumerate(pool):
-            page_dir=out/split/hashlib.sha256(target['id'].encode()).hexdigest()
-            cached=page_dir/'record.json';signature=asset_signatures([target])
-            if args.resume and cached.exists():
-                saved=read_json(cached)
-                if saved['signature']!=signature:raise ValueError('Frozen target assets changed; use a new output directory')
-                new=saved['rows']
-                for row in new:
-                    if not Path(row['current_html']).is_file() or not Path(row['current_image']).is_file():
-                        raise ValueError('Incomplete frozen page assets')
-            else:
-                sampler=OnlineSampler([target],'screenshot',seed=args.seed,max_noise=args.max_noise)
-                new=[]
-                try:
-                    page_dir.mkdir(parents=True,exist_ok=True)
-                    for sample in range(args.samples_per_page):
-                        row=sampler.generate(index*args.samples_per_page+sample)
-                        html=page_dir/f'{sample}.html';png=page_dir/f'{sample}.png'
-                        html.write_text(row.pop('current_html_text'));png.write_bytes(row['current_image'])
-                        row.update(split=split,current_html=str(html),current_image=str(png))
-                        new.append(row)
-                    write_json(cached,{'signature':signature,'rows':new})
-                except Exception as exc:
-                    errors.append({'id':target['id'],'error':str(exc)});new=[]
-                finally:sampler.close()
+        tasks=((args,out,split,index,target) for index,target in enumerate(pool))
+        for index,(new,failure) in enumerate(page_map(_freeze_page,tasks,workers)):
+            target=pool[index]
+            if failure:errors.append(failure)
             kept.extend(new)
             if new:selected.append({**pages[target['id']],'initial_html':new[0]['current_html']})
             for row in new:

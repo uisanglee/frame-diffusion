@@ -14,12 +14,20 @@ cache_out=${4:-runs/css-owners-v10-targeted-inline-shared}
 # Only abstracted DOM boxes receive editable inline values; keep source CSS.
 # Old normalization outputs have a different action space.
 labels=${SOURCE_LABELS:-${data_out}-labels}
+workers=${PREPARE_WORKERS:-1}
+if ! [[ "$workers" =~ ^[1-9][0-9]*$ ]]; then
+  echo 'PREPARE_WORKERS must be a positive integer' >&2
+  exit 2
+fi
+echo "Preparation browser workers: $workers"
 python -m framediff visual-tree-normalize --rendered "$source_corpus" \
+  --workers "$workers" \
   --out "$labels" --max-css-owners "${MAX_CSS_OWNERS:-512}" \
   --observation-size "${IMAGE_SIZE:-384}" \
   --max-pixel-mae "${NORMALIZE_MAX_PIXEL_MAE:-0.01}" \
   --max-box-error "${NORMALIZE_MAX_BOX_ERROR:-1}" --resume
 python -m framediff visual-tree-freeze --rendered "$labels" \
+  --workers "$workers" \
   --out "$data_out" --samples-per-page "${FIXED_SAMPLES_PER_PAGE:-1}" \
   --max-noise "${ONLINE_MAX_NOISE:-4}" --observation-size "${IMAGE_SIZE:-384}" --resume
 for split in train val; do

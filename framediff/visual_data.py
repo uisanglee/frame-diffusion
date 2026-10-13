@@ -70,6 +70,7 @@ def build(args):
     out=Path(args.out).resolve()
     config={'kind':'visual-data-v7-cached-css-corruptions','contract':CONTRACT,'action_contract':ACTION_CONTRACT,
             'sources':sources,'settings':{k:v for k,v in vars(args).items() if k not in ('out','resume')}}
+    if not getattr(args,'clean_only',False):config['settings'].pop('clean_only',None)
     if any(r.get('hierarchy') for r in sources):raise ValueError('Use original parent-preserving HTML, not flat manifests')
     guard_run(out,config,args.resume)
     policy=[];detection=[];pages=[];errors=[]
@@ -130,7 +131,7 @@ def build(args):
                     local_detection.append({**base,'id':record['id'],'image':str(screenshot),'elements':labels})
                 browser.load(tagged,viewport);save_example('clean',tagged,target_boxes)
                 last_corrupted=None
-                for trajectory in range(args.trajectories):
+                for trajectory in range(0 if getattr(args,'clean_only',False) else args.trajectories):
                     html=tagged;boxes=target_boxes
                     for step in range(args.max_noise):
                         accepted=False
@@ -153,12 +154,14 @@ def build(args):
                             html,boxes=candidate_html,candidate;accepted=True
                             last_corrupted=local_policy[-1];break
                         if not accepted:break
+                if getattr(args,'clean_only',False):last_corrupted=local_policy[0]
                 if last_corrupted is None:raise ValueError('No verified corruption; page excluded, not silently clean-only')
                 page={**base,'screenshot':base['target_image'],'html':str(work/'reference.html'),
                       'initial_html':last_corrupted['current_html'],'evaluation_target_boxes':target_boxes,
                       'total_visible_nodes':dom['total_visible_nodes'],'selected_nodes':len(ids),
                       'source_screenshot':source.get('screenshot'),'source_pixel_mae':source_mae,
-                      'construction':'controlled same-DOM corruption; not screenshot-generated initial HTML'}
+                      'construction':('clean normalization input; no corruption' if getattr(args,'clean_only',False)
+                                      else 'controlled same-DOM corruption; not screenshot-generated initial HTML')}
                 saved={'page':page,'policy':local_policy,'detection':local_detection};write_json(cache,saved)
                 pages.append(page);policy+=local_policy;detection+=local_detection
             except Exception as error:errors.append({'id':source['id'],'error':str(error)})

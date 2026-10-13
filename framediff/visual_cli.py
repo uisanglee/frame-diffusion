@@ -2,6 +2,8 @@
 
 
 def add_parsers(sub):
+    from .webui_scaling import add_parsers as add_scaling_parsers
+    add_scaling_parsers(sub)
     from .explicit_html import add_parser as add_explicit_parser
     add_explicit_parser(sub)
     p=sub.add_parser('visual-audit-candidates',help='Reinspect only candidate-filter rejections from preserved normalized HTML')
@@ -11,6 +13,7 @@ def add_parsers(sub):
     p.add_argument('--observation-size',type=int,default=384)
     p.add_argument('--limit',type=int,default=0)
     p=sub.add_parser('visual-tree-normalize',help='Selectively freeze safe sizes while preserving original CSS and DOM')
+    p.add_argument('--workers',type=int,default=1,help='Independent browser page workers; may change on resume')
     p.add_argument('--rendered',required=True);p.add_argument('--out',required=True)
     p.add_argument('--resume',action='store_true');p.add_argument('--seed',type=int,default=42)
     p.add_argument('--max-css-owners',type=int,default=512)
@@ -31,6 +34,7 @@ def add_parsers(sub):
     p.add_argument('--stylesheets',action='store_true',help='Address inline declarations and embedded stylesheet rules')
     p.add_argument('--max-css-owners',type=int,default=512,help='Reject pages exceeding owner capacity in stylesheet mode')
     p=sub.add_parser('visual-tree-freeze',help='Render fixed inline+stylesheet val/test corruption, keeping target assets')
+    p.add_argument('--workers',type=int,default=1,help='Independent browser page workers; may change on resume')
     p.add_argument('--rendered',required=True);p.add_argument('--out',required=True)
     p.add_argument('--resume',action='store_true');p.add_argument('--seed',type=int,default=90210)
     p.add_argument('--max-noise',type=int,default=4);p.add_argument('--samples-per-page',type=int,default=1)
@@ -42,6 +46,7 @@ def add_parsers(sub):
     p=sub.add_parser('visual-generate',help='Generate styled procedural HTML for browser-based visual training')
     p.add_argument('--out',required=True);p.add_argument('--count',type=int,default=1000);p.add_argument('--seed',type=int,default=42)
     p=sub.add_parser('visual-build-data',help='Render HTML and verified corruption trajectories for parser and policies')
+    p.add_argument('--clean-only',action='store_true',help='Render clean detector/normalization inputs; generate corruption online later')
     p.add_argument('--manifest',required=True);p.add_argument('--out',required=True);p.add_argument('--resume',action='store_true')
     for k,v in [('max-nodes',128),('trajectories',3),('max-noise',4),('abstract-size',384),('seed',42),('min-elements',1)]:p.add_argument('--'+k,type=int,default=v)
     p.add_argument('--max-source-mae',type=float,default=1.,help='Reject rerenders too different from optional source screenshot; 1 disables')
@@ -126,6 +131,9 @@ def add_parsers(sub):
 
 
 def run(args):
+    if args.command.startswith('visual-webui-scales-'):
+        from .webui_scaling import run as run_scaling
+        return run_scaling(args)
     if args.command=='visual-audit-candidates':
         from .candidate_audit import run as audit
         return audit(args)

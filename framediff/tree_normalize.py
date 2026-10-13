@@ -9,16 +9,127 @@ from . import css_owners
 from .explicit_html import convert, feedback_metadata
 from .html_bridge import HtmlBrowser
 from .html_feedback import refresh_geometry
-from .ir import read_json, read_jsonl, write_json, write_jsonl
+from .ir import read_json, read_jsonl
 from .tree_online import ONLINE_CONTRACT, SAMPLING_CONTRACT, OnlineSampler, target_pool
 from .visual import annotate, elements
 from .visual_data import validate_splits
 from .web_experiment import digest, guard_run
+from .preparation_workers import page_map, write_json, write_jsonl
 
 CONTRACT = 'parent-preserved-targeted-inline-v6-field-probes-scroll-guard'
 
 
+def _prepare_page(task):
+    args, out, split, index, page_id, row, pages = task
+    folder=out/'normalized-pages'/split/hashlib.sha256(page_id.encode()).hexdigest()
+    folder.mkdir(parents=True,exist_ok=True)
+    html_path=Path(row['current_html'] if row['id'].endswith('/clean') else row['target_html'])
+    cache=folder/'record.json';sampler=None;stage='source';qa=None
+    try:
+        signature=digest(html_path)
+        if args.resume and cache.exists():
+            saved=read_json(cache)
+            if saved['source_sha']!=signature:raise ValueError('Source HTML changed; use a new output directory')
+            for key,sha in saved['assets'].items():
+                if digest(key)!=sha:raise ValueError('Normalized cache assets changed')
+            new=saved['row'];page=saved['page']
+        else:
+            # Failed preservation checks never create record.json or
+            # normalization.json. Resume retries them while keeping
+            # successful pages and their assets unchanged.
+            stage='normalization'
+            normalized=folder/'normalized.html'
+            stamp=folder/'normalization.json'
+            with HtmlBrowser() as browser:
+                if args.resume and stamp.exists():
+                    status=read_json(stamp)
+                    if status['source_sha']!=signature or status['sha']!=digest(normalized):
+                        raise ValueError('Normalized HTML changed; use a new output directory')
+                else:
+                    nodes=row['current']['nodes'][1:]
+                    action_ids=[n['id'] for n in nodes if n.get('visual_class',1)>0]
+                    qa=convert(browser,html_path.read_text(),row['viewport'],folder,mode='sizes',
+                               max_pixel_mae=args.max_pixel_mae,max_box_error=args.max_box_error,
+                               action_ids=action_ids,target_tree=row['current'],
+                               observation_size=args.observation_size)
+                    if not qa['accepted']:
+                        stage=qa.get('failure_stage') or 'normalization_preservation'
+                        raise ValueError(qa.get('error') or 'Normalization changed rendering; see page report.json')
+                    write_json(stamp,{'source_sha':signature,'sha':digest(normalized)})
+                qa=read_json(folder/'report.json')
+                stats={k:qa.get(k) for k in ('normalized_elements','partial_normalization','verification_trials')}
+                browser.load(normalized.read_text(),row['viewport'])
+                stage='css_owner_parsing'
+                tree=copy.deepcopy(row['current']);annotate(browser,tree)
+                boxes=browser.tagged_boxes([n['id'] for n in tree['nodes'][1:]])
+                boxes[tree['nodes'][0]['id']]=[0,0,*row['viewport']]
+                tree=refresh_geometry(tree,boxes)
+                parsed=css_owners.read(browser,tree)
+                if len(parsed['owners'])>args.max_css_owners:raise ValueError('Too many normalized CSS owners')
+                feedback=feedback_metadata(browser,tree)
+                target_elements=elements(tree,boxes,row['viewport'],feedback['current_clip_boxes'])
+            seed={k:row[k] for k in ('group','split','source_sha','viewport')}
+            seed.update(id=page_id+'/seed',current=tree,current_boxes=boxes,
+                target_html=str(normalized),target_image=str(folder/'after.png'),
+                target_elements=target_elements,css_owners=parsed['owners'],
+                target_declaration_state=parsed['state'],normalization_contract=CONTRACT,**feedback)
+            # target_pool caches visibility probes; train and evaluation
+            # use only this verified normalized clean program.
+            stage='visible_candidate_inspection'
+            write_json(folder/'inspection-input.json',seed)
+            inspection=[]
+            try:
+                pool=target_pool([{**seed,'split':'train'}],cache_dir=out/'.online-target-cache',
+                                 observation_size=args.observation_size,diagnostics=inspection)
+            finally:
+                if any(r['reason']=='no_editable_css' for r in inspection):
+                    from .candidate_diagnostics import inspect_saved_target
+                    try:
+                        detail=inspect_saved_target(seed,folder)
+                        for r in inspection:
+                            if r['reason']=='no_editable_css':r['eligibility']=detail
+                    except Exception as exc:
+                        for r in inspection:r['eligibility_error']=f'{type(exc).__name__}: {exc}'
+                write_json(folder/'candidate-inspection.json',inspection)
+            stage='seed_corruption'
+            sampler=OnlineSampler(pool,'screenshot',seed=args.seed,max_noise=1)
+            new=sampler.generate(index)
+            initial=folder/'initial.html';png=folder/'initial.png'
+            initial.write_text(new.pop('current_html_text'));png.write_bytes(new['current_image'])
+            new.update(split=split,current_html=str(initial),current_image=str(png),normalization_stats=stats,
+                       normalization_contract=CONTRACT)
+            page={k:pages[page_id][k] for k in ('id','group','split','source_sha','viewport')}
+            page.update(html=str(normalized),target_html=str(normalized),
+                screenshot=str(folder/'after.png'),initial_html=str(initial),
+                evaluation_target_boxes=boxes,policy_subset=css_owners.CONTRACT,
+                normalization_contract=CONTRACT,original_html=str(html_path))
+            assets={str(p):digest(p) for p in (normalized,folder/'after.png',initial,png)}
+            write_json(cache,{'source_sha':signature,'row':new,'page':page,'assets':assets})
+        write_json(folder/'page-status.json',{'id':page_id,'status':'kept',
+                   'normalization_stats':new.get('normalization_stats')})
+    except Exception as exc:
+        failure={'id':page_id,'stage':stage,'error':str(exc)}
+        if stage=='visible_candidate_inspection' and hasattr(exc,'diagnostics'):
+            failure['inspection_reasons']=[r['reason'] for r in exc.diagnostics]
+            failure['inspection_report']=str(folder/'candidate-inspection.json')
+        if qa is not None and not qa.get('accepted',True):
+            failure['error_type']=qa.get('error_type')
+            failure['diagnostics']={'pixel_mae':qa.get('pixel_mae'),
+                'max_box_error_px':qa.get('max_box_error_px'),
+                'abstraction_mae':qa.get('abstraction_mae'),
+                'non_target_geometry_changes':len(qa.get('non_target_geometry_changes',[])),
+                'scroll_preservation':qa.get('scroll_preservation'),
+                'first_element_failures':qa.get('element_failures',[])[:3]}
+        write_json(folder/'page-status.json',{'status':'failed',**failure})
+        return None, None, failure
+    finally:
+        if sampler is not None:sampler.close()
+    return new, page, None
+
+
 def prepare(args):
+    workers=getattr(args,'workers',1)
+    if workers<1:raise ValueError('workers must be positive')
     source=Path(args.rendered).resolve();out=Path(args.out).resolve()
     upstream_report=read_json(source/'report.json') if (source/'report.json').is_file() else {}
     limit=getattr(args,'limit_pages',0)
@@ -54,115 +165,17 @@ def prepare(args):
             rejection_path=out/f'rejections-{split}.jsonl'
             write_jsonl(rejection_path,errors)
             reasons=Counter(e['error'] for e in errors)
-            for index,(page_id,row) in enumerate(clean.items()):
-                folder=out/'normalized-pages'/split/hashlib.sha256(page_id.encode()).hexdigest()
-                folder.mkdir(parents=True,exist_ok=True)
-                html_path=Path(row['current_html'] if row['id'].endswith('/clean') else row['target_html'])
-                cache=folder/'record.json';sampler=None;stage='source';qa=None
-                try:
-                    signature=digest(html_path)
-                    if args.resume and cache.exists():
-                        saved=read_json(cache)
-                        if saved['source_sha']!=signature:raise ValueError('Source HTML changed; use a new output directory')
-                        for key,sha in saved['assets'].items():
-                            if digest(key)!=sha:raise ValueError('Normalized cache assets changed')
-                        new=saved['row'];page=saved['page']
-                    else:
-                        # Failed preservation checks never create record.json or
-                        # normalization.json. Resume retries them while keeping
-                        # successful pages and their assets unchanged.
-                        stage='normalization'
-                        normalized=folder/'normalized.html'
-                        stamp=folder/'normalization.json'
-                        with HtmlBrowser() as browser:
-                            if args.resume and stamp.exists():
-                                status=read_json(stamp)
-                                if status['source_sha']!=signature or status['sha']!=digest(normalized):
-                                    raise ValueError('Normalized HTML changed; use a new output directory')
-                            else:
-                                nodes=row['current']['nodes'][1:]
-                                action_ids=[n['id'] for n in nodes if n.get('visual_class',1)>0]
-                                qa=convert(browser,html_path.read_text(),row['viewport'],folder,mode='sizes',
-                                           max_pixel_mae=args.max_pixel_mae,max_box_error=args.max_box_error,
-                                           action_ids=action_ids,target_tree=row['current'],
-                                           observation_size=args.observation_size)
-                                if not qa['accepted']:
-                                    stage=qa.get('failure_stage') or 'normalization_preservation'
-                                    raise ValueError(qa.get('error') or 'Normalization changed rendering; see page report.json')
-                                write_json(stamp,{'source_sha':signature,'sha':digest(normalized)})
-                            qa=read_json(folder/'report.json')
-                            stats={k:qa.get(k) for k in ('normalized_elements','partial_normalization','verification_trials')}
-                            browser.load(normalized.read_text(),row['viewport'])
-                            stage='css_owner_parsing'
-                            tree=copy.deepcopy(row['current']);annotate(browser,tree)
-                            boxes=browser.tagged_boxes([n['id'] for n in tree['nodes'][1:]])
-                            boxes[tree['nodes'][0]['id']]=[0,0,*row['viewport']]
-                            tree=refresh_geometry(tree,boxes)
-                            parsed=css_owners.read(browser,tree)
-                            if len(parsed['owners'])>args.max_css_owners:raise ValueError('Too many normalized CSS owners')
-                            feedback=feedback_metadata(browser,tree)
-                            target_elements=elements(tree,boxes,row['viewport'],feedback['current_clip_boxes'])
-                        seed={k:row[k] for k in ('group','split','source_sha','viewport')}
-                        seed.update(id=page_id+'/seed',current=tree,current_boxes=boxes,
-                            target_html=str(normalized),target_image=str(folder/'after.png'),
-                            target_elements=target_elements,css_owners=parsed['owners'],
-                            target_declaration_state=parsed['state'],normalization_contract=CONTRACT,**feedback)
-                        # target_pool caches visibility probes; train and evaluation
-                        # use only this verified normalized clean program.
-                        stage='visible_candidate_inspection'
-                        write_json(folder/'inspection-input.json',seed)
-                        inspection=[]
-                        try:
-                            pool=target_pool([{**seed,'split':'train'}],cache_dir=out/'.online-target-cache',
-                                             observation_size=args.observation_size,diagnostics=inspection)
-                        finally:
-                            if any(r['reason']=='no_editable_css' for r in inspection):
-                                from .candidate_diagnostics import inspect_saved_target
-                                try:
-                                    detail=inspect_saved_target(seed,folder)
-                                    for r in inspection:
-                                        if r['reason']=='no_editable_css':r['eligibility']=detail
-                                except Exception as exc:
-                                    for r in inspection:r['eligibility_error']=f'{type(exc).__name__}: {exc}'
-                            write_json(folder/'candidate-inspection.json',inspection)
-                        stage='seed_corruption'
-                        sampler=OnlineSampler(pool,'screenshot',seed=args.seed,max_noise=1)
-                        new=sampler.generate(index)
-                        initial=folder/'initial.html';png=folder/'initial.png'
-                        initial.write_text(new.pop('current_html_text'));png.write_bytes(new['current_image'])
-                        new.update(split=split,current_html=str(initial),current_image=str(png),normalization_stats=stats,
-                                   normalization_contract=CONTRACT)
-                        page={k:pages[page_id][k] for k in ('id','group','split','source_sha','viewport')}
-                        page.update(html=str(normalized),target_html=str(normalized),
-                            screenshot=str(folder/'after.png'),initial_html=str(initial),
-                            evaluation_target_boxes=boxes,policy_subset=css_owners.CONTRACT,
-                            normalization_contract=CONTRACT,original_html=str(html_path))
-                        assets={str(p):digest(p) for p in (normalized,folder/'after.png',initial,png)}
-                        write_json(cache,{'source_sha':signature,'row':new,'page':page,'assets':assets})
-                    kept.append(new);selected.append(page)
-                    write_json(folder/'page-status.json',{'id':page_id,'status':'kept',
-                               'normalization_stats':new.get('normalization_stats')})
-                except Exception as exc:
-                    failure={'id':page_id,'stage':stage,'error':str(exc)}
-                    if stage=='visible_candidate_inspection' and hasattr(exc,'diagnostics'):
-                        failure['inspection_reasons']=[r['reason'] for r in exc.diagnostics]
-                        failure['inspection_report']=str(folder/'candidate-inspection.json')
-                    if qa is not None and not qa.get('accepted',True):
-                        failure['error_type']=qa.get('error_type')
-                        failure['diagnostics']={'pixel_mae':qa.get('pixel_mae'),
-                            'max_box_error_px':qa.get('max_box_error_px'),
-                            'abstraction_mae':qa.get('abstraction_mae'),
-                            'non_target_geometry_changes':len(qa.get('non_target_geometry_changes',[])),
-                            'scroll_preservation':qa.get('scroll_preservation'),
-                            'first_element_failures':qa.get('element_failures',[])[:3]}
+            tasks=((args,out,split,index,page_id,row,{page_id:pages.get(page_id,{})})
+                   for index,(page_id,row) in enumerate(clean.items()))
+            for index,(new,page,failure) in enumerate(page_map(_prepare_page,tasks,workers)):
+                if failure:
                     errors.append(failure)
-                    reasons[stage+': '+str(exc).splitlines()[0]]+=1
+                    reasons[failure['stage']+': '+failure['error'].splitlines()[0]]+=1
                     with rejection_path.open('a') as log:
                         log.write(json.dumps(failure,ensure_ascii=False)+'\n')
-                    write_json(folder/'page-status.json',{'status':'failed',**failure})
                     print({'normalization_failure':failure},flush=True)
-                finally:
-                    if sampler is not None:sampler.close()
+                else:
+                    kept.append(new);selected.append(page)
                 if index%50==0 or index==len(clean)-1:
                     print(f'{split} normalized [{index+1}/{len(clean)}], kept={len(kept)}, failures={len(errors)}',flush=True)
                     print({'normalization_top_errors':reasons.most_common(5)},flush=True)
