@@ -24,6 +24,46 @@ def embed_placeholder(html, path=None):
 
 
 class HtmlBrowser(Browser):
+    def stable_capture(self, target_ids=None, timeout_ms=5000, interval_ms=150):
+        """Bounded readiness and three consecutive equal pixel/target-box samples.
+
+        Only used by normalization QA; does not add capture cost to policy steps.
+        Network access and page scripts remain disabled by Browser.
+        """
+        import time
+        import io
+        from PIL import Image
+        started=time.monotonic()
+        resources=self.page.evaluate('''async timeout => {
+          const ready=Promise.all([document.fonts.ready,...[...document.images].map(async im=>{
+            if(!im.complete)await new Promise(resolve=>{
+              im.addEventListener('load',resolve,{once:true});
+              im.addEventListener('error',resolve,{once:true});});
+            if(im.naturalWidth)try{await im.decode()}catch(e){}
+          })]).then(()=>true);
+          return await Promise.race([ready,new Promise(r=>setTimeout(()=>r(false),timeout))]);
+        }''',timeout_ms)
+        if not resources:
+            raise ValueError('Render stabilization timed out waiting for fonts/images')
+        previous=None;equal=0;samples=0
+        while (time.monotonic()-started)*1000<timeout_ms:
+            remaining=max(1,int(timeout_ms-(time.monotonic()-started)*1000))
+            png=self.page.screenshot(animations='disabled',caret='hide',timeout=remaining)
+            boxes=self.page.evaluate('''ids=>[...document.querySelectorAll('[data-fd-id]')]
+              .filter(e=>ids===null||ids.includes(e.getAttribute('data-fd-id'))).map(e=>{
+                const r=e.getBoundingClientRect();return [e.getAttribute('data-fd-id'),r.x,r.y,r.width,r.height];})''',
+              None if target_ids is None else sorted(target_ids))
+            with Image.open(io.BytesIO(png)) as im:
+                pixels=(im.size,im.convert('RGB').tobytes())
+            current=(pixels,boxes);samples+=1
+            equal=equal+1 if current==previous else 1
+            if equal>=3:
+                return png,dict(samples=samples,consecutive_stable=equal,
+                    resources_ready=True,seconds=time.monotonic()-started)
+            previous=current
+            self.page.wait_for_timeout(interval_ms)
+        raise ValueError('Render stabilization timed out: pixels/target boxes keep changing')
+
     def load(self, html, viewport):
         from .explicit_html import reject_flat_html
         reject_flat_html(html)

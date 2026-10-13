@@ -108,16 +108,18 @@ def test_no_eligible_elements_is_explicit_unchanged_fallback(tmp_path):
 
 
 @pytest.mark.browser
-def test_untagged_percentage_dependency_is_left_alone_and_changed_page_rejected(tmp_path):
+@pytest.mark.parametrize('painted',[False,True])
+def test_untagged_percentage_dependency_only_rejects_visual_change(tmp_path,painted):
     html='''<!DOCTYPE html><style>body{margin:0}.parent{height:auto;width:200px}
     .child{height:100%;width:100%}.sibling{height:100px}</style>
     <div class="parent" data-fd-id="parent"><div class="child">Text</div>
     <div class="sibling"></div></div>'''
+    if painted:html=html.replace('.child{','.child{background:red;')
     with HtmlBrowser() as b:
         report=convert(b,html,[400,300],tmp_path,mode='sizes')
-        assert not report['accepted'],report
+        assert report['accepted'] is (not painted),report
         assert b.page.locator('.child').get_attribute('data-tuide-explicit-id') is None
-        assert not (tmp_path/'normalized.html').exists()
+        assert (tmp_path/'normalized.html').exists() is (not painted)
         assert b.page.locator('.parent > .child').count()==1
 
 
@@ -147,7 +149,7 @@ def test_logical_css_and_shadowed_percentage_rules_are_readonly(tmp_path):
 def test_clipping_change_is_rejected_even_on_white_background(tmp_path):
     html='''<!DOCTYPE html><style>body{margin:0}.parent{position:relative;width:100px;height:40px}
     .parent[style*="width"]{overflow:hidden}.child{position:absolute;left:90px;width:20px;height:10px}</style>
-    <div class="parent" data-fd-id="parent"><div class="child"></div></div>'''
+    <div class="parent" data-fd-id="parent"><div class="child" data-fd-id="child"></div></div>'''
     with HtmlBrowser() as b:
         report=convert(b,html,[400,200],tmp_path,mode='sizes')
         assert not report['accepted'],report

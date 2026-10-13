@@ -260,3 +260,20 @@ rechecked. Rejection manifests and summary counts are rebuilt. Do not run this
 concurrently with another preparation using the same output. If recovered pages
 change manifests, use fresh downstream freeze/cache output directories instead
 of resuming caches for the old manifests. No detector retraining is required.
+
+Normalization QA now uses bounded render stabilization: fonts and image decoding
+are awaited, then three consecutive equal RGB captures and tagged target-box
+samples are required (5-second budget per capture sequence). External requests
+and page scripts remain blocked, and animations/transitions remain disabled;
+this does not recover missing external assets. Technical Playwright errors are
+retried once in a fresh context, but unstable visuals and failed preservation
+comparisons are not retried until they happen to pass. Successful readiness
+measurements are recorded in `render_stability`.
+
+Both reload and post-normalization geometry checks are target-scoped. Non-target
+box/clip changes remain in `non_target_geometry_changes` and do not alone reject
+a page. Local RGB preservation for ALL elements, global RGB, target abstraction,
+and below-fold structural checks remain enforced. `max_box_error_px` is still
+the all-element diagnostic maximum, not a standalone acceptance criterion.
+This changes the normalizer fingerprint: use a new normalization output and
+downstream cache directory; do not overwrite old run configurations to resume.

@@ -400,8 +400,21 @@ def normalize_sizes(browser, html, viewport, out, max_pixel_mae, max_box_error, 
                     target_tree=None, observation_size=384):
     """Normalize only tagged abstraction boxes and verify the complete render."""
     out=Path(out);out.mkdir(parents=True,exist_ok=True)
-    browser.reset_context();browser.load(html,viewport)
-    before_png=browser.page.screenshot(animations='disabled')
+    stability=[]
+    def load_capture(source):
+        from playwright.sync_api import Error as BrowserError
+        # Retry technical browser/capture errors, never retry a failed visual
+        # comparison until it happens to pass.
+        for attempt in range(2):
+            try:
+                browser.reset_context();browser.load(source,viewport)
+                png,info=browser.stable_capture(action_ids)
+                stability.append(dict(attempt=attempt+1,**info))
+                return png
+            except BrowserError as exc:
+                stability.append(dict(attempt=attempt+1,error=str(exc),technical_retry=attempt==0))
+                if attempt==1:raise
+    before_png=load_capture(html)
     snapshot=browser.page.evaluate(SIZE_SNAPSHOT_JS,action_ids)
     baseline=browser.page.content()
     (out/'before.png').write_bytes(before_png)
@@ -411,11 +424,10 @@ def normalize_sizes(browser, html, viewport, out, max_pixel_mae, max_box_error, 
     reference=snapshot['before'];reference_png=before_png
 
     def assess(candidate, replay=False):
-        browser.reset_context();browser.load(candidate,viewport)
-        png=browser.page.screenshot(animations='disabled')
+        png=load_capture(candidate)
         actual=browser.page.evaluate(SIZE_BOXES_JS)
         qa=compare_renders(reference,actual,reference_png,png,max_box_error,max_pixel_mae,
-                           geometry_target_ids=target_ids if replay else None)
+                           geometry_target_ids=target_ids)
         before_ids={r.get('fd_id') for r in reference};after_ids={r.get('fd_id') for r in actual}
         missing=sorted(target_ids-before_ids | target_ids-after_ids)
         a=target_abstraction(reference,target_ids,viewport,observation_size,target_tree)
@@ -435,12 +447,14 @@ def normalize_sizes(browser, html, viewport, out, max_pixel_mae, max_box_error, 
     if not initial['accepted']:
         report={**initial,'mode':'sizes','normalization_strategy':'targeted-inline-v4',
                 'error':'Original HTML is not stable across reloads','normalized_elements':0,
-                'failure_stage':'original_reload','error_type':'original_reload_preservation_failed'}
+                'failure_stage':'original_reload','error_type':'original_reload_preservation_failed',
+                'render_stability':stability}
         write_json(out/'report.json',report)
         return report
 
     # Judge normalization against the accepted replay, not unrelated original
-    # non-target geometry drift. Keep full-element checks for new side effects.
+    # non-target geometry drift. Keep local RGB checks for every element,
+    # target geometry/abstraction and below-fold regression checks.
     reference=replay_rows;reference_png=replay_png
     from .scroll_guard import snapshot as scroll_snapshot, compare as compare_scroll
     scroll_before=scroll_snapshot(browser)
@@ -475,7 +489,7 @@ def normalize_sizes(browser, html, viewport, out, max_pixel_mae, max_box_error, 
             'skipped_not_action_target':sum(r['reason']=='not_action_target' for r in snapshot['skipped']),
             'neutralized_constraints':{p:sum(p in a['constraints'] for a in snapshot['candidates'])
                                        for p in ('min-width','max-width','min-height','max-height','flex')},
-            'verification_trials':1,
+            'verification_trials':1,'render_stability':stability,
             'viewport':viewport,'partial_normalization':False,
             'warning':'Original CSS stays intact. Only tagged boxes receive editable inline values; changed pages are rejected.'}
     write_json(out/'report.json',report)
