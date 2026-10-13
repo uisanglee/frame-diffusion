@@ -2,6 +2,8 @@
 
 
 def add_parsers(sub):
+    from .webui_audit import add_parser as add_audit_parser
+    add_audit_parser(sub)
     from .webui_scaling import add_parsers as add_scaling_parsers
     add_scaling_parsers(sub)
     from .explicit_html import add_parser as add_explicit_parser
@@ -135,6 +137,9 @@ def add_parsers(sub):
 
 
 def run(args):
+    if args.command=='visual-webui-audit':
+        from .webui_audit import audit
+        return audit(args)
     if args.command.startswith('visual-webui-scales-'):
         from .webui_scaling import run as run_scaling
         return run_scaling(args)

@@ -20,6 +20,40 @@ reported total corpus size does not guarantee 350K eligible downloaded pages.
 
 ## Preparation
 
+### Diagnose insufficient raw pages before preparing again
+
+This command does not render HTML, download archives, or change datasets:
+
+```bash
+python -m framediff visual-webui-audit \
+  --root data/raw/webui-scale-source \
+  --downloads data/downloads/webui-scale-source \
+  --out runs/audit-webui-70k-source-v1 \
+  --size 70000 --check-remote
+```
+
+`--check-remote` fetches Hugging Face file-list/size metadata only. Install
+`huggingface_hub` in the active environment if unavailable. `7z` or `7zz` is
+needed to list archive members. Add `--test-archives` for a full local CRC test;
+this reads all compressed volumes and can be slow. Without CRC testing, matching
+file sizes are not a guarantee of intact contents. Missing tools/network access
+are reported as unknown/unavailable, never as successful checks.
+
+- `audit-summary.json`: combined raw scan, allocation, download and extraction results.
+- `source-scan.json`: unique pages and views at each eligibility stage.
+- `source-exclusions.jsonl`: exact page/view, reason, file paths, duplicate target or mismatched hosts.
+- `pages-with-no-usable-view.jsonl`: pages for which no view survived file checks.
+- `selection-audit.json` / `selection-unselected.jsonl`: domain assignment shortfalls versus quota exclusions.
+- `{train,val,test}/extraction-issues.jsonl`: requested archive members absent or wrong-sized after extraction.
+- `{train,val,test}/archive-test.log`: optional full archive integrity test output.
+
+The normal importer also saves source and selection audits under its source
+output folder **before** raising an insufficient-pages error. Page-view losses
+must not be added to whole-page losses. The existing any-shared-view-HTML
+deduplication rule is reported explicitly; the audit does not relax it.
+
+### Run preparation
+
 ```bash
 cd /home/uisang/2027/frame-diffusion
 source .venv/bin/activate
