@@ -3,8 +3,15 @@ import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
 from collections import deque
 from pathlib import Path
+from multiprocessing.util import Finalize
 
 from .ir import write_json as _write_json, write_jsonl as _write_jsonl
+
+
+def _initialize_browser_worker():
+    from .browser import enable_worker_browser, close_worker_browser
+    enable_worker_browser()
+    Finalize(None, close_worker_browser, exitpriority=20)
 
 
 def write_json(path, value):
@@ -26,9 +33,15 @@ def page_map(function, tasks, workers):
     if workers < 1:
         raise ValueError('workers must be positive')
     if workers == 1:
-        yield from map(function, tasks)
+        from .browser import enable_worker_browser, close_worker_browser
+        enable_worker_browser()
+        try:
+            yield from map(function, tasks)
+        finally:
+            close_worker_browser()
         return
-    pool = ProcessPoolExecutor(workers, mp_context=multiprocessing.get_context('spawn'))
+    pool = ProcessPoolExecutor(workers, mp_context=multiprocessing.get_context('spawn'),
+                               initializer=_initialize_browser_worker)
     pending = deque()
     tasks = iter(tasks)
     try:

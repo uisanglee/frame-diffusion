@@ -1,34 +1,106 @@
 from pathlib import Path
 from .ir import compile_html
 
+class _Runtime:
+    def __init__(self):
+        self.pw = self.browser = None
+        self.active = False
+
+    def start(self):
+        if self.pw is not None:
+            return
+        from playwright.sync_api import sync_playwright
+        self.pw = sync_playwright().start()
+        try:
+            self.browser = self.pw.chromium.launch(headless=True)
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self):
+        browser, pw = self.browser, self.pw
+        self.browser = self.pw = None
+        try:
+            if browser is not None:
+                browser.close()
+        finally:
+            if pw is not None:
+                pw.stop()
+
+
+_worker_runtime = None
+
+
+def enable_worker_browser():
+    """Only preparation workers opt into process-local browser reuse."""
+    global _worker_runtime
+    if _worker_runtime is not None:
+        raise RuntimeError('Worker browser session already enabled')
+    _worker_runtime = _Runtime()
+
+
+def close_worker_browser():
+    global _worker_runtime
+    runtime, _worker_runtime = _worker_runtime, None
+    if runtime is not None:
+        runtime.close()
+
+
 class Browser:
     """One persistent browser; count geometry executions separately from screenshots."""
     def __init__(self):
         self.executions=0;self.screenshots=0
     def __enter__(self):
-        from playwright.sync_api import sync_playwright
-        self.pw=sync_playwright().start()
-        try:self.browser=self.pw.chromium.launch(headless=True)
-        except Exception:
-            self.pw.stop();raise
-        self._new_context()
+        self._runtime = _worker_runtime if _worker_runtime is not None else _Runtime()
+        self._shared = _worker_runtime is not None
+        if self._runtime.active:
+            raise RuntimeError('Overlapping browser leases in one worker are not supported')
+        self._runtime.active = True
+        self.context = self.page = None
+        try:
+            self._start_runtime()
+            self._new_context()
+        except BaseException:
+            try:self._runtime.close()
+            finally:self._runtime.active = False
+            raise
         return self
+    def _start_runtime(self):
+        self._runtime.start()
+        self.pw, self.browser = self._runtime.pw, self._runtime.browser
     def _new_context(self):
         self.context=self.browser.new_context(java_script_enabled=False)
         self.context.route('**/*',lambda route:route.abort())
         self.page=self.context.new_page()
     def reset_context(self):
         """Isolate untrusted pages and recover after a renderer/page crash."""
-        try:self.context.close()
-        except Exception:pass
-        if not self.browser.is_connected():
-            try:self.browser.close()
-            except Exception:pass
-            self.browser=self.pw.chromium.launch(headless=True)
-        self._new_context()
+        restart = not self.browser.is_connected()
+        try:
+            if self.context is not None:self.context.close()
+        except Exception:
+            restart = True
+        self.context = self.page = None
+        try:
+            if restart:
+                self._runtime.close()
+                self._start_runtime()
+            self._new_context()
+        except BaseException:
+            self._runtime.close()
+            raise
     def __exit__(self,*args):
-        try:self.browser.close()
-        finally:self.pw.stop()
+        try:
+            if self._shared:
+                try:
+                    if self.context is not None:self.context.close()
+                except BaseException:
+                    self._runtime.close()
+                    raise
+            else:
+                self._runtime.close()
+        finally:
+            self.context = self.page = None
+            self._runtime.active = False
     def render(self,tree,viewport,screenshot=None):
         self.page.set_viewport_size({'width':viewport[0],'height':viewport[1]})
         self.page.set_content(compile_html(tree,viewport),wait_until='load')
