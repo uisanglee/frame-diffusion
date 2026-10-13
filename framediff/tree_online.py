@@ -326,11 +326,12 @@ def sample_mutation(state, viewport, rng, explicit=False, sites=None):
 
 
 class OnlineSampler:
-    def __init__(self, targets, mode, seed=42, max_noise=4, attempts=8, stop=None):
+    def __init__(self, targets, mode, seed=42, max_noise=4, attempts=8, stop=None, parent_first=False):
         if mode not in ('abstract','screenshot') or min(max_noise,attempts)<1: raise ValueError('Invalid online configuration')
         self.targets=targets;self.mode=mode;self.seed=seed;self.max_noise=max_noise;self.attempts=attempts;self.stop=stop
         self.by_id={t['id']:t for t in targets}
         self.browser=None
+        self.parent_first=parent_first
 
     @lru_cache(maxsize=64)
     def html(self,path): return Path(path).read_text()
@@ -431,6 +432,10 @@ class OnlineSampler:
                     apply([teacher[0],teacher[1],*old])
                     if changed(frame,next_frame):break
                 else:raise ValueError('No abstraction-changing reverse label')
+                if self.parent_first:
+                    from .parent_first import improving_teacher
+                    teacher,gain=improving_teacher(browser,tree,viewport,size,state,remaining,clean_mask,owners)
+                    if teacher is None:raise ValueError('No strictly improving parent-first reverse label')
                 result={**target,'id':target['id']+f'/online-{index}',
                         'current':refresh_geometry(tree,boxes),'current_boxes':boxes,
                         'declaration_state':state,'target_declaration_state':clean,
@@ -453,6 +458,8 @@ class OnlineSampler:
                                   'corruptions':noise,'reverse_prefix':depth,'path_length':len(path),
                                   'screenshot_captures':int(self.mode=='screenshot'),
                                   'seconds':time.perf_counter()-started,'errors':errors}
+                if self.parent_first:
+                    result['online'].update(parent_first=True,parent_first_gain=gain)
                 if owner_mode:
                     result['online'].update(probe_rejections=probe_rejections,
                         teacher_owner=owners[teacher[0]]['kind'],
@@ -469,11 +476,11 @@ class OnlineSampler:
 _sampler=None
 
 
-def _initialize(targets,mode,seed,max_noise,attempts,stop):
+def _initialize(targets,mode,seed,max_noise,attempts,parent_first,stop):
     global _sampler
     import torch
     torch.set_num_threads(1)  # No CUDA/model/detector in workers.
-    _sampler=OnlineSampler(targets,mode,seed,max_noise,attempts,stop)
+    _sampler=OnlineSampler(targets,mode,seed,max_noise,attempts,stop,parent_first)
     Finalize(None,_sampler.close,exitpriority=10)
 
 
@@ -482,10 +489,10 @@ def _generate(index): return _sampler.generate(index)
 
 class OnlineStream:
     """Ordered bounded prefetch; cursor counts CONSUMED, not queued examples."""
-    def __init__(self,targets,mode,seed=42,max_noise=4,workers=2,prefetch=4,attempts=8,timeout=180,start=0):
+    def __init__(self,targets,mode,seed=42,max_noise=4,workers=2,prefetch=4,attempts=8,timeout=180,start=0,parent_first=False):
         if min(workers,prefetch,attempts,max_noise,timeout)<1 or not math.isfinite(timeout) or start<0:
             raise ValueError('Invalid online stream configuration')
-        self.args=(targets,mode,seed,max_noise,attempts)
+        self.args=(targets,mode,seed,max_noise,attempts,parent_first)
         self.workers=workers;self.prefetch=prefetch;self.timeout=timeout;self.cursor=start;self.next_index=start
         self.pending=deque();self.pool=None
 

@@ -16,8 +16,13 @@ if [[ -n "${POLICY_SCALE:-}" ]]; then
 fi
 online=()
 owner_options=()
+case "${PARENT_FIRST:-0}" in
+  1) owner_options+=(--parent-first --parent-first-max-probes "${PARENT_FIRST_MAX_PROBES:-200}") ;;
+  0) ;;
+  *) echo 'PARENT_FIRST must be 0 or 1' >&2; exit 2 ;;
+esac
 case "${CSS_STYLESHEETS:-0}" in
-  1) owner_options=(--stylesheets --max-nodes "${MAX_CSS_OWNERS:-512}") ;;
+  1) owner_options+=(--stylesheets --max-nodes "${MAX_CSS_OWNERS:-512}") ;;
   0) ;;
   *) echo 'CSS_STYLESHEETS must be 0 or 1' >&2; exit 2 ;;
 esac

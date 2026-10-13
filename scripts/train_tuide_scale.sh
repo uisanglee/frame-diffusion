@@ -13,7 +13,9 @@ export POLICY_SCALE=$scale
 export CSS_STYLESHEETS=1 ONLINE_CORRUPTION=1 PREPARE_DATA=0 POLICY_HEADS=replacement
 export POLICY_MODES=${POLICY_MODES:-abstract}
 case "$POLICY_MODES" in abstract|screenshot) ;; *) echo 'Choose POLICY_MODES=abstract or screenshot' >&2; exit 2;; esac
-export POLICY_RUN_DIR=${5:-runs/tuide-targeted-inline-$scale-$POLICY_MODES}
+suffix=""
+[[ "${PARENT_FIRST:-0}" == 1 ]] && suffix=-parent-first
+export POLICY_RUN_DIR=${5:-runs/tuide-targeted-inline-$scale-$POLICY_MODES$suffix}
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 export DEVICE=${DEVICE:-cuda}
 export POLICY_STAGE1_STEPS=${POLICY_STAGE1_STEPS:-30000}

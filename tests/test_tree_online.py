@@ -157,6 +157,14 @@ def test_fresh_path_states_and_paired_modalities(corpus):
 
 
 @pytest.mark.browser
+def test_parent_first_stream_labels_improve_and_survive_worker_boundary(corpus):
+    targets=target_pool([corpus['train']])
+    with OnlineStream(targets,'abstract',workers=1,prefetch=1,parent_first=True) as stream:
+        rows=stream.take(2)
+    assert all(r['online']['parent_first'] and r['online']['parent_first_gain']>0 for r in rows)
+
+
+@pytest.mark.browser
 def test_prefetch_bounded_order_and_resume(corpus):
     targets=target_pool([corpus['train']])
     with OnlineStream(targets,'abstract',workers=2,prefetch=2) as stream:

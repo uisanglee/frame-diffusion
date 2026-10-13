@@ -56,8 +56,11 @@ class TreeConfig:
     # in explicitly; inference then cannot add absent declarations/overrides.
     existing_values_only: bool = False
     abstraction_contract: str = BOUNDARY_CONTRACT
+    parent_first: bool = False
+    parent_first_max_probes: int = 200
 
     def __post_init__(self):
+        if self.parent_first_max_probes<1:raise ValueError('Parent-first probe budget must be positive')
         if self.abstraction_contract!=BOUNDARY_CONTRACT:
             raise ValueError('Retrain abstract policy for occupancy+boundary inputs')
         from .css_owners import CONTRACT as OWNER_CONTRACT
@@ -145,13 +148,16 @@ class TreePolicy(nn.Module):
         return loss,int((labels!=-100).sum())
 
     @torch.no_grad()
-    def predict(self,batch,target,current,states,encoded_pair=None):
+    def predict(self,batch,target,current,states,encoded_pair=None,allowed_owners=None):
         if len(states)!=1: raise ValueError('Rollout decoder takes one page at a time')
         memory,padding=self.memory(batch,target,current,states,encoded_pair);prefix=[]
         for _ in range(self.tokenizer.max_length):
             allowed=self.tokenizer.allowed(prefix,len(states[0]),
                 state=states[0] if self.cfg.existing_values_only else None,
                 size_limits=batch.get('explicit_owner_limits',[{}])[0])
+            if not prefix and allowed_owners is not None:
+                permitted={self.tokenizer.ids[f'N{i}'] for i in allowed_owners}
+                allowed=[v for v in allowed if v in permitted]
             if not allowed: raise ValueError('No grammar-valid continuation')
             tokens=torch.tensor([[self.tokenizer.ids['BOS'],*prefix]],device=target.device)
             scores=self.logits(memory,padding,tokens)[0,-1]
@@ -316,6 +322,10 @@ def train(args):
     validate_splits(training+validation)
     if any(r['split']!='train' for r in training) or any(r['split']!='val' for r in validation): raise ValueError('Wrong split files')
     cfg=TreeConfig(**{k:getattr(args,k) for k in ('mode','size','hidden','layers','heads','max_nodes','token_grid')})
+    cfg.parent_first=getattr(args,'parent_first',False)
+    cfg.parent_first_max_probes=getattr(args,'parent_first_max_probes',200)
+    if cfg.parent_first and not (getattr(args,'online_corruption',False) and getattr(args,'stylesheets',False)):
+        raise ValueError('Parent-first training requires online corruption and stylesheet owners')
     if getattr(args,'stylesheets',False):
         from .css_owners import CONTRACT as OWNER_CONTRACT
         cfg.stylesheets=True;cfg.action_contract=OWNER_CONTRACT;cfg.__post_init__()
@@ -345,6 +355,9 @@ def train(args):
             raise ValueError('Validation uses old corruption; rerun prepare_stylesheet_policy.sh in a new output directory (reuse target assets/cache)')
     out=Path(args.out).resolve();settings={k:v for k,v in vars(args).items() if k not in ('out','steps','resume','init_checkpoint','policy_scale')}
     config=asdict(cfg)
+    if not cfg.parent_first:
+        config.pop('parent_first');settings.pop('parent_first',None)
+        config.pop('parent_first_max_probes');settings.pop('parent_first_max_probes',None)
     if not cfg.existing_values_only:config.pop('existing_values_only')
     if not cfg.stylesheets:
         config.pop('stylesheets');settings.pop('stylesheets',None)
@@ -389,6 +402,11 @@ def train(args):
         if early['stopped']: print('Early stopping already completed; keeping best.pt',flush=True);return
         if start>=args.steps: print(f'Already completed {start} steps; no online workers started',flush=True);return
     selected=validation_sample(validation,args.val_samples)
+    if cfg.parent_first:
+        from .parent_first import relabel_validation
+        selected,excluded=relabel_validation(selected,cfg.size)
+        write_json(out/'parent-first-validation.json',{'kept':len(selected),'excluded_ids':excluded,
+                   'criterion':'strict semantic MAE improvement; shallow owner first'})
     metric_rows=validation_sample(selected,min(args.policy_metric_samples,len(selected)),seed=90211) if args.policy_metric_samples else []
     metric_targets=validation_target_states(metric_rows,out,signatures['val'],cfg.stylesheets) if metric_rows else []
     write_json(out/'manifest.json',{'kind':KIND,'config':asdict(cfg),'settings':vars(args),'data':signatures,
@@ -406,7 +424,8 @@ def train(args):
             cursor=ck.get('online_cursor') if args.resume else 0
             if cursor is None: raise ValueError('Online resume requires a saved sample cursor')
             stream=stack.enter_context(OnlineStream(targets,cfg.mode,args.seed,args.online_max_noise,
-                args.online_workers,args.online_prefetch,args.online_attempts,args.online_timeout,cursor))
+                                                  args.online_workers,args.online_prefetch,args.online_attempts,args.online_timeout,cursor,
+                                                  parent_first=cfg.parent_first))
         wait_seconds=0.;producer_seconds=0.;sample_count=0;retry_count=0;remove_count=0;remaining_total=0;recent_errors=[]
         rule_count=0;probe_rejections=0
         property_counts={field:0 for field in FIELDS};path_length_total=0;mutation_total=0
@@ -476,6 +495,7 @@ def train(args):
                 early=update_early_stopping(early,val,args.early_stop_patience,args.early_stop_min_delta)
                 metrics={'step':step,'validation_loss':val,'validation_tokens':count,
                          'validation_n':len(selected),'best':best,'early_stopping':early}
+                if cfg.parent_first:metrics['parent_first']=True
                 if cfg.stylesheets:metrics['validation_by_teacher']=breakdown
                 if metric_rows:
                     metric_started=time.perf_counter()

@@ -51,8 +51,9 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
              steps,time_budget,oracle_elements,diagnostic_target_boxes,goal_threshold,stats):
     """Only the explicitly enabled oracle ablation accepts target elements.
 
-    Autoregressive policies have no learned STOP. No box/pixel oracle ranking, no hidden
-    candidate search. Wall-clock budgets are soft and checked between operations.
+    Autoregressive policies have no learned STOP. Optional parent-first probing
+    uses the available target observation, never oracle boxes/CSS for ranking.
+    Wall-clock budgets are soft and checked between operations.
     """
     device=next(policy.parameters()).device;cfg=policy.cfg
     before=browser.executions;shots=browser.screenshots;sync(device);start=time.perf_counter()
@@ -64,9 +65,15 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
            'pair_encoding_seconds':0.,'pair_image_encodings':0,'dom_queries':0,'failed':False,'error':None})
     # The deployed TUIDE policy is the abstract replacement policy.  Its edit is
     # committed only when the resulting abstraction does not move farther from
-    # the target.  Legacy numeric heads and the RGB comparison baseline retain
-    # their original rollout behavior.
-    monotonic_abstract=cfg.mode=='abstract' and cfg.policy_head=='replacement'
+    # the target. Parent-first additionally requires strict improvement for
+    # either modality; other RGB/legacy policies retain their original behavior.
+    parent_first=getattr(cfg,'parent_first',False)
+    if parent_first and (cfg.policy_head!='replacement' or not getattr(cfg,'stylesheets',False)):
+        raise ValueError('Parent-first rollout requires replacement stylesheet policy')
+    monotonic_abstract=(cfg.mode=='abstract' and cfg.policy_head=='replacement') or parent_first
+    blocked_owners=set()
+    stats.update(parent_first=parent_first,parent_first_probes=0,
+                 acceptance_metric='semantic_mae' if cfg.semantic else 'image_mae')
     stats.update(monotonic_abstract_mae=monotonic_abstract,attempted_actions=0,
                  rolled_back_actions=0,best_state_restored=False)
     t=time.perf_counter()
@@ -97,7 +104,10 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
     stats['scroll_guard_seconds']=time.perf_counter()-t
     stats['_scroll_verification_pending']=True
     best_html=html;best_goal_mae=None;current_goal_mae=None
-    for step in range(steps):
+    probe_budget=cfg.parent_first_max_probes if parent_first else steps
+    for step in range(probe_budget if steps>0 else 0):
+        if parent_first and stats['actions']>=steps:
+            stats['stop_reason']='steps';break
         if time_budget and time.perf_counter()-start>=time_budget:stats['stop_reason']='time_budget';break
         t=time.perf_counter();boxes=browser.tagged_boxes(ids);boxes[root]=[0,0,*viewport]
         stats['dom_queries']+=1
@@ -148,7 +158,19 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
                 pair=policy.encode_pair(target_tensor,current_tensor)
                 sync(device);pair_elapsed=time.perf_counter()-pair_start
                 stats['pair_encoding_seconds']+=pair_elapsed
-                action=policy.predict(batch,target_tensor,current_tensor,[state],pair)
+                if parent_first:
+                    from .parent_first import owner_order
+                    legal=policy.tokenizer.allowed([],len(state),state=state,
+                        size_limits=batch.get('explicit_owner_limits',[{}])[0])
+                    legal_ids={int(policy.tokenizer.tokens[v][1:]) for v in legal}
+                    candidates=[i for i in owner_order(tree,owner_state['owners'])
+                                if i in legal_ids and i not in blocked_owners]
+                    if not candidates:
+                        stats['stop_reason']='parent_first_no_improving_proposal';break
+                    chosen=candidates[0]
+                    action=policy.predict(batch,target_tensor,current_tensor,[state],pair,allowed_owners=[chosen])
+                    stats['parent_first_probes']+=1
+                else:action=policy.predict(batch,target_tensor,current_tensor,[state],pair)
                 stats['pair_image_encodings']+=1;stats['target_image_encodings']+=1
             elif cfg.policy_head=='autoregressive':
                 sync(device);pair_start=time.perf_counter()
@@ -193,6 +215,10 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
             history.update(rejected_action=action,action=None,rejection=str(exc))
             stats['rejected_size_actions']=stats.get('rejected_size_actions',0)+1
             stats['layout_seconds']+=time.perf_counter()-t
+            if parent_first:
+                browser.load(current_html,viewport);blocked_owners.add(action[0])
+                history['accepted']=False
+                continue
             stats.update(failed=True,error=str(exc),stop_reason='invalid_action')
             break
         candidate_html=browser.page.content();stats['layout_seconds']+=time.perf_counter()-t
@@ -208,7 +234,12 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
             stats['layout_seconds']+=time.perf_counter()-t
             t=time.perf_counter()
             candidate_items=elements(candidate_tree,candidate_boxes,viewport,candidate_feedback.get('current_clip_boxes'))
-            if cfg.semantic:
+            if cfg.mode=='screenshot':
+                from .explicit_html import feedback_screenshot
+                candidate_png=feedback_screenshot(browser,animations='disabled');browser.screenshots+=1
+                with Image.open(io.BytesIO(candidate_png)) as im:
+                    candidate_tensor=image_tensor(im.convert('RGB'),cfg.size)[None].to(device)
+            elif cfg.semantic:
                 candidate_image=semantic_masks(candidate_items,viewport,cfg.size,
                     boundaries=semantic_channels(cfg)==8)
                 candidate_tensor=candidate_image[None].to(device)
@@ -221,22 +252,29 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
             # A tiny tolerance prevents floating-point jitter from triggering a
             # rollback. Equal-distance edits are allowed, as the guard is meant
             # to reject worsening actions rather than introduce a new STOP label.
-            if candidate_mae>goal_mae+1e-8:
+            if candidate_mae>goal_mae+1e-8 or (parent_first and candidate_mae>=goal_mae-1e-8):
                 t=time.perf_counter();browser.load(current_html,viewport)
                 stats['layout_seconds']+=time.perf_counter()-t
                 stats['rolled_back_actions']+=1;history['accepted']=False
                 history['rollback_reason']='abstract_mae_worsened'
+                if parent_first:
+                    history['rollback_reason']='parent_first_no_strict_improvement'
+                    blocked_owners.add(action[0])
+                    continue
                 stats['stop_reason']='abstract_mae_rollback'
                 break
             history['accepted']=True;current_html=candidate_html;current_tree=candidate_tree
             current_goal_mae=candidate_mae
             stats['actions']+=1
+            if parent_first:blocked_owners.clear()  # Recheck ancestors after a layout change.
             if best_goal_mae is None or candidate_mae<best_goal_mae:
                 best_goal_mae=candidate_mae;best_html=candidate_html
             if goal_threshold>=0 and candidate_mae<=goal_threshold:
                 stats['stop_reason']='goal';break
         else:
             current_html=candidate_html;stats['actions']+=1
+    else:
+        if parent_first and steps>0:stats['stop_reason']='parent_first_probe_budget'
     terminal_html=browser.page.content()
     if monotonic_abstract:
         stats['terminal_goal_mae']=current_goal_mae

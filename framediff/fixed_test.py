@@ -191,6 +191,8 @@ def evaluate(args):
                         actions=stats.get('actions',0),seconds=stats.get('seconds',time.perf_counter()-started),
                         attempted_actions=stats.get('attempted_actions',stats.get('actions',0)),
                         rolled_back_actions=stats.get('rolled_back_actions',0),
+                        parent_first=stats.get('parent_first',False),
+                        parent_first_probes=stats.get('parent_first_probes',0),
                         scroll_guard_rolled_back=stats.get('scroll_guard_rolled_back',False),
                         scroll_guard_seconds=stats.get('scroll_guard_seconds',0.),
                         browser_executions=stats.get('browser_executions',0),
@@ -214,6 +216,8 @@ def evaluate(args):
             item[key]=statistics.mean(r[key] for r in selected)
         item['geometry_improvement_rate']=statistics.mean(r['final_box_iou']>r['initial_box_iou'] for r in selected)
         item['scroll_rollback_rate']=statistics.mean(r.get('scroll_guard_rolled_back',False) for r in selected)
+        item['parent_first']=any(r.get('parent_first',False) for r in selected)
+        item['parent_first_probes']=statistics.mean(r.get('parent_first_probes',0) for r in selected)
         item['symbolic_improvement_rate']=statistics.mean(r['final_symbolic_distance']<r['initial_symbolic_distance'] for r in selected)
         summary.append(item)
     write_json(out/'summary.json',summary)
