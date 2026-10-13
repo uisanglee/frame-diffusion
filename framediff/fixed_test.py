@@ -56,7 +56,8 @@ def coverage_provenance(data_path, evaluated_rows, results, methods):
     normalization_input=int(test_prepare.get('clean_pages',available))
     normalized=int(test_prepare.get('kept',normalization_input))
     frozen=int(test_freeze.get('pages',normalized))
-    evaluated_pages=len({r['id'].rsplit('/',1)[0] for r in evaluated_rows})
+    evaluated_page_views=len({r['id'].rsplit('/',1)[0] for r in evaluated_rows})
+    evaluated_pages=len({r.get('page_id',r['id'].rsplit('/',1)[0]) for r in evaluated_rows})
     result_by_method={method:[r for r in results if r['method']==method] for method in methods}
     info={'source_test_pages':source_n,
         'upstream_available_pages':available,
@@ -64,10 +65,11 @@ def coverage_provenance(data_path, evaluated_rows, results, methods):
         'missing_clean_records':max(0,available-normalization_input),
         'normalization_input_pages':normalization_input,
         'normalization_kept_pages':normalized,
-        'normalization_rejected_pages':int(test_prepare.get('rejected',max(0,normalization_input-normalized))),
+        'normalization_rejected_pages':max(0,normalization_input-normalized),
         'fixed_corruption_kept_pages':frozen,
         'fixed_corruption_rejected_pages':int(test_freeze.get('failed_pages',max(0,normalized-frozen))),
         'evaluated_pages':evaluated_pages,
+        'evaluated_page_views':evaluated_page_views,
         'evaluation_limit_excluded_pages':max(0,frozen-evaluated_pages),
         'preprocessing_coverage':frozen/source_n if source_n else 0.,
         'evaluated_coverage':evaluated_pages/source_n if source_n else 0.,
@@ -78,11 +80,29 @@ def coverage_provenance(data_path, evaluated_rows, results, methods):
         info['fixed_corruption_top_errors']=[[reason,count] for reason,count in reasons.most_common(20)]
     for method,group in result_by_method.items():
         trials={}
-        for row in group:trials.setdefault(row['page_id'],[]).append(row)
-        successful={page_id for page_id,page_trials in trials.items() if all(not r['failed'] for r in page_trials)}
+        for row in group:trials.setdefault(row.get('logical_page_id',row['page_id']),[]).append(row)
+        source_manifest=data_dir.parent/'source/manifest-test.jsonl'
+        expected={}
+        if source_manifest.is_file():
+            for row in read_jsonl(source_manifest):expected.setdefault(row.get('page_id',row['id']),set()).add(row['id'])
+        else:
+            page_manifest=data_dir/'pages-test.jsonl'
+            source_rows=read_jsonl(page_manifest) if page_manifest.is_file() else evaluated_rows
+            for row in source_rows:
+                view_id=row['id'] if page_manifest.is_file() else row['id'].rsplit('/',1)[0]
+                expected.setdefault(row.get('page_id',view_id),set()).add(view_id)
+        successful={page_id for page_id,page_trials in trials.items()
+                    if all(not r['failed'] for r in page_trials) and
+                    expected.get(page_id,set()) <= {r['page_id'] for r in page_trials}}
         info['methods'][method]={'source_n':source_n,'successful_pages':len(successful),
+            'success_definition':'all expected views and evaluated repeats succeeded; source manifest defines views when available, otherwise frozen pages',
             'rollout_failed_trials':sum(bool(r['failed']) for r in group),
             'end_to_end_success_rate':len(successful)/source_n if source_n else 0.}
+    info['page_views']={'source':test_prepare.get('selected_views',source_n),
+        'normalization_input':test_prepare.get('clean_views',normalization_input),
+        'normalization_kept':test_prepare.get('kept_views',normalized),
+        'normalization_rejected':test_prepare.get('rejected_views',max(0,normalization_input-normalized)),
+        'fixed_kept':test_freeze.get('page_views',frozen),'evaluated':evaluated_page_views}
     return info
 
 
@@ -158,7 +178,11 @@ def evaluate(args):
             work=out/'pages'/signature(row['id'])[:20];work.mkdir(parents=True,exist_ok=True)
             cache=work/'result.json'
             if args.resume and cache.exists():
-                saved=read_json(cache);results.extend(saved);continue
+                saved=read_json(cache)
+                for record in saved:
+                    record.setdefault('logical_page_id',row.get('page_id',record['page_id']))
+                    record.setdefault('view',row.get('view','legacy'))
+                results.extend(saved);continue
             target_boxes=page['evaluation_target_boxes'];viewport=row['viewport'];tree=row['current']
             root=tree['nodes'][0]['id'];initial_html=Path(row['current_html']).read_text()
             shutil.copyfile(row['target_image'],work/'target.png')
@@ -197,7 +221,9 @@ def evaluate(args):
                         scroll_guard_seconds=stats.get('scroll_guard_seconds',0.),
                         browser_executions=stats.get('browser_executions',0),
                         browser_screenshots=stats.get('browser_screenshots',0))
-                    record={'id':row['id'],'page_id':page_id,'method':method,'repeat':repeat,
+                    record={'id':row['id'],'page_id':page_id,
+                        'logical_page_id':row.get('page_id',page_id),'view':row.get('view','legacy'),
+                        'method':method,'repeat':repeat,
                         'failed':error is not None,'error':error,'html':str(html_path),'png':str(png),**metrics}
                     write_json(work/f'{method}-r{repeat}-trace.json',stats)
                     local.append(record)
@@ -207,7 +233,7 @@ def evaluate(args):
     summary=[]
     for method in methods:
         selected=[r for r in results if r['method']==method]
-        item={'method':method,'n':len(selected),'pages':len({r['page_id'] for r in selected}),
+        item={'method':method,'n':len(selected),'pages':len({r['logical_page_id'] for r in selected}),
               'failure_rate':statistics.mean(r['failed'] for r in selected)}
         for key in ('initial_box_iou','final_box_iou','initial_center_error','final_center_error',
                     'initial_size_error','final_size_error','pixel_mae','initial_symbolic_distance',
@@ -219,6 +245,17 @@ def evaluate(args):
         item['parent_first']=any(r.get('parent_first',False) for r in selected)
         item['parent_first_probes']=statistics.mean(r.get('parent_first_probes',0) for r in selected)
         item['symbolic_improvement_rate']=statistics.mean(r['final_symbolic_distance']<r['initial_symbolic_distance'] for r in selected)
+        item['by_view']={}
+        for view in sorted({r['view'] for r in selected}):
+            group=[r for r in selected if r['view']==view]
+            item['by_view'][view]={'n':len(group),'pages':len({r['logical_page_id'] for r in group}),
+                'failure_rate':statistics.mean(r['failed'] for r in group),
+                **{key:statistics.mean(r[key] for r in group) for key in
+                   ('initial_box_iou','final_box_iou','pixel_mae','actions','seconds')}}
+        page_groups={}
+        for row in selected:page_groups.setdefault(row['logical_page_id'],[]).append(row)
+        item['macro_page']={key:statistics.mean(statistics.mean(r[key] for r in group) for group in page_groups.values())
+            for key in ('initial_box_iou','final_box_iou','pixel_mae')}
         summary.append(item)
     write_json(out/'summary.json',summary)
     coverage=coverage_provenance(args.data,rows,results,methods)
@@ -232,6 +269,15 @@ def evaluate(args):
                      f'{s["final_box_iou"]:.4f} | {s["pixel_mae"]:.4f} | {s["initial_symbolic_distance"]:.3f} | '
                      f'{s["final_symbolic_distance"]:.3f} | {s["actions"]:.2f} | {s["attempted_actions"]:.2f} | '
                      f'{s["rolled_back_actions"]:.2f} | {s["seconds"]:.3f} |')
+    lines += ['', '## Per-viewport quality','',
+        '| Method | View | n | pages | failed | initial IoU | final IoU | pixel MAE | actions | seconds |',
+        '|---|---|---:|---:|---:|---:|---:|---:|---:|---:|']
+    for s in summary:
+        for view,metrics in s['by_view'].items():
+            lines.append(f'| {s["method"]} | {view} | {metrics["n"]} | {metrics["pages"]} | '
+                f'{metrics["failure_rate"]:.3f} | {metrics["initial_box_iou"]:.4f} | '
+                f'{metrics["final_box_iou"]:.4f} | {metrics["pixel_mae"]:.4f} | '
+                f'{metrics["actions"]:.2f} | {metrics["seconds"]:.3f} |')
     lines += ['', '## Dataset coverage and failures','',
         'The denominator is the originally selected WebUI test pool. Quality above is evaluated on available frozen corruptions; coverage below reports every preprocessing exclusion.','',
         '| Stage | input n | kept/evaluated n | excluded/failed n | coverage |',

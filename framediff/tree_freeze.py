@@ -79,7 +79,10 @@ def freeze(args):
                 print(f'{split} fixed CSS corruption [{index+1}/{len(pool)}], kept={len(kept)}, failures={len(errors)}',flush=True)
         write_jsonl(out/f'policy-{split}.jsonl',kept);write_jsonl(out/f'pages-{split}.jsonl',selected)
         write_jsonl(out/f'rejections-{split}.jsonl',errors)
-        report[split]={'corruption_contract':ONLINE_CONTRACT,'pages':len(selected),
-            'rows':len(kept),'failed_pages':len(errors),'teachers':dict(counts)}
+        input_pages={r.get('page_id',r['id']) for r in pages.values()}
+        kept_pages={r.get('page_id',r['id']) for r in selected}
+        report[split]={'corruption_contract':ONLINE_CONTRACT,'pages':len(kept_pages),
+            'page_views':len(selected),'rows':len(kept),'failed_pages':len(input_pages-kept_pages),
+            'failed_page_views':len(pages)-len(selected),'teachers':dict(counts)}
         if not kept:raise ValueError(f'Empty frozen {split}; inspect rejection report')
     write_json(out/'freeze-report.json',report)

@@ -22,17 +22,29 @@ def counts(size):
 def nested_sources(rows, sizes, seed):
     validate_splits(rows)
     if len({r['id'] for r in rows}) != len(rows):
-        raise ValueError('Duplicate source page IDs')
-    if len({r['source_sha'] for r in rows}) != len(rows):
-        raise ValueError('Duplicate source HTML')
-    pools={s:sorted((r for r in rows if r['split']==s),
-        key=lambda r:hashlib.sha256(f"{seed}:{r['id']}".encode()).hexdigest()) for s in SPLITS}
+        raise ValueError('Duplicate source page-view IDs')
+    pages={}
+    for row in rows:
+        page_id=row.get('page_id',row['id'])
+        page=pages.setdefault(page_id,{'id':page_id,'split':row['split'],'group':row['group'],'rows':[]})
+        if (page['split'],page['group'])!=(row['split'],row['group']):
+            raise ValueError('A page or its views cross split/domain assignments')
+        page['rows'].append(row)
+    # Identical HTML is expected between views of one responsive page, but not
+    # between independently counted pages.
+    owners={}
+    for page in pages.values():
+        for sha in {r.get('source_sha') for r in page['rows'] if r.get('source_sha')}:
+            if sha in owners and owners[sha]!=page['id']:raise ValueError('Duplicate source HTML across pages')
+            owners[sha]=page['id']
+    pools={s:sorted((p for p in pages.values() if p['split']==s),
+        key=lambda p:hashlib.sha256(f"{seed}:{p['id']}".encode()).hexdigest()) for s in SPLITS}
     result={}
     for size in sorted(set(sizes)):
         requested=counts(size)
         if any(len(pools[s])<requested[s] for s in SPLITS):
             raise ValueError(f'Insufficient pages for {size}: requested={requested}')
-        result[size]=[r for s in SPLITS for r in pools[s][:requested[s]]]
+        result[size]=[r for s in SPLITS for page in pools[s][:requested[s]] for r in page['rows']]
     return result
 
 
@@ -41,10 +53,12 @@ def prepare(args):
     for size in sizes:counts(size)
     out=Path(args.out).resolve()
     largest=counts(sizes[-1])
-    guard_run(out,dict(kind='webui-scaling-811-v1',root=str(Path(args.root).resolve()),
-        sizes=sizes,seed=args.seed,view=args.view),args.resume)
+    requested_views=getattr(args,'views',None);legacy_view=getattr(args,'view',None)
+    views=requested_views or ([legacy_view] if legacy_view else ['default_1280-720'])
+    guard_run(out,dict(kind='webui-scaling-811-v2-multiview',root=str(Path(args.root).resolve()),
+        sizes=sizes,seed=args.seed,views=views),args.resume)
     master=out/'master/source'
-    import_webui(SimpleNamespace(root=args.root,out=str(master),view=args.view,seed=args.seed,
+    import_webui(SimpleNamespace(root=args.root,out=str(master),views=views,seed=args.seed,
         train_count=largest['train'],val_count=largest['val'],test_count=largest['test'],resume=args.resume))
     selected=nested_sources(list(read_jsonl(master/'manifest.jsonl')),sizes,args.seed)
     for size,rows in selected.items():
@@ -53,12 +67,14 @@ def prepare(args):
         for split in SPLITS:
             write_jsonl(folder/f'manifest-{split}.jsonl',(r for r in rows if r['split']==split))
         write_json(folder/'report.json',{'selected':counts(size),
+            'selected_views':{s:sum(r['split']==s for r in rows) for s in SPLITS},
+            'view_distribution':{s:dict(Counter(r.get('view','legacy') for r in rows if r['split']==s)) for s in SPLITS},
             'domains':{s:len({r['group'] for r in rows if r['split']==s}) for s in SPLITS}})
     write_json(out/'split-report.json',{'sizes':{str(n):counts(n) for n in sizes},
         'common_test_size':sizes[0]//10,'common_test_scale':sizes[0],
         'protocol':'Custom 8:1:1 split by hostname, nested within a single master split; not official WebUI splits',
-        'view':args.view,'seed':args.seed,
-        'note':'Sizes count selected unique HTML pages before rendering/normalization exclusions.'})
+        'views':views,'seed':args.seed,'train_sampling':'uniform-page-then-uniform-available-view-v1',
+        'note':'Sizes count selected unique pages before rendering/normalization exclusions; page views inherit one split.'})
 
 
 def select_rows(path, hashes):
@@ -80,6 +96,7 @@ def subset(args):
         render_report={};normalize_report={};freeze_report={}
         for split in SPLITS:
             chosen=[r for r in rows if r['split']==split]
+            chosen_pages={r.get('page_id',r['id']) for r in chosen}
             hashes={r['source_sha'] for r in chosen};ids={r['id'] for r in chosen}
             for name,kinds in [('rendered',('policy','pages','detector')),
                                ('labels',('policy','pages')),('css',('policy','pages'))]:
@@ -94,13 +111,28 @@ def subset(args):
             normalized=list(read_jsonl(base/'labels'/f'pages-{split}.jsonl'))
             frozen=list(read_jsonl(base/'css'/f'pages-{split}.jsonl'))
             errors=list(read_jsonl(base/'labels'/f'rejections-{split}.jsonl'))
-            render_report[split]={'selected':len(chosen),'usable':len(rendered),
-                                  'excluded':len(chosen)-len(rendered)}
-            normalize_report[split]={'selected_pages':len(chosen),'source_pages':len(rendered),
-                'clean_pages':len(rendered),'kept':len(normalized),'rejected':len(errors),
+            rendered_pages={r.get('page_id',r['id']) for r in rendered}
+            normalized_pages={r.get('page_id',r['id']) for r in normalized}
+            frozen_pages={r.get('page_id',r['id']) for r in frozen}
+            render_report[split]={'selected':len(chosen_pages),'selected_views':len(chosen),
+                'usable':len(rendered_pages),'usable_views':len(rendered),
+                'excluded':len(chosen_pages-rendered_pages)}
+            normalize_report[split]={'selected_pages':len(chosen_pages),'selected_views':len(chosen),
+                'source_pages':len(rendered_pages),'source_views':len(rendered),
+                'clean_pages':len(rendered_pages),'clean_views':len(rendered),
+                'kept':len(normalized_pages),'kept_views':len(normalized),
+                'rejected':len(rendered_pages-normalized_pages),'rejected_views':len(errors),
                 'top_errors':Counter(r.get('stage','')+': '+r['error'] for r in errors).most_common(10)}
-            freeze_report[split]={'pages':len(frozen),'failed_pages':len(normalized)-len(frozen),
+            freeze_report[split]={'pages':len(frozen_pages),'page_views':len(frozen),
+                'failed_pages':len(normalized_pages-frozen_pages),
+                'failed_page_views':len(normalized)-len(frozen),
                 'rows':sum(1 for _ in read_jsonl(base/'css'/f'policy-{split}.jsonl'))}
+            if split=='train' and any(r.get('lazy_contract') for r in rendered):
+                render_report[split].update(status='deferred',pending_pages=len(rendered_pages),
+                    pending_views=len(rendered),usable=None,usable_views=None,excluded=None)
+                normalize_report[split].update(status='deferred',pending_pages=len(normalized_pages),
+                    pending_views=len(normalized),kept=None,kept_views=None,rejected=None,rejected_views=None)
+                freeze_report[split].update(status='online-only',pages=None,page_views=None)
         write_json(base/'rendered/report.json',{'split_coverage':render_report})
         write_json(base/'labels/prepare-report.json',normalize_report)
         write_json(base/'css/freeze-report.json',freeze_report)
@@ -122,7 +154,7 @@ def summarize(args):
             report=read_json(path)
             p=report['precision_iou50'];r=report['recall_iou50']
             reports.append(dict(size=size,test=population,**{k:report.get(k) for k in
-                ('n','precision_iou50','recall_iou50','small_recall_iou50','small_n','threshold')},
+                ('n','unique_pages','precision_iou50','recall_iou50','small_recall_iou50','small_n','threshold','by_view','macro_page')},
                 f1_iou50=2*p*r/(p+r) if r is not None and p+r else 0.,
                 coverage=read_json(root/str(size)/'coverage.json')))
     write_json(runs/'detector-comparison.json',reports)
@@ -133,6 +165,14 @@ def summarize(args):
     for r in reports:
         vals=[r[k] for k in ('precision_iou50','recall_iou50','f1_iou50','small_recall_iou50')]
         lines.append(f"| {r['size']} | {r['test']} | {r['n']} | "+' | '.join('N/A' if v is None else f'{v:.4f}' for v in vals)+' |')
+    lines += ['', '## Per-viewport detector results','',
+        '| Selected pages | Test | View | Images | Precision | Recall | Small recall |',
+        '|---:|---|---|---:|---:|---:|---:|']
+    for r in reports:
+        for view,metrics in (r.get('by_view') or {}).items():
+            vals=[metrics.get(k) for k in ('precision_iou50','recall_iou50','small_recall_iou50')]
+            lines.append(f"| {r['size']} | {r['test']} | {view} | {metrics['n']} | "+
+                ' | '.join('N/A' if v is None else f'{v:.4f}' for v in vals)+' |')
     runs.mkdir(parents=True,exist_ok=True)
     (runs/'detector-comparison.md').write_text('\n'.join(lines)+'\n')
     policy=[]
@@ -151,14 +191,23 @@ def summarize(args):
         values=[row.get(k) for k in ('failure_rate','initial_box_iou','final_box_iou','pixel_mae','seconds')]
         lines.append(f"| {row['size']} | {row['evaluation']} | {row['n']} | "+
                      ' | '.join('N/A' if v is None else f'{v:.4f}' for v in values)+' |')
+    lines += ['', '## Per-viewport policy results','',
+        '| Selected pages | Evaluation | View | n | Failed | Initial IoU | Final IoU | Pixel MAE | Seconds |',
+        '|---:|---|---|---:|---:|---:|---:|---:|---:|']
+    for row in policy:
+        for view,metrics in (row.get('by_view') or {}).items():
+            values=[metrics.get(k) for k in ('failure_rate','initial_box_iou','final_box_iou','pixel_mae','seconds')]
+            lines.append(f"| {row['size']} | {row['evaluation']} | {view} | {metrics['n']} | "+
+                ' | '.join('N/A' if v is None else f'{v:.4f}' for v in values)+' |')
     (runs/'policy-comparison.md').write_text('\n'.join(lines)+'\n')
 
 
 def add_parsers(sub):
     p=sub.add_parser('visual-webui-scales-prepare')
     p.add_argument('--root',required=True);p.add_argument('--out',required=True)
-    p.add_argument('--sizes',nargs='+',type=int,default=[7000,70000,350000])
-    p.add_argument('--view',default='default_1280-720');p.add_argument('--seed',type=int,default=42)
+    p.add_argument('--sizes',nargs='+',type=int,default=[7000,70000])
+    p.add_argument('--view',help='Legacy single-view alias; use --views for new experiments')
+    p.add_argument('--views',nargs='+');p.add_argument('--seed',type=int,default=42)
     p.add_argument('--resume',action='store_true')
     p=sub.add_parser('visual-webui-scales-subset');p.add_argument('--data',required=True)
     p=sub.add_parser('visual-webui-scales-summary')

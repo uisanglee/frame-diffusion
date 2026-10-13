@@ -161,6 +161,10 @@ def inspect_candidates(browser,target,html,diagnostics=None):
 
 def target_pool(rows, manifest=None, cache_dir=None, observation_size=384, diagnostics=None):
     if observation_size<1:raise ValueError('Invalid corruption observation size')
+    if any(r.get('lazy_contract') for r in rows):
+        if not all(r.get('lazy_contract') and r['split']=='train' for r in rows):
+            raise ValueError('Lazy train descriptors cannot be mixed with eager or held-out rows')
+        return [dict(r,id=r['lazy_source']['id']) for r in rows]
     if cache_dir is None and manifest:
         cache_dir = Path(manifest).resolve().parent/'.online-target-cache'
     pages = {p['id']:p for p in read_jsonl(manifest)} if manifest else {}
@@ -189,6 +193,8 @@ def target_pool(rows, manifest=None, cache_dir=None, observation_size=384, diagn
                 raise ValueError(f'Online target identity mismatch: {page_id} {key}')
         target = {k:copy.deepcopy(row[k]) for k in ('group','split','source_sha','viewport','current',
                   'target_image','target_elements')}
+        for key in ('page_id','view'):
+            if key in row:target[key]=row[key]
         for key in ('predicted_target_elements','parser_provenance','parser_sha','css_owners',
                     'target_declaration_state','normalization_contract'):
             if key in row: target[key] = row[key]
@@ -282,6 +288,7 @@ def target_pool(rows, manifest=None, cache_dir=None, observation_size=384, diagn
 
 def asset_signatures(targets):
     paths={t[k] for t in targets for k in ('target_html','target_image','predicted_target_elements') if t.get(k)}
+    paths.update(t['lazy_source']['html'] for t in targets if t.get('lazy_contract'))
     return {path:digest(path) for path in sorted(paths)}
 
 
@@ -330,8 +337,13 @@ class OnlineSampler:
         if mode not in ('abstract','screenshot') or min(max_noise,attempts)<1: raise ValueError('Invalid online configuration')
         self.targets=targets;self.mode=mode;self.seed=seed;self.max_noise=max_noise;self.attempts=attempts;self.stop=stop
         self.by_id={t['id']:t for t in targets}
+        self.by_page={}
+        for target in targets:self.by_page.setdefault(target.get('page_id',target['id']),[]).append(target)
+        self.page_ids=sorted(self.by_page)
         self.browser=None
         self.parent_first=parent_first
+        from .lazy_webui import TrainViewCache
+        self.view_cache=TrainViewCache()
 
     @lru_cache(maxsize=64)
     def html(self,path): return Path(path).read_text()
@@ -357,8 +369,17 @@ class OnlineSampler:
         rng=random.Random(task_seed(self.seed,index));errors=[];started=time.perf_counter()
         for attempt in range(self.attempts):
             if self.stop is not None and self.stop.is_set(): raise RuntimeError('Online producer stopped')
-            target=rng.choice(self.targets)
+            # Pages are the statistical units. Select a page first, then one
+            # available viewport, so pages with six captures are not weighted
+            # six times more than pages with one capture.
+            target=rng.choice(self.by_page[rng.choice(self.page_ids)])
             try:
+                descriptor=target if target.get('lazy_contract') else None
+                if descriptor:
+                    # Materialization owns a Playwright runtime; close ours first.
+                    self.close()
+                    prepared=self.view_cache.get(descriptor,policy=True)
+                    target=target_pool([prepared],observation_size=descriptor['lazy_settings']['observation_size'])[0]
                 if self.browser is None: self.browser=HtmlBrowser().__enter__()
                 else: self.browser.reset_context()
                 browser=self.browser;tree=target['current'];viewport=target['viewport']
@@ -370,7 +391,7 @@ class OnlineSampler:
                     for node,label in zip(tree['nodes'],metadata['visual_classes']):node['visual_class']=label
                     self.clean_state.cache_clear()
                 if not target['visible_candidates']:raise ValueError('No visible corruption candidates')
-                clean=self.clean_state(target['id'])
+                clean=copy.deepcopy(target['target_declaration_state']) if descriptor else self.clean_state(target['id'])
                 browser.load(html,viewport)
                 from . import css_owners
                 owner_mode='css_owners' in target
@@ -464,6 +485,10 @@ class OnlineSampler:
                     result['online'].update(probe_rejections=probe_rejections,
                         teacher_owner=owners[teacher[0]]['kind'],
                         rule_mutations=sum(owners[e[0]]['kind']=='rule' for e in noise))
+                if descriptor:
+                    from .lazy_webui import portable_images
+                    result=portable_images(result,('target_image',))
+                    if descriptor.get('lazy_detector'):result['lazy_detector']=descriptor['lazy_detector']
                 return result
             except Exception as exc:
                 errors.append({'page':target['id'],'error':str(exc)})
@@ -481,6 +506,7 @@ def _initialize(targets,mode,seed,max_noise,attempts,parent_first,stop):
     import torch
     torch.set_num_threads(1)  # No CUDA/model/detector in workers.
     _sampler=OnlineSampler(targets,mode,seed,max_noise,attempts,stop,parent_first)
+    Finalize(None,_sampler.view_cache.close,exitpriority=9)
     Finalize(None,_sampler.close,exitpriority=10)
 
 

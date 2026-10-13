@@ -208,8 +208,9 @@ def batch_inputs(net,rows,device,predicted=False):
         if row.get('hierarchy'):raise ValueError('Flat policy data is retired; use original DOM data')
         if cfg.semantic:
             if predicted:
-                if not row.get('predicted_target_elements'): raise ValueError('Missing frozen-detector cache')
-                items=read_json(row['predicted_target_elements'])
+                if 'lazy_predicted_elements' in row:items=row['lazy_predicted_elements']
+                elif row.get('predicted_target_elements'):items=read_json(row['predicted_target_elements'])
+                else:raise ValueError('Missing frozen-detector cache')
             else: items=row['target_elements']
             targets.append(semantic_masks(items,row['viewport'],cfg.size))
             currents.append(semantic_masks(elements(row['current'],row['current_boxes'],row['viewport'],row.get('current_clip_boxes')),row['viewport'],cfg.size))
@@ -306,8 +307,9 @@ def train(args):
     from .visual_train import validation_sample, update_early_stopping
     resolve_policy_scale(args)
     device=select_device(args.device);seed_all(args.seed);torch.set_num_threads(args.cpu_threads)
-    if min(args.steps,args.batch_size,args.accumulation,args.eval_every,args.log_every,args.val_samples)<1:
+    if min(args.steps,args.batch_size,args.accumulation,args.eval_every,args.log_every)<1:
         raise ValueError('Training counts must be positive')
+    if args.val_samples<0:raise ValueError('val-samples must be nonnegative; 0 means all')
     if args.policy_metric_samples<0:raise ValueError('policy-metric-samples must be nonnegative')
     if args.lr<=0 or args.early_stop_patience<0 or args.early_stop_min_delta<0: raise ValueError('Invalid optimizer/early stop settings')
     if args.resume and args.init_checkpoint: raise ValueError('Choose resume OR init-checkpoint')
@@ -332,6 +334,10 @@ def train(args):
         cfg.existing_values_only=True
     tok=EditTokenizer(cfg.max_nodes)
     for row in training+validation:
+        if row.get('lazy_contract'):
+            if not (row['split']=='train' and args.online_corruption and args.stylesheets):
+                raise ValueError('Lazy rows require online stylesheet training')
+            continue
         if row.get('hierarchy'):raise ValueError('Flat policy data is retired; use original DOM data')
         if row.get('teacher_strategy')!=cfg.action_contract: raise ValueError('Run visual-tree-prepare with matching --stylesheets setting')
         node_count=len(row['css_owners']) if cfg.stylesheets else len(row['current']['nodes'])
@@ -378,7 +384,7 @@ def train(args):
     if args.predicted_targets:
         if not cfg.semantic: raise ValueError('Predicted abstraction applies only to abstract policy')
         for row in training+validation:
-            if not row.get('predicted_target_elements'): raise ValueError('Missing detector target cache')
+            if not row.get('predicted_target_elements') and not row.get('lazy_detector'): raise ValueError('Missing detector target cache')
             source=row.get('parser_provenance')
             if isinstance(source,str):
                 if source not in provenance: provenance[source]=read_json(source)
@@ -391,6 +397,14 @@ def train(args):
     if (groups|parser_groups)&{r['group'] for r in validation} or (hashes|parser_hashes)&{r['source_sha'] for r in validation}:
         raise ValueError('Validation overlaps policy/detector training')
     net=TreePolicy(cfg,not args.no_pretrained and ck is None).to(device)
+    lazy_detector=None
+    if args.predicted_targets and any(r.get('lazy_detector') for r in training):
+        from .visual_train import load_detector,detect,detector_input
+        configs={tuple(sorted(r['lazy_detector'].items())) for r in training if r.get('lazy_detector')}
+        if len(configs)!=1:raise ValueError('Mixed lazy detector configurations')
+        lazy_config=dict(next(iter(configs)))
+        if digest(lazy_config['checkpoint'])!=lazy_config['sha']:raise ValueError('Lazy detector checkpoint changed')
+        lazy_detector,_=load_detector(lazy_config['checkpoint'],device)
     optimizer=torch.optim.AdamW(net.parameters(),lr=args.lr,weight_decay=.01)
     rng=random.Random(args.seed);start=0;best=float('inf');early={'reference_loss':float('inf'),'bad_validations':0,'stopped':False}
     if ck: net.load_state_dict(ck['model'])
@@ -436,6 +450,9 @@ def train(args):
             for _ in range(args.accumulation):
                 wait_start=time.perf_counter()
                 rows=stream.take(args.batch_size) if stream else [rng.choice(training) for _ in range(args.batch_size)]
+                if lazy_detector is not None:
+                    for row in rows:
+                        row['lazy_predicted_elements']=detect(lazy_detector,detector_input(row['target_image']),lazy_config['threshold'])
                 wait_seconds+=time.perf_counter()-wait_start
                 if stream:
                     for row in rows:
@@ -494,7 +511,10 @@ def train(args):
                 val=weighted/count;improved=val<best;best=min(best,val)
                 early=update_early_stopping(early,val,args.early_stop_patience,args.early_stop_min_delta)
                 metrics={'step':step,'validation_loss':val,'validation_tokens':count,
-                         'validation_n':len(selected),'best':best,'early_stopping':early}
+                         'validation_n':len(selected),'validation_available_n':len(validation),
+                         'validation_complete':len(selected)==len(validation),
+                         'validation_pages':len({r.get('page_id',r['id'].rsplit('/',1)[0]) for r in selected}),
+                         'best':best,'early_stopping':early}
                 if cfg.parent_first:metrics['parent_first']=True
                 if cfg.stylesheets:metrics['validation_by_teacher']=breakdown
                 if metric_rows:

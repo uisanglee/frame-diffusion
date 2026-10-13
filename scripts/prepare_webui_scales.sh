@@ -9,13 +9,14 @@ if [[ $# != 2 ]]; then
 fi
 raw=$1
 data=$2
-read -r -a sizes <<< "${WEBUI_SIZES:-7000 70000 350000}"
+read -r -a sizes <<< "${WEBUI_SIZES:-7000 70000}"
+source "$repo_root/scripts/webui_views.sh"
 python -m framediff visual-webui-scales-prepare --root "$raw" --out "$data" \
-  --sizes "${sizes[@]}" --view "${WEBUI_VIEW:-default_1280-720}" --seed "${SEED:-42}" --resume
+  --sizes "${sizes[@]}" --views "${views[@]}" --seed "${SEED:-42}" --resume
 # No historical 10K input, detector checkpoint or offline trajectories required.
 python -m framediff visual-build-data --manifest "$data/master/source/manifest.jsonl" \
   --workers "${RENDER_WORKERS:-${PREPARE_WORKERS:-4}}" \
-  --out "$data/master/rendered" --clean-only --abstract-size "${IMAGE_SIZE:-384}" \
+  --out "$data/master/rendered" --clean-only --lazy-train --abstract-size "${IMAGE_SIZE:-384}" \
   --seed "${SEED:-42}" --min-elements "${MIN_ELEMENTS:-3}" \
   --max-source-mae "${MAX_SOURCE_MAE:-1.0}" --resume
 python -m framediff visual-tree-normalize --rendered "$data/master/rendered" \

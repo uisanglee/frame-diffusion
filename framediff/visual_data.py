@@ -22,7 +22,7 @@ def validate_splits(records):
     for r in records:
         if not r.get('group') or r.get('split') not in ('train','val','test'):
             raise ValueError('Explicit group and train/val/test split required')
-        for key in ('group','source_sha'):
+        for key in ('group','source_sha','page_id'):
             value=r.get(key)
             if value is None:continue
             token=(key,value)
@@ -65,6 +65,13 @@ def generate(args):
 
 def _render_page(task):
     args, out, index, source = task
+    if getattr(args,'lazy_train',False) and source['split']=='train':
+        from .lazy_webui import CONTRACT as LAZY
+        settings={k:getattr(args,k) for k in ('seed','max_nodes','abstract_size','min_elements','max_source_mae')}
+        settings.update(resume=True,clean_only=True,lazy_train=False)
+        row={**source,'id':source['id']+'/clean','lazy_contract':LAZY,
+             'lazy_source':source,'lazy_settings':settings,'contract':CONTRACT}
+        return {'page':{**row,'id':source['id']},'policy':[row],'detection':[row]},None,False
     work=out/'pages'/hashlib.sha256(source['id'].encode()).hexdigest()[:20]
     work.mkdir(parents=True,exist_ok=True)
     cache=work/'records.json'
@@ -105,6 +112,8 @@ def _render_page(task):
             tagged=dom['html'];(work/'reference.html').write_text(tagged)
             ids=[n['id'] for n in tree['nodes'][1:]];root=tree['nodes'][0]['id']
             base={k:source[k] for k in ('id','group','split','source_sha')}
+            for key in ('page_id','view'):
+                if key in source:base[key]=source[key]
             base.update(contract=CONTRACT,action_contract=ACTION_CONTRACT,viewport=viewport,target_image=str(work/'target.png'),
                         target_abstract=str(work/'target-abstract.png'),
                         teacher_strategy='unlabeled-css-corruption-v1',target_elements=target_elements)
@@ -168,6 +177,8 @@ def _render_page(task):
 
 
 def build(args):
+    if getattr(args,'lazy_train',False) and not getattr(args,'clean_only',False):
+        raise ValueError('--lazy-train requires --clean-only; corruption is generated online')
     workers=getattr(args,"workers",1)
     if workers<1:raise ValueError("workers must be positive")
     sources=list(read_jsonl(args.manifest))
@@ -196,9 +207,17 @@ def build(args):
         write_jsonl(out/f'policy-{split}.jsonl',[r for r in policy if r['split']==split])
         write_jsonl(out/f'detector-{split}.jsonl',[r for r in detection if r['split']==split])
         write_jsonl(out/f'pages-{split}.jsonl',[r for r in pages if r['split']==split])
-    coverage={split:{'selected':sum(r['split']==split for r in sources),
-                     'usable':sum(r['split']==split for r in pages)} for split in ('train','val','test')}
-    for counts in coverage.values():counts['excluded']=counts['selected']-counts['usable']
+    coverage={}
+    for split in ('train','val','test'):
+        source_views=[r for r in sources if r['split']==split];usable_views=[r for r in pages if r['split']==split]
+        selected_pages={r.get('page_id',r['id']) for r in source_views}
+        usable_pages={r.get('page_id',r['id']) for r in usable_views}
+        coverage[split]={'selected':len(selected_pages),'selected_views':len(source_views),
+            'usable':len(usable_pages),'usable_views':len(usable_views),
+            'excluded':len(selected_pages-usable_pages)}
+        if any(r.get('lazy_contract') for r in usable_views):
+            coverage[split].update(status='deferred',pending_pages=len(usable_pages),pending_views=len(usable_views),
+                usable=None,usable_views=None,excluded=None)
     write_json(out/'report.json',{'pages':len(pages),'policy_examples':len(policy),'detector_examples':len(detection),
                                 'split_coverage':coverage,'errors':errors})
     if not policy:raise ValueError('No usable visual training examples; see report.json')

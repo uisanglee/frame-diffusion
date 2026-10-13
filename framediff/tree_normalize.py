@@ -21,6 +21,13 @@ CONTRACT = 'parent-preserved-targeted-inline-v6-field-probes-scroll-guard'
 
 def _prepare_page(task):
     args, out, split, index, page_id, row, pages = task
+    if row.get('lazy_contract'):
+        if split!='train':raise ValueError('Lazy held-out normalization is forbidden')
+        settings={**row['lazy_settings'],**{k:getattr(args,k) for k in
+            ('max_css_owners','observation_size','max_pixel_mae','max_box_error')}}
+        new={**row,'lazy_settings':settings,'normalization_contract':CONTRACT,
+             'teacher_strategy':css_owners.CONTRACT}
+        return new,{**pages[page_id],**new,'id':page_id},None
     folder=out/'normalized-pages'/split/hashlib.sha256(page_id.encode()).hexdigest()
     folder.mkdir(parents=True,exist_ok=True)
     html_path=Path(row['current_html'] if row['id'].endswith('/clean') else row['target_html'])
@@ -69,6 +76,8 @@ def _prepare_page(task):
                 feedback=feedback_metadata(browser,tree)
                 target_elements=elements(tree,boxes,row['viewport'],feedback['current_clip_boxes'])
             seed={k:row[k] for k in ('group','split','source_sha','viewport')}
+            for key in ('page_id','view'):
+                if key in row:seed[key]=row[key]
             seed.update(id=page_id+'/seed',current=tree,current_boxes=boxes,
                 target_html=str(normalized),target_image=str(folder/'after.png'),
                 target_elements=target_elements,css_owners=parsed['owners'],
@@ -99,6 +108,8 @@ def _prepare_page(task):
             new.update(split=split,current_html=str(initial),current_image=str(png),normalization_stats=stats,
                        normalization_contract=CONTRACT)
             page={k:pages[page_id][k] for k in ('id','group','split','source_sha','viewport')}
+            for key in ('page_id','view'):
+                if key in pages[page_id]:page[key]=pages[page_id][key]
             page.update(html=str(normalized),target_html=str(normalized),
                 screenshot=str(folder/'after.png'),initial_html=str(initial),
                 evaluation_target_boxes=boxes,policy_subset=css_owners.CONTRACT,
@@ -155,7 +166,9 @@ def prepare(args):
                 if row['id'].endswith('/clean') or (page_id not in clean and row.get('target_html')):
                     clean[page_id]=row
             validate_splits(list(clean.values()))
-            source_pages=len(pages)
+            source_views=len(pages)
+            source_page_ids={r.get('page_id',r['id']) for r in pages.values()}
+            source_pages=len(source_page_ids)
             selected_pages=upstream_report.get('split_coverage',{}).get(split,{}).get('selected',source_pages)
             if limit:
                 clean=dict(list(clean.items())[:limit])
@@ -184,10 +197,16 @@ def prepare(args):
             write_jsonl(out/f'policy-{split}.jsonl',kept)
             write_jsonl(out/f'pages-{split}.jsonl',selected)
             write_jsonl(out/f'rejections-{split}.jsonl',errors)
-            report[split]={'selected_pages':selected_pages,'source_pages':source_pages,'clean_pages':len(clean),'kept':len(kept),
-                'rejected':len(errors),'top_errors':reasons.most_common(10),
+            clean_pages=len({r.get('page_id',r['id'].rsplit('/',1)[0]) for r in clean.values()})
+            kept_pages=len({r.get('page_id',r['id'].rsplit('/',1)[0]) for r in kept})
+            report[split]={'selected_pages':selected_pages,'source_pages':source_pages,'source_views':source_views,
+                'clean_pages':clean_pages,'clean_views':len(clean),'kept':kept_pages,'kept_views':len(kept),
+                'rejected':clean_pages-kept_pages,'rejected_views':len(errors),'top_errors':reasons.most_common(10),
                 'kept_with_frozen_sizes':sum((r.get('normalization_stats',{}).get('normalized_elements') or 0)>0 for r in kept),
                 'kept_without_frozen_sizes':sum((r.get('normalization_stats',{}).get('normalized_elements') or 0)==0 for r in kept)}
+            if any(r.get('lazy_contract') for r in kept):
+                report[split].update(status='deferred',pending_pages=kept_pages,pending_views=len(kept),
+                    verified_pages=0,kept_with_frozen_sizes=0,kept_without_frozen_sizes=0)
             all_rows.extend(kept)
     prepare_splits()
     validate_splits(all_rows)

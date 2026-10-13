@@ -3,6 +3,7 @@
 The current replacement policy is trained exclusively in tree_policy.py.
 """
 import contextlib
+import io
 from collections import defaultdict
 from dataclasses import asdict
 from pathlib import Path
@@ -41,7 +42,7 @@ def load_detector(path,device):
 
 
 def detector_input(path):
-    with Image.open(path) as image:
+    with Image.open(io.BytesIO(path) if isinstance(path,bytes) else path) as image:
         return torch.from_numpy(np.asarray(image.convert('RGB')).copy()).permute(2,0,1).float()/255
 
 
@@ -151,6 +152,18 @@ def sample_policy_rows(pools,batch_size,rng):
     for _ in range(batch_size-stop_count):
         field=rng.choice(fields);result.append(rng.choice(pools['edit'][field]))
     rng.shuffle(result);return result
+
+
+def page_view_pools(rows):
+    """Index once, outside the optimizer loop (O(corpus size))."""
+    pages=defaultdict(list)
+    for row in rows:pages[row.get('page_id',row['id'].rsplit('/',1)[0])].append(row)
+    return tuple(pages[key] for key in sorted(pages))
+
+
+def sample_page_views(pools,batch_size,rng):
+    """O(batch size): uniform page, then uniform available view."""
+    return [rng.choice(rng.choice(pools)) for _ in range(batch_size)]
 
 
 def policy_validation_metrics(net,rows,device,rng,prediction_probability,batch_size,amp):
@@ -338,6 +351,9 @@ def train(args):
     opt=torch.optim.AdamW(net.parameters(),lr=args.lr,weight_decay=.01)
     policy_pools=(policy_training_pools(train_rows,cfg['policy_head']!='autoregressive') if not is_detector and
                   cfg['training_scheme']=='balanced-v1' else None)
+    view_pools=page_view_pools(train_rows)
+    from .lazy_webui import TrainViewCache,portable_images
+    lazy_cache=TrainViewCache()
     rng=random.Random(args.seed);start=0;best=float('inf')
     early={'reference_loss':float('inf'),'bad_validations':0,'stopped':False}
     if args.resume:
@@ -356,7 +372,22 @@ def train(args):
         net.train();opt.zero_grad(set_to_none=True);total=0.;step_parts={}
         for _ in range(args.accumulation):
             batch=(sample_policy_rows(policy_pools,args.batch_size,rng) if policy_pools else
-                   [rng.choice(train_rows) for _ in range(args.batch_size)])
+                   sample_page_views(view_pools,args.batch_size,rng))
+            if is_detector:
+                materialized=[]
+                for row in batch:
+                    if row.get('lazy_contract'):
+                        for attempt in range(32):
+                            try:
+                                row=portable_images(lazy_cache.get(row),('image',));break
+                            except ValueError as exc:
+                                with (out/'lazy-rejections.jsonl').open('a') as log:
+                                    import json
+                                    log.write(json.dumps({'id':row['id'],'error':str(exc)})+'\n')
+                                row=sample_page_views(view_pools,1,rng)[0]
+                        else:raise RuntimeError('32 consecutive lazy detector preparation failures; inspect lazy-rejections.jsonl')
+                    materialized.append(row)
+                batch=materialized
             with amp():
                 if is_detector:value=detection_loss(net,batch,device);parts={}
                 elif cfg['training_scheme']=='balanced-v1':
@@ -401,7 +432,8 @@ def train(args):
             else:validation=sum(v*n for v,n in values)/sum(n for _,n in values)
             if not math_isfinite(validation):raise RuntimeError('Non-finite validation loss')
             eval_row={'step':step,'validation_loss':validation,'validation_n':len(selected),
-                      'validation_pages':len({r.get('target_image',r['source_sha']) for r in selected})}
+                      'validation_pages':len({r.get('page_id',r.get('target_image',r['source_sha'])) for r in selected}),
+                      'validation_available_n':len(val_rows),'validation_complete':len(selected)==len(val_rows)}
             if is_detector:
                 eval_row['validation_components']={k:v/len(selected) for k,v in sorted(components.items())}
                 with torch.inference_mode():eval_row.update(detector_quality(net,selected,device,args.metric_threshold))
@@ -471,9 +503,10 @@ def filter_legal_policy_rows(rows):
 
 def validation_sample(rows,limit,seed=90210):
     """Fixed round-robin sample across pages, not the first few trajectories."""
-    if limit>=len(rows):return list(rows)
+    if limit<0:raise ValueError('Validation limit must be nonnegative; 0 means all')
+    if limit==0 or limit>=len(rows):return list(rows)
     rng=random.Random(seed);pages=defaultdict(list)
-    for row in rows:pages[row.get('target_image',row['source_sha'])].append(row)
+    for row in rows:pages[row.get('page_id',row.get('target_image',row['source_sha']))].append(row)
     groups=list(pages.values());rng.shuffle(groups)
     for group in groups:rng.shuffle(group)
     selected=[];depth=0
@@ -489,7 +522,11 @@ def cache_targets(args):
     from .ir import read_json
     device=select_device(args.device)
     if device=='cpu':torch.set_num_threads(args.cpu_threads)
-    model,ck=load_detector(args.checkpoint,device);rows=list(read_jsonl(args.data))
+    rows=list(read_jsonl(args.data))
+    lazy=bool(rows) and all(r.get('lazy_contract') for r in rows)
+    if lazy:
+        model=None;ck=torch.load(args.checkpoint,map_location='cpu',weights_only=True)
+    else:model,ck=load_detector(args.checkpoint,device)
     out=Path(args.out).resolve();guard_run(out,{'kind':'visual-cache-v1','data':digest(args.data),
         'checkpoint':digest(args.checkpoint),'threshold':args.threshold,'size':args.size},args.resume)
     provenance=out/'parser-provenance.json';parser_sha=digest(args.checkpoint)
@@ -504,6 +541,10 @@ def cache_targets(args):
     for r in rows:
         if r['split']!='train' and (r['group'] in ck['training_groups'] or r['source_sha'] in ck['training_hashes']):
             raise ValueError('Parser training overlaps held-out target')
+        if r.get('lazy_contract'):
+            result.append({**r,'parser_provenance':str(provenance),'lazy_detector':{
+                'checkpoint':str(Path(args.checkpoint).resolve()),'sha':parser_sha,'threshold':args.threshold}})
+            continue
         key=digest(r['target_image']);path=out/f'{key}.png'
         if key not in seen:
             if reuse and (reuse/f'{key}.png').exists() and (reuse/f'{key}.json').exists():
@@ -531,7 +572,7 @@ def evaluate_detector(args):
     net,ck=load_detector(args.checkpoint,device);rows=list(read_jsonl(args.data))
     if args.limit:rows=rows[:args.limit]
     if not rows:raise ValueError('No detector evaluation samples')
-    tp=predicted=truth=small_tp=small_n=0;results=[]
+    tp=predicted=truth=small_tp=small_n=0;results=[];view_counts=defaultdict(lambda:[0,0,0,0,0,0])
     for r in rows:
         if r['group'] in ck['training_groups'] or r['source_sha'] in ck['training_hashes']:raise ValueError('Detector evaluation leakage')
         pred=detect(net,detector_input(r['image']),args.threshold);target=r['elements']
@@ -544,8 +585,24 @@ def evaluate_detector(args):
             hits={int(j) for i,j in zip(ii,jj) if valid[i,j]};count=len(hits)
         small={i for i,e in enumerate(target) if (e['box'][2]-e['box'][0])*(e['box'][3]-e['box'][1])<32**2}
         tp+=count;predicted+=len(pred);truth+=len(target);small_tp+=len(hits&small);small_n+=len(small)
-        results.append({'id':r['id'],'matched_iou50':count,'predictions':len(pred),'targets':len(target),'small_targets':len(small)})
+        view=r.get('view','legacy');bucket=view_counts[view]
+        for i,value in enumerate((count,len(pred),len(target),len(hits&small),len(small),1)):bucket[i]+=value
+        results.append({'id':r['id'],'page_id':r.get('page_id',r['id'].rsplit('/',1)[0]),'view':view,
+            'matched_iou50':count,'predictions':len(pred),'targets':len(target),'small_targets':len(small)})
+    def metrics(values):
+        mt,pr,tr,sm,st,n=values
+        return {'n':n,'precision_iou50':mt/pr if pr else 0.,'recall_iou50':mt/tr if tr else None,
+                'small_recall_iou50':sm/st if st else None,'small_n':st}
+    page_counts=defaultdict(lambda:[0,0,0])
+    for row in results:
+        bucket=page_counts[row['page_id']]
+        for i,key in enumerate(('matched_iou50','predictions','targets')):bucket[i]+=row[key]
     report={'n':len(rows),'precision_iou50':tp/predicted if predicted else 0.,'recall_iou50':tp/truth if truth else None,
         'small_recall_iou50':small_tp/small_n if small_n else None,'small_n':small_n,'threshold':args.threshold,
-        'note':'Class-aware matching at IoU 0.5, not COCO AP','records':results}
+        'unique_pages':len({r['page_id'] for r in results}),
+        'macro_page':{
+            'precision_iou50':sum(m/p if p else 0. for m,p,_ in page_counts.values())/len(page_counts),
+            'recall_iou50':sum(m/t if t else 0. for m,_,t in page_counts.values())/len(page_counts)},
+        'by_view':{view:metrics(values) for view,values in sorted(view_counts.items())},
+        'note':'Class-aware matching at IoU 0.5, not COCO AP; n counts page-view observations','records':results}
     write_json(args.out,report);return report

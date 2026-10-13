@@ -18,6 +18,7 @@ common=$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["common_
 stage=${STAGE:-all}
 case "$stage" in all|detector|policy|evaluate) ;; *) echo 'STAGE must be all, detector, policy, or evaluate' >&2; exit 2;; esac
 device=${DEVICE:-cuda}
+export VAL_SAMPLES=${VAL_SAMPLES:-0} # All available validation views; 0 is unlimited.
 detector="$output/detector/best.pt"
 if [[ "$stage" == all || "$stage" == detector ]]; then
   options=()

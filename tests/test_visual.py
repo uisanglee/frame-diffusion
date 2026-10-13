@@ -58,6 +58,17 @@ def test_validation_sampling_covers_pages_and_is_repeatable():
     assert validation_sample(rows,1000)==rows
 
 
+def test_page_view_sampler_does_not_overweight_pages_with_more_views():
+    import random
+    from framediff.visual_train import sample_page_views, page_view_pools
+    rows=[{'id':'a/v1','page_id':'a'},{'id':'a/v2','page_id':'a'},{'id':'a/v3','page_id':'a'},
+          {'id':'b/v1','page_id':'b'}]
+    sampled=sample_page_views(page_view_pools(rows),4000,random.Random(42))
+    a=sum(row['page_id']=='a' for row in sampled)
+    assert 1800<a<2200
+    assert {row['id'] for row in sampled if row['page_id']=='a'}=={'a/v1','a/v2','a/v3'}
+
+
 def test_abstraction_is_id_free_and_spatial():
     tree,boxes=fixture_tree();a=abstract_image(elements(tree,boxes,[320,240]),[320,240],64)
     renamed=copy.deepcopy(tree);renamed['nodes'][1]['id']='other';renamed_boxes={'page':boxes['page'],'other':boxes['card']}

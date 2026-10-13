@@ -46,6 +46,31 @@ def test_raw_import_nested_manifests_and_resume(tmp_path):
     assert (out/'10/source/manifest.jsonl').read_bytes()==original
 
 
+def test_multiview_split_counts_unique_pages_and_keeps_views_together(tmp_path):
+    from PIL import Image
+    from framediff.webui_scaling import prepare
+    raw=tmp_path/'raw'
+    views={'default_100-80':(100,80),'iPhone-Test':(40,90)}
+    for i in range(30):
+        folder=raw/str(i);folder.mkdir(parents=True)
+        for view,size in views.items():
+            stem=folder/view
+            Image.new('RGB',size).save(str(stem)+'-screenshot.png')
+            (folder/f'{view}-html.html').write_text(f'<html><body>page {i}</body></html>')
+            (folder/f'{view}-url.txt').write_text(f'https://domain{i}.example/')
+    out=tmp_path/'scales'
+    args=SimpleNamespace(root=str(raw),out=str(out),sizes=[10,30],view=None,
+        views=list(views),seed=42,resume=True)
+    prepare(args)
+    rows=list(read_jsonl(out/'30/source/manifest.jsonl'))
+    assert len(rows)==60
+    assert len({r['page_id'] for r in rows})==30
+    assert all(len({r['split'] for r in rows if r['page_id']==page})==1 for page in {r['page_id'] for r in rows})
+    report=read_json(out/'10/source/report.json')
+    assert report['selected']=={'train':8,'val':1,'test':1}
+    assert sum(report['selected_views'].values())==20
+
+
 def test_subset_keeps_shared_paths_and_reports_attrition(tmp_path):
     rows=sources();selected=nested_sources(rows,[20,100],42)
     write_json(tmp_path/'config.json',{'sizes':[20,100]})
