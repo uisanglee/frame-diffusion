@@ -27,11 +27,12 @@ nohup env PREPARE_WORKERS=4 WEBUI_SIZES="7000 70000 350000" \
 ```
 
 No old 10K corpus or trained detector is required. Source HTML is first rendered
-once into clean supervision (no offline corruption trajectories). This initial
-`visual-build-data` pass remains sequential; normalization/candidate probing and
-fixed validation/test corruption use `PREPARE_WORKERS`. Completion records and
+once into clean supervision (no offline corruption trajectories). Initial
+rendering, normalization/candidate probing and fixed validation/test corruption
+use `PREPARE_WORKERS`. Set `RENDER_WORKERS` to override just the initial renderer
+(for example `PREPARE_WORKERS=8 RENDER_WORKERS=4`). Completion records and
 existing configuration guards allow rerunning the same command. Keep settings
-and paths stable; the normalization/freeze worker count may change on resume.
+and paths stable; all browser worker counts may change on resume.
 
 All sizes share images/HTML under `master/`; only manifests are duplicated.
 **Do not delete `master/` after creating subsets.** Per-size `coverage.json`

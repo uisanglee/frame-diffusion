@@ -13,6 +13,7 @@ if [[ -z "${TRAIN_HTML_MANIFEST:-}" && ! -f "$manifest" ]]; then
   python -m framediff visual-generate --out "$data_dir/source" --count "${TRAIN_PAGES:-1000}"
 fi
 python -m framediff visual-build-data --manifest "$manifest" --out "$data_dir/rendered" \
+  --workers "${RENDER_WORKERS:-${PREPARE_WORKERS:-1}}" \
   --abstract-size "$abs_size" --trajectories "${TRAJECTORIES:-3}" --max-noise "${MAX_NOISE:-4}" --resume
 python -m framediff visual-tree-prepare --rendered "$data_dir/rendered" --out "$data_dir/tree" --resume
 train_stage() {

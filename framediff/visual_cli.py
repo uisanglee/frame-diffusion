@@ -46,6 +46,7 @@ def add_parsers(sub):
     p=sub.add_parser('visual-generate',help='Generate styled procedural HTML for browser-based visual training')
     p.add_argument('--out',required=True);p.add_argument('--count',type=int,default=1000);p.add_argument('--seed',type=int,default=42)
     p=sub.add_parser('visual-build-data',help='Render HTML and verified corruption trajectories for parser and policies')
+    p.add_argument('--workers',type=int,default=1,help='Independent page renderers; may change on resume')
     p.add_argument('--clean-only',action='store_true',help='Render clean detector/normalization inputs; generate corruption online later')
     p.add_argument('--manifest',required=True);p.add_argument('--out',required=True);p.add_argument('--resume',action='store_true')
     for k,v in [('max-nodes',128),('trajectories',3),('max-noise',4),('abstract-size',384),('seed',42),('min-elements',1)]:p.add_argument('--'+k,type=int,default=v)

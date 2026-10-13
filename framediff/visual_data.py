@@ -7,7 +7,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from .ir import read_jsonl,write_json,write_jsonl
+from .ir import read_json,read_jsonl
+from .preparation_workers import page_map,write_json,write_jsonl
 from .html_bridge import HtmlBrowser,embed_placeholder
 from .html_feedback import refresh_geometry
 from .plans import dom_tree
@@ -62,110 +63,135 @@ def generate(args):
     return records
 
 
+def _render_page(task):
+    args, out, index, source = task
+    work=out/'pages'/hashlib.sha256(source['id'].encode()).hexdigest()[:20]
+    work.mkdir(parents=True,exist_ok=True)
+    cache=work/'records.json'
+    if args.resume and cache.exists():
+        try:
+            saved=read_json(cache)
+            assets={saved['page']['html'], saved['page']['screenshot']}
+            for record in saved['policy']:
+                assets.update(record[k] for k in ('current_html','current_image','current_abstract',
+                                                   'target_image','target_abstract'))
+            if (saved['page']['source_sha']==source['source_sha'] and saved['policy'] and
+                saved['detection'] and all(Path(path).is_file() for path in assets)):
+                return saved, None, True
+        except (OSError, ValueError, KeyError, TypeError):
+            pass  # An interrupted/invalid completion record is regenerated.
+    rng=random.Random(args.seed+index);local_policy=[];local_detection=[]
+    try:
+        with HtmlBrowser() as browser:
+            viewport=source.get('viewport',[1280,800]);raw=Path(source['html']).read_text()
+            asset=Path(source['html']).parent/'rick.jpg'
+            if asset.exists():raw=embed_placeholder(raw,asset)
+            dom=browser.snapshot(raw,viewport,work/'target.png',args.max_nodes-1)
+            tree,target_boxes,_=dom_tree(dom);annotate(browser,tree)
+            from .explicit_html import feedback_metadata
+            target_feedback=feedback_metadata(browser,tree)
+            target_elements=elements(tree,target_boxes,viewport,target_feedback.get('current_clip_boxes'))
+            min_elements=getattr(args,'min_elements',1)
+            if len(target_elements)<min_elements:raise ValueError(f'Only {len(target_elements)} visible abstraction elements')
+            source_mae=None
+            if source.get('screenshot'):
+                with Image.open(source['screenshot']) as reference,Image.open(work/'target.png') as rendered:
+                    if reference.size!=rendered.size:raise ValueError('Source screenshot and rerender dimensions differ')
+                    source_mae=float(np.abs(np.asarray(reference.convert('RGB'),dtype=np.float32)-
+                        np.asarray(rendered.convert('RGB'),dtype=np.float32)).mean()/255)
+                max_source_mae=getattr(args,'max_source_mae',1.)
+                if source_mae>max_source_mae:
+                    raise ValueError(f'Source rerender pixel MAE {source_mae:.4f} exceeds {max_source_mae}')
+            tagged=dom['html'];(work/'reference.html').write_text(tagged)
+            ids=[n['id'] for n in tree['nodes'][1:]];root=tree['nodes'][0]['id']
+            base={k:source[k] for k in ('id','group','split','source_sha')}
+            base.update(contract=CONTRACT,action_contract=ACTION_CONTRACT,viewport=viewport,target_image=str(work/'target.png'),
+                        target_abstract=str(work/'target-abstract.png'),
+                        teacher_strategy='unlabeled-css-corruption-v1',target_elements=target_elements)
+            abstract_image(target_elements,viewport,args.abstract_size).save(base['target_abstract'])
+            def observe():
+                boxes=browser.tagged_boxes(ids);boxes[root]=[0,0,*viewport];return boxes
+            def save_example(name,current_html,boxes,corruption=None):
+                current_tree=refresh_geometry(tree,boxes)
+                from .explicit_html import feedback_screenshot
+                screenshot=work/f'{name}.png';feedback_screenshot(browser,path=str(screenshot),animations='disabled')
+                browser.screenshots+=1
+                abstract=work/f'{name}-abstract.png'
+                feedback=feedback_metadata(browser,tree)
+                labels=elements(tree,boxes,viewport,feedback.get('current_clip_boxes'))
+                abstract_image(labels,viewport,args.abstract_size).save(abstract)
+                html_path=work/f'{name}.html';html_path.write_text(current_html)
+                record={**base,'id':source['id']+'/'+name,'current':current_tree,'current_boxes':copy.deepcopy(boxes),
+                    'current_image':str(screenshot),'current_abstract':str(abstract),'current_html':str(html_path),
+                    'corruption_edit':corruption,**feedback}
+                local_policy.append(record)
+                local_detection.append({**base,'id':record['id'],'image':str(screenshot),'elements':labels})
+            browser.load(tagged,viewport);save_example('clean',tagged,target_boxes)
+            last_corrupted=None
+            for trajectory in range(0 if getattr(args,'clean_only',False) else args.trajectories):
+                html=tagged;boxes=target_boxes
+                for step in range(args.max_noise):
+                    accepted=False
+                    for attempt in range(30):
+                        from .tree_edits import FIELDS
+                        i=rng.randrange(1,len(tree['nodes']));fields=FIELDS
+                        if not fields:continue
+                        field=rng.choice(fields)
+                        value=rng.choice(ACTION_VALUES[field]);nid=tree['nodes'][i]['id']
+                        try:browser.edit_visual_action(html,viewport,nid,field,value)
+                        except Exception as exc:
+                            if isinstance(exc,ValueError) or 'Explicit ' in str(exc):continue
+                            raise
+                        candidate_html=browser.page.content();candidate=observe()
+                        # Corruption validity is syntactic/executable, not
+                        # "farther from target pixels". The teacher will diff
+                        # actual declarations later, never negate this delta.
+                        if candidate_html==html:continue
+                        save_example(f't{trajectory}-s{step}',candidate_html,candidate,[i,field,value])
+                        html,boxes=candidate_html,candidate;accepted=True
+                        last_corrupted=local_policy[-1];break
+                    if not accepted:break
+            if getattr(args,'clean_only',False):last_corrupted=local_policy[0]
+            if last_corrupted is None:raise ValueError('No verified corruption; page excluded, not silently clean-only')
+            page={**base,'screenshot':base['target_image'],'html':str(work/'reference.html'),
+                  'initial_html':last_corrupted['current_html'],'evaluation_target_boxes':target_boxes,
+                  'total_visible_nodes':dom['total_visible_nodes'],'selected_nodes':len(ids),
+                  'source_screenshot':source.get('screenshot'),'source_pixel_mae':source_mae,
+                  'construction':('clean normalization input; no corruption' if getattr(args,'clean_only',False)
+                                  else 'controlled same-DOM corruption; not screenshot-generated initial HTML')}
+            saved={'page':page,'policy':local_policy,'detection':local_detection};write_json(cache,saved)
+        return saved, None, False
+    except Exception as error:
+        failure={'id':source['id'],'error':str(error)}
+        write_json(work/'failure.json',failure)
+        return None, failure, False
+
+
 def build(args):
+    workers=getattr(args,"workers",1)
+    if workers<1:raise ValueError("workers must be positive")
     sources=list(read_jsonl(args.manifest))
     if not sources or min(args.trajectories,args.max_noise)<1:raise ValueError('Need nonempty manifest and positive trajectories/noise')
     sources=[{**r,'source_sha':digest(r['html'])} for r in sources];validate_splits(sources)
     if len({r['id'] for r in sources})!=len(sources):raise ValueError('Duplicate source IDs')
     out=Path(args.out).resolve()
     config={'kind':'visual-data-v7-cached-css-corruptions','contract':CONTRACT,'action_contract':ACTION_CONTRACT,
-            'sources':sources,'settings':{k:v for k,v in vars(args).items() if k not in ('out','resume')}}
+            'sources':sources,'settings':{k:v for k,v in vars(args).items() if k not in ('out','resume','workers')}}
     if not getattr(args,'clean_only',False):config['settings'].pop('clean_only',None)
     if any(r.get('hierarchy') for r in sources):raise ValueError('Use original parent-preserving HTML, not flat manifests')
     guard_run(out,config,args.resume)
     policy=[];detection=[];pages=[];errors=[]
-    with HtmlBrowser() as browser:
-        for index,source in enumerate(sources):
-            work=out/'pages'/hashlib.sha256(source['id'].encode()).hexdigest()[:20];work.mkdir(parents=True,exist_ok=True)
-            cache=work/'records.json'
-            if args.resume and cache.exists():
-                from .ir import read_json
-                saved=read_json(cache);policy+=saved['policy'];detection+=saved['detection'];pages.append(saved['page']);continue
-            rng=random.Random(args.seed+index);local_policy=[];local_detection=[]
-            try:
-                # A renderer crash must affect at most one source page. A fresh
-                # context also bounds memory retained by large real-world DOMs.
-                browser.reset_context()
-                viewport=source.get('viewport',[1280,800]);raw=Path(source['html']).read_text()
-                asset=Path(source['html']).parent/'rick.jpg'
-                if asset.exists():raw=embed_placeholder(raw,asset)
-                dom=browser.snapshot(raw,viewport,work/'target.png',args.max_nodes-1)
-                tree,target_boxes,_=dom_tree(dom);annotate(browser,tree)
-                from .explicit_html import feedback_metadata
-                target_feedback=feedback_metadata(browser,tree)
-                target_elements=elements(tree,target_boxes,viewport,target_feedback.get('current_clip_boxes'))
-                min_elements=getattr(args,'min_elements',1)
-                if len(target_elements)<min_elements:raise ValueError(f'Only {len(target_elements)} visible abstraction elements')
-                source_mae=None
-                if source.get('screenshot'):
-                    with Image.open(source['screenshot']) as reference,Image.open(work/'target.png') as rendered:
-                        if reference.size!=rendered.size:raise ValueError('Source screenshot and rerender dimensions differ')
-                        source_mae=float(np.abs(np.asarray(reference.convert('RGB'),dtype=np.float32)-
-                            np.asarray(rendered.convert('RGB'),dtype=np.float32)).mean()/255)
-                    max_source_mae=getattr(args,'max_source_mae',1.)
-                    if source_mae>max_source_mae:
-                        raise ValueError(f'Source rerender pixel MAE {source_mae:.4f} exceeds {max_source_mae}')
-                tagged=dom['html'];(work/'reference.html').write_text(tagged)
-                ids=[n['id'] for n in tree['nodes'][1:]];root=tree['nodes'][0]['id']
-                base={k:source[k] for k in ('id','group','split','source_sha')}
-                base.update(contract=CONTRACT,action_contract=ACTION_CONTRACT,viewport=viewport,target_image=str(work/'target.png'),
-                            target_abstract=str(work/'target-abstract.png'),
-                            teacher_strategy='unlabeled-css-corruption-v1',target_elements=target_elements)
-                abstract_image(target_elements,viewport,args.abstract_size).save(base['target_abstract'])
-                def observe():
-                    boxes=browser.tagged_boxes(ids);boxes[root]=[0,0,*viewport];return boxes
-                def save_example(name,current_html,boxes,corruption=None):
-                    current_tree=refresh_geometry(tree,boxes)
-                    from .explicit_html import feedback_screenshot
-                    screenshot=work/f'{name}.png';feedback_screenshot(browser,path=str(screenshot),animations='disabled')
-                    browser.screenshots+=1
-                    abstract=work/f'{name}-abstract.png'
-                    feedback=feedback_metadata(browser,tree)
-                    labels=elements(tree,boxes,viewport,feedback.get('current_clip_boxes'))
-                    abstract_image(labels,viewport,args.abstract_size).save(abstract)
-                    html_path=work/f'{name}.html';html_path.write_text(current_html)
-                    record={**base,'id':source['id']+'/'+name,'current':current_tree,'current_boxes':copy.deepcopy(boxes),
-                        'current_image':str(screenshot),'current_abstract':str(abstract),'current_html':str(html_path),
-                        'corruption_edit':corruption,**feedback}
-                    local_policy.append(record)
-                    local_detection.append({**base,'id':record['id'],'image':str(screenshot),'elements':labels})
-                browser.load(tagged,viewport);save_example('clean',tagged,target_boxes)
-                last_corrupted=None
-                for trajectory in range(0 if getattr(args,'clean_only',False) else args.trajectories):
-                    html=tagged;boxes=target_boxes
-                    for step in range(args.max_noise):
-                        accepted=False
-                        for attempt in range(30):
-                            from .tree_edits import FIELDS
-                            i=rng.randrange(1,len(tree['nodes']));fields=FIELDS
-                            if not fields:continue
-                            field=rng.choice(fields)
-                            value=rng.choice(ACTION_VALUES[field]);nid=tree['nodes'][i]['id']
-                            try:browser.edit_visual_action(html,viewport,nid,field,value)
-                            except Exception as exc:
-                                if isinstance(exc,ValueError) or 'Explicit ' in str(exc):continue
-                                raise
-                            candidate_html=browser.page.content();candidate=observe()
-                            # Corruption validity is syntactic/executable, not
-                            # "farther from target pixels". The teacher will diff
-                            # actual declarations later, never negate this delta.
-                            if candidate_html==html:continue
-                            save_example(f't{trajectory}-s{step}',candidate_html,candidate,[i,field,value])
-                            html,boxes=candidate_html,candidate;accepted=True
-                            last_corrupted=local_policy[-1];break
-                        if not accepted:break
-                if getattr(args,'clean_only',False):last_corrupted=local_policy[0]
-                if last_corrupted is None:raise ValueError('No verified corruption; page excluded, not silently clean-only')
-                page={**base,'screenshot':base['target_image'],'html':str(work/'reference.html'),
-                      'initial_html':last_corrupted['current_html'],'evaluation_target_boxes':target_boxes,
-                      'total_visible_nodes':dom['total_visible_nodes'],'selected_nodes':len(ids),
-                      'source_screenshot':source.get('screenshot'),'source_pixel_mae':source_mae,
-                      'construction':('clean normalization input; no corruption' if getattr(args,'clean_only',False)
-                                      else 'controlled same-DOM corruption; not screenshot-generated initial HTML')}
-                saved={'page':page,'policy':local_policy,'detection':local_detection};write_json(cache,saved)
-                pages.append(page);policy+=local_policy;detection+=local_detection
-            except Exception as error:errors.append({'id':source['id'],'error':str(error)})
-            print(f'[{index+1}/{len(sources)}] visual examples={len(policy)}, failures={len(errors)}',flush=True)
+    cache_hits=0
+    tasks=((args,out,index,source) for index,source in enumerate(sources))
+    for index,(saved,error,reused) in enumerate(page_map(_render_page,tasks,workers)):
+        if error:
+            errors.append(error)
+        else:
+            policy+=saved['policy'];detection+=saved['detection'];pages.append(saved['page'])
+            cache_hits+=int(reused)
+        print(f'[{index+1}/{len(sources)}] visual examples={len(policy)}, failures={len(errors)}, cache_hits={cache_hits}',flush=True)
+        write_json(out/'progress.json',dict(processed=index+1,total=len(sources),
+            pages=len(pages),failures=len(errors),cache_hits=cache_hits,workers=workers))
     for split in ('train','val','test'):
         write_jsonl(out/f'policy-{split}.jsonl',[r for r in policy if r['split']==split])
         write_jsonl(out/f'detector-{split}.jsonl',[r for r in detection if r['split']==split])

@@ -55,6 +55,7 @@ if [[ "$reuse_rendered" == 1 ]]; then
   echo "Reusing frozen rendered dataset: $data_dir/rendered"
 else
   python -m framediff visual-build-data --manifest "$data_dir/source/manifest.jsonl" --out "$data_dir/rendered" \
+    --workers "${RENDER_WORKERS:-${PREPARE_WORKERS:-1}}" \
     --abstract-size "$abs_size" --trajectories "${TRAJECTORIES:-3}" --max-noise "${MAX_NOISE:-4}" \
     --min-elements "${MIN_ELEMENTS:-3}" --max-source-mae "${MAX_SOURCE_MAE:-1.0}" --resume
 fi

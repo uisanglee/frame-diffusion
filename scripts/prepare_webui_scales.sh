@@ -14,6 +14,7 @@ python -m framediff visual-webui-scales-prepare --root "$raw" --out "$data" \
   --sizes "${sizes[@]}" --view "${WEBUI_VIEW:-default_1280-720}" --seed "${SEED:-42}" --resume
 # No historical 10K input, detector checkpoint or offline trajectories required.
 python -m framediff visual-build-data --manifest "$data/master/source/manifest.jsonl" \
+  --workers "${RENDER_WORKERS:-${PREPARE_WORKERS:-4}}" \
   --out "$data/master/rendered" --clean-only --abstract-size "${IMAGE_SIZE:-384}" \
   --seed "${SEED:-42}" --min-elements "${MIN_ELEMENTS:-3}" \
   --max-source-mae "${MAX_SOURCE_MAE:-1.0}" --resume

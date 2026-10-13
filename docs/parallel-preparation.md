@@ -5,6 +5,14 @@ with the same four source, detector, data-output and cache-output arguments
 used for your existing run. The default is 1. Both `visual-tree-normalize`
 and `visual-tree-freeze` also accept `--workers 4` directly.
 
+`visual-build-data --workers 4 --resume` also renders initial HTML in separate
+page processes. `prepare_webui_scales.sh` passes `PREPARE_WORKERS` to this stage;
+`RENDER_WORKERS` can override it independently. Existing `pages/*/records.json`
+files remain reusable: worker count is excluded from the configuration guard.
+Missing assets or unreadable completion records trigger page regeneration.
+`progress.json` and console output include `cache_hits`. Successful pages are
+checkpointed even before the aggregate manifests are written.
+
 Each worker owns its browser and processes a separate page. Normalization,
 candidate inspection within normalization, and fixed val/test corruption run
 in parallel. Detector caching remains on `CACHE_GPU`; its inference is not
