@@ -107,21 +107,6 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
                 stats['safe_size_conversion']=qa
                 if not qa['accepted']:raise ValueError('Safe size conversion failed preservation checks')
                 html=Path(temporary,'normalized.html').read_text()
-    from .box_layout import CONTRACT as BOX_CONTRACT
-    if getattr(cfg,'action_contract',None)==BOX_CONTRACT:
-        import tempfile
-        from .box_layout import convert
-        browser.load(html,viewport)
-        if browser.page.evaluate("document.documentElement.getAttribute('data-tuide-box-layout')")!=BOX_CONTRACT:
-            # Deployment converts the INITIAL HTML only. Target CSS is unavailable.
-            # Failed conversion returns the original input through rollout's guard.
-            t=time.perf_counter()
-            with tempfile.TemporaryDirectory(prefix='tuide-box-inference-') as temporary:
-                qa=convert(browser,html,viewport,temporary,tree,max_pixel_mae=.001)
-                stats['box_conversion']=qa
-                stats['box_conversion_seconds']=time.perf_counter()-t
-                if not qa['accepted']:raise ValueError('Initial HTML box conversion failed preservation checks')
-                html=Path(temporary,'normalized.html').read_text()
     t=time.perf_counter();browser.load(html,viewport);stats['layout_seconds']+=time.perf_counter()-t
     stats['_loaded']=True
     current_html=html;current_tree=copy.deepcopy(tree)

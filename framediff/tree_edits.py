@@ -1,7 +1,7 @@
 """Typed CSS subtree replacements, independent of rendered-image distance.
 
 Reference: revalo/tree-diffusion@e8b29f2, td/samplers/mutator.py.
-Our restricted tree has fixed DOM nodes and eight editable declaration children.
+Our restricted tree has fixed DOM nodes and six editable declaration children.
 No claim of minimum image distance, full HTML synthesis, or generic CSS parsing.
 """
 import copy
@@ -54,7 +54,7 @@ def keywords(field):
 
 
 def value_valid(value, field):
-    if field not in (*FIELDS,'x','y'): return False
+    if field not in FIELDS: return False
     if not isinstance(value, str) or len(value) > MAX_VALUE: return False
     if value in keywords(field): return True
     m = re.fullmatch(r'([+-]?(?:\d+(?:\.\d*)?|\.\d+))([a-z%]*)', value)
@@ -65,7 +65,7 @@ def value_valid(value, field):
 
 
 def value_prefix(value, field):
-    if field not in (*FIELDS,'x','y'): return False
+    if field not in FIELDS: return False
     if len(value) > MAX_VALUE: return False
     if any(k.startswith(value) for k in keywords(field)): return True
     sign = r'[+]?' if field in NONNEGATIVE_FIELDS else r'[+-]?'
@@ -278,17 +278,16 @@ def prepare(args):
 class EditTokenizer:
     """node → field → replacement value/absence → priority → EOS. No STOP."""
     def __init__(self, max_nodes, fields=FIELDS):
-        self.fields=tuple(fields);self.boxes=self.fields==('x','y','width','height')
+        self.fields=tuple(fields)
+        if self.fields != FIELDS:raise ValueError('Only width/height/margin actions are supported')
         self.tokens = ['PAD','BOS','EOS','SET','REMOVE','NORMAL','IMPORTANT']
         self.tokens += [f'N{i}' for i in range(max_nodes)] + list(self.fields)
         self.tokens += list('0123456789.+-%abcdefghijklmnopqrstuvwxyz')
-        if self.boxes:self.tokens=list(dict.fromkeys(self.tokens))
         self.ids = {t:i for i,t in enumerate(self.tokens)}
         self.max_nodes = max_nodes; self.max_length = MAX_VALUE + 5
 
     def encode(self, edit, node_count):
         node,field,value,priority = validate_edit(edit,node_count,self.fields)
-        if self.boxes and not value.endswith('px'):raise ValueError('Box policy requires px SET labels')
         text = [f'N{node}',field] + (['SET',*value,'IMPORTANT' if priority else 'NORMAL'] if value else ['REMOVE']) + ['EOS']
         return [self.ids[t] for t in text]
 
@@ -317,12 +316,6 @@ class EditTokenizer:
                 priority=state[int(p[0][1:])][self.fields.index(p[1])][1]
                 forbidden='NORMAL' if priority else 'IMPORTANT'
                 choices=[t for t in choices if t!=forbidden]
-        if self.boxes and len(p)>=2:
-            if len(p)==2:choices=['SET']
-            elif p[2]=='SET' and p[-1] not in ('NORMAL','IMPORTANT','EOS'):
-                value=''.join(p[3:])
-                choices=[c for c in choices if (value.endswith('px') if c in ('NORMAL','IMPORTANT') else
-                    bool(re.fullmatch(r'[+-]?\d*(?:\.\d*)?(?:p|px)?',value+c)))]
         if len(p)>=2:
             minimum=(size_limits or {}).get(int(p[0][1:]),{}).get(p[1])
             if minimum is not None:

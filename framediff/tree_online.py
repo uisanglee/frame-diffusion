@@ -161,6 +161,10 @@ def inspect_candidates(browser,target,html,diagnostics=None):
 
 def target_pool(rows, manifest=None, cache_dir=None, observation_size=384, diagnostics=None):
     if observation_size<1:raise ValueError('Invalid corruption observation size')
+    for row in rows:
+        settings=row.get('lazy_settings',{})
+        if row.get('recovery_contract') or row.get('box_layout_contract') or settings.get('box_layout') or settings.get('recover_normalization'):
+            raise ValueError('Retired normalization-recovery/xywh data; prepare safe size/margin labels')
     if any(r.get('lazy_contract') for r in rows):
         if not all(r.get('lazy_contract') and r['split']=='train' for r in rows):
             raise ValueError('Lazy train descriptors cannot be mixed with eager or held-out rows')
@@ -196,25 +200,10 @@ def target_pool(rows, manifest=None, cache_dir=None, observation_size=384, diagn
         for key in ('page_id','view'):
             if key in row:target[key]=row[key]
         for key in ('predicted_target_elements','parser_provenance','parser_sha','css_owners',
-                    'target_declaration_state','normalization_contract','recovery_contract','reference_html','recovery_report',
-                    'normalization_state','box_layout_contract'):
+                    'target_declaration_state','normalization_contract'):
             if key in row: target[key] = row[key]
         target.update(id=page_id,target_html=str(Path(html).resolve()),corruption_observation_size=observation_size)
         clean_state=row.get('target_declaration_state')
-        if target.get('box_layout_contract'):
-            target['visible_candidates']=[]
-            targets[page_id]=target
-            continue
-        if target.get('recovery_contract'):
-            from .normalization_recovery import CONTRACT as recovery_contract
-            if target['recovery_contract']!=recovery_contract:
-                raise ValueError('Rebuild old search-based recovery labels into a new directory')
-            target['visible_candidates']=[[i,f,'1px',state[FIELDS.index(f)][1]]
-                for i,state in enumerate(target['normalization_state']) if i
-                for f in FIELDS if state[FIELDS.index(f)][0]]
-            target['direct_recovery']=True
-            targets[page_id]=target
-            continue
         # Stylesheet preparation already parsed the clean program. Excluding
         # pages with no legal replacement sites here prevents unlucky batches
         # of permanently unusable pages from terminating online training.
@@ -232,7 +221,6 @@ def target_pool(rows, manifest=None, cache_dir=None, observation_size=384, diagn
     fingerprint = inspection_fingerprint() if cache_dir is not None else None
     try:
         for page_id, target in list(targets.items()):
-            if target.get('direct_recovery') or target.get('box_layout_contract'):continue
             html = Path(target['target_html']).read_text()
             with inspection_cache_entry(cache_dir, target, html, fingerprint) as entry:
                 state = None; error = None; cached = False;metadata={}
@@ -278,8 +266,7 @@ def target_pool(rows, manifest=None, cache_dir=None, observation_size=384, diagn
                 else:no_visible+=1
             else:
                 reason='usable'
-                if not target.get('recovery_contract'):target['target_declaration_state'] = state
-                if target.get('recovery_contract'):metadata.pop('target_elements',None)
+                target['target_declaration_state'] = state
                 target.update({k:v for k,v in metadata.items() if k!='inspection_diagnostics'})
                 for node,label in zip(target['current']['nodes'],metadata['visual_classes']):node['visual_class']=label
             record(dict(id=page_id,status='kept' if reason=='usable' else 'excluded',reason=reason,
@@ -350,7 +337,7 @@ def sample_mutation(state, viewport, rng, explicit=False, sites=None):
 
 
 class OnlineSampler:
-    def __init__(self, targets, mode, seed=42, max_noise=4, attempts=8, stop=None, parent_first=False, allow_clean=False):
+    def __init__(self, targets, mode, seed=42, max_noise=4, attempts=8, stop=None, parent_first=False):
         if mode not in ('abstract','screenshot') or min(max_noise,attempts)<1: raise ValueError('Invalid online configuration')
         self.targets=targets;self.mode=mode;self.seed=seed;self.max_noise=max_noise;self.attempts=attempts;self.stop=stop
         self.by_id={t['id']:t for t in targets}
@@ -359,7 +346,6 @@ class OnlineSampler:
         self.page_ids=sorted(self.by_page)
         self.browser=None
         self.parent_first=parent_first
-        self.allow_clean=allow_clean
         from .lazy_webui import TrainViewCache
         self.view_cache=TrainViewCache()
 
@@ -403,24 +389,12 @@ class OnlineSampler:
                 browser=self.browser;tree=target['current'];viewport=target['viewport']
                 browser.page.set_default_timeout(10000)
                 html=self.html(target['target_html'])
-                if target.get('box_layout_contract'):
-                    from .box_layout import generate
-                    browser.load(html,viewport)
-                    result=generate(browser,target,rng,index,self.max_noise,self.mode,self.parent_first)
-                    result['online'].update(seconds=time.perf_counter()-started,retries=attempt,errors=errors)
-                    if descriptor:
-                        from .lazy_webui import portable_images
-                        result=portable_images(result,('target_image','current_image'))
-                    return result
                 if 'visible_candidates' not in target:
                     inspected,metadata=inspect_candidates(browser,target,html)
-                    if target.get('recovery_contract'):
-                        metadata.pop('target_elements',None)
-                        target.update(metadata)
-                    else:target.update(metadata,target_declaration_state=inspected)
+                    target.update(metadata,target_declaration_state=inspected)
                     for node,label in zip(tree['nodes'],metadata['visual_classes']):node['visual_class']=label
                     self.clean_state.cache_clear()
-                if not target['visible_candidates'] and not target.get('direct_recovery'):raise ValueError('No visible corruption candidates')
+                if not target['visible_candidates']:raise ValueError('No visible corruption candidates')
                 clean=copy.deepcopy(target['target_declaration_state']) if descriptor else self.clean_state(target['id'])
                 browser.load(html,viewport)
                 from . import css_owners
@@ -436,14 +410,7 @@ class OnlineSampler:
                 clean_mask,clean_boxes,_=abstraction(browser,tree,viewport,size)
                 frame=clean_mask
                 state=state_now();noise=[];probe_rejections=0
-                recovery=bool(target.get('recovery_contract'))
-                if recovery:
-                    from .visual import semantic_masks
-                    clean_mask=semantic_masks(target['target_elements'],viewport,size)
-                # Include normalization-only states as well as combined corruption.
-                noise_count=0 if recovery and state!=clean and index%2==0 else rng.randint(1,self.max_noise)
-                if recovery and not target['visible_candidates']:noise_count=0
-                for _ in range(noise_count):
+                for _ in range(rng.randint(1,self.max_noise)):
                     if self.stop is not None and self.stop.is_set(): raise RuntimeError('Online producer stopped')
                     for trial in range(24):
                         eligible={(e[0],e[1]) for e in target['visible_candidates']}
@@ -465,11 +432,11 @@ class OnlineSampler:
                             if 'Explicit ' not in str(exc):raise
                             probe_rejections+=1;continue
                         after_mask,after_boxes,_=abstraction(browser,tree,viewport,size)
-                        if not recovery and (not changed(frame,after_mask) or (owner_mode and (before_values==css_owners.computed(browser,owners,mutation) or before_boxes==geometry()))):
+                        if (not changed(frame,after_mask) or (owner_mode and (before_values==css_owners.computed(browser,owners,mutation) or before_boxes==geometry()))):
                             apply([mutation[0],mutation[1],*old]);probe_rejections+=1;continue
                         frame=after_mask;state=state_now();noise.append(mutation);break
                 path=repair_path(state,clean,rng.getrandbits(64))
-                if not path and not (recovery and self.allow_clean): raise ValueError('Corruption returned to clean program')
+                if not path: raise ValueError('Corruption returned to clean program')
                 # Select an intermediate reverse-path state, not only the
                 # fully corrupted endpoint and not history in reverse order.
                 depth=rng.randrange(len(path)) if path else 0
@@ -478,26 +445,21 @@ class OnlineSampler:
                 remaining=path[depth:]
                 if sorted(remaining)!=sorted(repair_path(state,clean)):
                     raise ValueError('CSS execution changed the symbolic repair path')
-                if not remaining and not (recovery and self.allow_clean): raise ValueError('Sampled clean state has no next edit')
+                if not remaining: raise ValueError('Sampled clean state has no next edit')
                 frame,boxes,_=abstraction(browser,tree,viewport,size)
-                if not recovery and not changed(frame,clean_mask):raise ValueError('Remaining CSS differences have no abstraction effect')
+                if not changed(frame,clean_mask):raise ValueError('Remaining CSS differences have no abstraction effect')
                 # Reversing other edits can make a formerly active declaration
                 # invisible. Do not emit an unobservable next-action label.
                 teacher=None
                 for teacher in remaining:
-                    if recovery:break
                     old=state[teacher[0]][FIELDS.index(teacher[1])]
                     apply(teacher)
                     next_frame,_,_=abstraction(browser,tree,viewport,size)
                     apply([teacher[0],teacher[1],*old])
                     if changed(frame,next_frame):break
                 else:
-                    if not recovery:raise ValueError('No abstraction-changing reverse label')
-                if self.parent_first and recovery and remaining:
-                    from .parent_first import owner_order
-                    order={v:i for i,v in enumerate(owner_order(tree,owners))}
-                    teacher=min(remaining,key=lambda e:order.get(e[0],len(order)))
-                if self.parent_first and not recovery:
+                    raise ValueError('No abstraction-changing reverse label')
+                if self.parent_first:
                     from .parent_first import improving_teacher
                     teacher,gain=improving_teacher(browser,tree,viewport,size,state,remaining,clean_mask,owners)
                     if teacher is None:raise ValueError('No strictly improving parent-first reverse label')
@@ -507,11 +469,6 @@ class OnlineSampler:
                         'replacement_edit':teacher,
                         'teacher_strategy':css_owners.CONTRACT if owner_mode else CONTRACT,'symbolic_distance':len(remaining),
                         'corruption_contract':ONLINE_CONTRACT}
-                if recovery:
-                    result['symbolic_reference']='original_declarations'
-                    result['normalization_error_included']=True
-                    result['supervision_available']=teacher is not None
-                    if teacher is None:result['supervision_reason']='no_supported_declaration_difference'
                 from .explicit_html import feedback_metadata
                 result.update(feedback_metadata(browser,tree))
                 if owner_mode:
@@ -528,9 +485,7 @@ class OnlineSampler:
                                   'corruptions':noise,'reverse_prefix':depth,'path_length':len(path),
                                   'screenshot_captures':int(self.mode=='screenshot'),
                                   'seconds':time.perf_counter()-started,'errors':errors}
-                if recovery:result['online'].update(normalization_only=noise_count==0,
-                    label_source='original_declaration_journal',teacher_search=False)
-                if self.parent_first and not recovery:
+                if self.parent_first:
                     result['online'].update(parent_first=True,parent_first_gain=gain)
                 if owner_mode and teacher is not None:
                     result['online'].update(probe_rejections=probe_rejections,

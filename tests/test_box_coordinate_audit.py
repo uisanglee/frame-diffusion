@@ -7,7 +7,7 @@ from PIL import Image
 from framediff.html_bridge import HtmlBrowser
 from framediff.plans import dom_tree
 from framediff.visual import annotate
-from framediff.box_layout import convert
+from framediff.safe_sizes import convert
 
 CASES={
  'fractional_border':('<div class="p"><div class="c">child</div></div>',
@@ -42,7 +42,7 @@ def test_coordinate_audit(tmp_path,name):
         browser.page.evaluate('window.scrollTo(0,200)')
         before_scroll=browser.page.screenshot()
         browser.page.evaluate('window.scrollTo(0,0)')
-        qa=convert(browser,source,[400,300],tmp_path/name,tree,max_pixel_mae=.001,max_box_error=.1)
+        qa=convert(browser,source,[400,300],tmp_path/name,target_tree=tree,max_pixel_mae=.001,max_box_error=.1)
         after=browser.page.screenshot(full_page=True)
         browser.page.evaluate('window.scrollTo(0,200)')
         after_scroll=browser.page.screenshot()
@@ -91,10 +91,10 @@ def test_scroll_budget_is_not_silent_acceptance(tmp_path):
             capture(browser,tmp_path,max_frames=2)
 
 
-def test_sticky_is_explicitly_rejected(tmp_path):
+def test_sticky_flow_is_preserved(tmp_path):
     with HtmlBrowser() as browser:
         dom=browser.snapshot('<html><body><div style="position:sticky;top:0">sticky</div><div style="height:500px"></div></body></html>',[400,300],None,32)
         tree,_,_=dom_tree(dom);annotate(browser,tree)
-        report=convert(browser,browser.page.content(),[400,300],tmp_path,tree)
-        assert not report['accepted']
-        assert report['errors'][0]['reason']=='unsupported_transform_or_sticky'
+        report=convert(browser,browser.page.content(),[400,300],tmp_path,target_tree=tree)
+        assert report['accepted'], report
+        assert browser.page.locator('div').first.evaluate('e=>getComputedStyle(e).position')=='sticky'

@@ -55,7 +55,6 @@ class TreeConfig:
     # False keeps historical checkpoints loadable. New stylesheet training opts
     # in explicitly; inference then cannot add absent declarations/overrides.
     existing_values_only: bool = False
-    restore_original_priority: bool = False
     safe_sizes: bool = False
     abstraction_contract: str = BOUNDARY_CONTRACT
     parent_first: bool = False
@@ -66,16 +65,14 @@ class TreeConfig:
         if self.abstraction_contract!=BOUNDARY_CONTRACT:
             raise ValueError('Retrain abstract policy for occupancy+boundary inputs')
         from .css_owners import CONTRACT as OWNER_CONTRACT
-        from .box_layout import CONTRACT as BOX_CONTRACT
-        if self.mode not in ('abstract','screenshot') or self.action_contract not in ((OWNER_CONTRACT,BOX_CONTRACT) if self.stylesheets else (CONTRACT,)) or self.policy_head != 'replacement':
+        if self.mode not in ('abstract','screenshot') or self.action_contract not in ((OWNER_CONTRACT,) if self.stylesheets else (CONTRACT,)) or self.policy_head != 'replacement':
             raise ValueError('Replacement policy contract mismatch')
         if self.size < 32 or min(self.hidden,self.layers,self.heads,self.max_nodes,self.token_grid)<1 or self.hidden%self.heads:
             raise ValueError('Invalid model dimensions')
 
     @property
     def fields(self):
-        from .box_layout import CONTRACT as BOX_CONTRACT,FIELDS as BOX_FIELDS
-        return BOX_FIELDS if self.action_contract==BOX_CONTRACT else FIELDS
+        return FIELDS
 
     @property
     def semantic(self): return self.mode == 'abstract'
@@ -163,7 +160,7 @@ class TreePolicy(nn.Module):
             allowed=self.tokenizer.allowed(prefix,len(states[0]),
                 state=states[0] if self.cfg.existing_values_only else None,
                 size_limits=batch.get('explicit_owner_limits',[{}])[0],
-                preserve_priority=not self.cfg.restore_original_priority)
+                preserve_priority=True)
             if not prefix and allowed_owners is not None:
                 permitted={self.tokenizer.ids[f'N{i}'] for i in allowed_owners}
                 allowed=[v for v in allowed if v in permitted]
@@ -325,15 +322,10 @@ def train(args):
     if args.resume and args.init_checkpoint: raise ValueError('Choose resume OR init-checkpoint')
     if getattr(args,'prediction_probability',0): raise ValueError('Use --predicted-targets; stochastic legacy target mixing is retired')
     training=list(read_jsonl(args.train));validation=list(read_jsonl(args.val))
-    supervision_counts={}
-    for name,rows in [('train',training),('validation',validation)]:
-        supervision_counts[name]=dict(available=len(rows),no_supervised_edit=sum(
-            r.get('supervision_available') is False for r in rows))
-    training=[r for r in training if r.get('supervision_available') is not False]
-    validation=[r for r in validation if r.get('supervision_available') is not False]
-    if any(v['no_supervised_edit'] for v in supervision_counts.values()):
-        print({'ce_supervision_coverage':supervision_counts,
-               'note':'No-label rows remain in prepared rollout manifests; excluded only from CE.'},flush=True)
+    for row in training+validation:
+        settings=row.get('lazy_settings',{})
+        if row.get('recovery_contract') or row.get('box_layout_contract') or settings.get('box_layout') or settings.get('recover_normalization') or row.get('supervision_available') is False:
+            raise ValueError('Retired recovery/xywh or unsupervised labels; prepare safe size/margin data')
     if not training or not validation: raise ValueError('Nonempty train and validation data required')
     normalizations={r.get('normalization_contract') for r in training+validation}
     if len(normalizations)>1:raise ValueError('Mixed normalized/original policy data; prepare matching train and validation')
@@ -352,12 +344,8 @@ def train(args):
     if getattr(args,'stylesheets',False):
         from .css_owners import CONTRACT as OWNER_CONTRACT
         cfg.stylesheets=True;cfg.action_contract=OWNER_CONTRACT
-        from .box_layout import CONTRACT as BOX_CONTRACT
-        if next(iter(normalizations))==BOX_CONTRACT:cfg.action_contract=BOX_CONTRACT
         cfg.__post_init__()
         cfg.existing_values_only=True
-        cfg.restore_original_priority=any(r.get('recovery_contract') or
-            r.get('lazy_settings',{}).get('recover_normalization') for r in training)
     tok=EditTokenizer(cfg.max_nodes,cfg.fields)
     for row in training+validation:
         if row.get('lazy_contract'):
@@ -393,7 +381,6 @@ def train(args):
         config.pop('parent_first');settings.pop('parent_first',None)
         config.pop('parent_first_max_probes');settings.pop('parent_first_max_probes',None)
     if not cfg.existing_values_only:config.pop('existing_values_only')
-    if not cfg.restore_original_priority:config.pop('restore_original_priority')
     if not cfg.stylesheets:
         config.pop('stylesheets');settings.pop('stylesheets',None)
     # Resource tuning does not change the index-seeded sample stream.
@@ -543,13 +530,9 @@ def train(args):
                          'validation_n':len(selected),'validation_available_n':len(validation),
                          'validation_complete':len(selected)==len(validation),
                          'validation_pages':len({r.get('page_id',r['id'].rsplit('/',1)[0]) for r in selected}),
-                         'ce_supervision_coverage':supervision_counts,
                          'best':best,'early_stopping':early}
                 if cfg.parent_first:metrics['parent_first']=True
                 if cfg.stylesheets:metrics['validation_by_teacher']=breakdown
-                if any(r.get('recovery_contract') for r in selected):
-                    metrics.update(target_reference='pre_normalization_server_render',
-                                   symbolic_reference='original_declarations')
                 if metric_rows:
                     metric_started=time.perf_counter()
                     metrics.update(symbolic_policy_metrics(net,metric_rows,metric_targets,device,

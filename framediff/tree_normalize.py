@@ -21,28 +21,14 @@ from .preparation_workers import page_map, write_json, write_jsonl
 
 def _prepare_page(task):
     args, out, split, index, page_id, row, pages = task
-    if getattr(args,'box_layout',False) and getattr(args,'recover_normalization',False):
-        raise ValueError('Box layout and normalization-error recovery are separate protocols')
     if row.get('lazy_contract'):
         if split!='train':raise ValueError('Lazy held-out normalization is forbidden')
         settings={**row['lazy_settings'],**{k:getattr(args,k) for k in
             ('max_css_owners','observation_size','max_pixel_mae','max_box_error')}}
         contract=CONTRACT
-        if getattr(args,'recover_normalization',False):
-            from .normalization_recovery import CONTRACT as contract
-            settings.update(recover_normalization=True)
-        if getattr(args,'box_layout',False):
-            from .box_layout import CONTRACT as contract
-            settings.update(box_layout=True)
         new={**row,'lazy_settings':settings,'normalization_contract':contract,
-             'teacher_strategy':contract if getattr(args,'box_layout',False) else css_owners.CONTRACT}
+             'teacher_strategy':css_owners.CONTRACT}
         return new,{**pages[page_id],**new,'id':page_id},None
-    if getattr(args,'box_layout',False):
-        from .box_layout import prepare_page
-        return prepare_page(task)
-    if getattr(args,'recover_normalization',False):
-        from .normalization_recovery import prepare_page
-        return prepare_page(task)
     folder=out/'normalized-pages'/split/hashlib.sha256(page_id.encode()).hexdigest()
     folder.mkdir(parents=True,exist_ok=True)
     html_path=Path(row['current_html'] if row['id'].endswith('/clean') else row['target_html'])
@@ -171,19 +157,6 @@ def prepare(args):
         max_css_owners=args.max_css_owners,observation_size=args.observation_size,
         max_pixel_mae=args.max_pixel_mae,max_box_error=args.max_box_error,
         corruption=ONLINE_CONTRACT,sampling=SAMPLING_CONTRACT)
-    if getattr(args,'recover_normalization',False):
-        from .normalization_recovery import CONTRACT as recovery_contract
-        reuse=getattr(args,'reuse_normalized',None)
-        if reuse and Path(reuse).resolve()==out:raise ValueError('Reuse old cache in a separate output directory')
-        config.update(recovery_contract=recovery_contract,
-                      reuse_normalized=str(Path(reuse).resolve()) if reuse else None)
-    if getattr(args,'box_layout',False):
-        if getattr(args,'recover_normalization',False):raise ValueError('Choose box layout OR recovery mode')
-        from .box_layout import CONTRACT as box_contract
-        config.update(box_layout=box_contract,normalization=box_contract,corruption=box_contract,
-                      sampling='box-site-uniform-px-v1',
-                      box_scroll_guard_sha=digest(Path(__file__).with_name('box_scroll_guard.py')),
-                      box_converter_sha=digest(Path(__file__).with_name('box_layout.py')))
     guard_run(out,config,args.resume)
     report={};all_rows=[]
     # Per-page normalization closes its browser before the corruption sampler
@@ -235,14 +208,6 @@ def prepare(args):
                 'rejected':clean_pages-kept_pages,'rejected_views':len(errors),'top_errors':reasons.most_common(10),
                 'kept_with_frozen_sizes':sum((r.get('normalization_stats',{}).get('normalized_elements') or 0)>0 for r in kept),
                 'kept_without_frozen_sizes':sum((r.get('normalization_stats',{}).get('normalized_elements') or 0)==0 for r in kept)}
-            if getattr(args,'recover_normalization',False):
-                recovered=[r for r in kept if r.get('recovery_contract')]
-                report[split].update(target_reference='pre_normalization_server_render',
-                    reused_normalization=sum(r.get('normalization_stats',{}).get('reused_normalization',False) for r in recovered),
-                    kept_with_normalization_changes=sum(bool(r['recovery_report']['changes']) for r in recovered),
-                    ce_supervised_rows=sum(r.get('supervision_available') is True for r in recovered),
-                    rollout_only_rows=sum(r.get('supervision_available') is False for r in recovered),
-                    label_source='original_declaration_journal',teacher_search=False)
             if any(r.get('lazy_contract') for r in kept):
                 report[split].update(status='deferred',pending_pages=kept_pages,pending_views=len(kept),
                     verified_pages=0,kept_with_frozen_sizes=0,kept_without_frozen_sizes=0)

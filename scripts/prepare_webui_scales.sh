@@ -9,6 +9,10 @@ if [[ $# != 2 ]]; then
 fi
 raw=$1
 data=$2
+if [[ "${BOX_LAYOUT:-0}" != 0 || "${RECOVER_NORMALIZATION:-0}" != 0 || -n "${REUSE_NORMALIZED:-}" ]]; then
+  echo 'Retired normalization/xywh options: use safe size/margin preparation with a new labels directory.' >&2
+  exit 2
+fi
 read -r -a sizes <<< "${WEBUI_SIZES:-7000 70000}"
 source "$repo_root/scripts/webui_views.sh"
 split_options=()
@@ -28,21 +32,12 @@ python -m framediff visual-build-data --manifest "$data/master/source/manifest.j
   --out "$data/master/rendered" --clean-only --lazy-train --abstract-size "${IMAGE_SIZE:-384}" \
   --seed "${SEED:-42}" --min-elements "${MIN_ELEMENTS:-3}" \
   --max-source-mae "${MAX_SOURCE_MAE:-1.0}" --resume
-recovery_options=()
-if [[ "${BOX_LAYOUT:-0}" == 1 && "${RECOVER_NORMALIZATION:-0}" == 1 ]]; then
-  echo 'Choose BOX_LAYOUT or RECOVER_NORMALIZATION, not both' >&2; exit 2
-fi
-if [[ "${BOX_LAYOUT:-0}" == 1 ]]; then recovery_options=(--box-layout); fi
-if [[ "${RECOVER_NORMALIZATION:-0}" == 1 ]]; then
-  recovery_options=(--recover-normalization)
-  if [[ -n "${REUSE_NORMALIZED:-}" ]]; then recovery_options+=(--reuse-normalized "$REUSE_NORMALIZED"); fi
-fi
 python -m framediff visual-tree-normalize --rendered "$data/master/rendered" \
   --out "$data/master/labels" --workers "${PREPARE_WORKERS:-4}" \
   --seed "${SEED:-42}" --max-css-owners "${MAX_CSS_OWNERS:-512}" \
   --observation-size "${IMAGE_SIZE:-384}" \
   --max-pixel-mae "${NORMALIZE_MAX_PIXEL_MAE:-0.01}" \
-  --max-box-error "${NORMALIZE_MAX_BOX_ERROR:-1}" "${recovery_options[@]}" --resume
+  --max-box-error "${NORMALIZE_MAX_BOX_ERROR:-1}" --resume
 python -m framediff visual-tree-freeze --rendered "$data/master/labels" \
   --out "$data/master/css" --workers "${PREPARE_WORKERS:-4}" \
   --samples-per-page "${FIXED_SAMPLES_PER_PAGE:-1}" --max-noise "${ONLINE_MAX_NOISE:-4}" \

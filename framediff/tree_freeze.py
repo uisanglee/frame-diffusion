@@ -10,6 +10,18 @@ from .web_experiment import guard_run,digest
 from .preparation_workers import page_map, write_json, write_jsonl
 
 
+def _inspect_page(task):
+    row, cache, size = task
+    diagnostics=[]
+    try:
+        return target_pool([{**row,'split':'train'}],cache_dir=cache,
+                           observation_size=size,diagnostics=diagnostics), None
+    except ValueError as exc:
+        if not hasattr(exc,'diagnostics'):raise
+        return [], {'id':row['id'].rsplit('/',1)[0], 'stage':'candidate_inspection',
+                    'error':str(exc), 'diagnostics':diagnostics}
+
+
 def _freeze_page(task):
     args,out,split,index,target = task
     page_dir=out/split/hashlib.sha256(target['id'].encode()).hexdigest()
@@ -22,7 +34,7 @@ def _freeze_page(task):
             if not Path(row['current_html']).is_file() or not Path(row['current_image']).is_file():
                 raise ValueError('Incomplete frozen page assets')
     else:
-        sampler=OnlineSampler([target],'screenshot',seed=args.seed,max_noise=args.max_noise,allow_clean=True)
+        sampler=OnlineSampler([target],'screenshot',seed=args.seed,max_noise=args.max_noise)
         new=[]
         try:
             page_dir.mkdir(parents=True,exist_ok=True)
@@ -46,18 +58,17 @@ def freeze(args):
     if out==source or source in out.parents:raise ValueError('Use a separate frozen-data output directory')
     if args.samples_per_page<1:raise ValueError('samples-per-page must be positive')
     files=[source/f'{kind}-{split}.jsonl' for split in ('train','val','test') for kind in ('policy','pages')]
-    from .box_layout import CONTRACT as BOX_CONTRACT
     train_rows=list(read_jsonl(source/'policy-train.jsonl'))
     contracts={r.get('teacher_strategy') for r in train_rows}
-    if not contracts or not contracts <= {CONTRACT,BOX_CONTRACT} or len(contracts)!=1:
+    if contracts != {CONTRACT}:
         raise ValueError('Prepare nonempty, matching action-contract labels first')
-    corruption_contract=BOX_CONTRACT if BOX_CONTRACT in contracts else ONLINE_CONTRACT
+    corruption_contract=ONLINE_CONTRACT
     guard_run(out,{'kind':CONTRACT+'-fixed-v1','corruption_contract':corruption_contract,
         'data':{str(p):digest(p) for p in files},
         'seed':args.seed,'max_noise':args.max_noise,'samples':args.samples_per_page,
         'observation_size':getattr(args,'observation_size',384)},args.resume)
     # Online training needs clean targets, not fresh stored train screenshots.
-    if any(r.get('teacher_strategy') not in (CONTRACT,BOX_CONTRACT) for r in read_jsonl(source/'policy-train.jsonl')):
+    if any(r.get('teacher_strategy') != CONTRACT for r in read_jsonl(source/'policy-train.jsonl')):
         raise ValueError('Prepare --stylesheets labels with the current size/margin action contract first')
     for kind in ('policy','pages'):
         write_jsonl(out/f'{kind}-train.jsonl',list(read_jsonl(source/f'{kind}-train.jsonl')))
@@ -67,10 +78,15 @@ def freeze(args):
         if any(r['teacher_strategy'] not in contracts for r in rows):raise ValueError('Prepare matching labels first')
         # target_pool's train guard is for the actual training stream. This
         # command intentionally samples held-out pages and restores their split.
-        pool=target_pool([{**r,'split':'train'} for r in rows],cache_dir=source/'.online-target-cache',
-                         observation_size=getattr(args,'observation_size',384))
+        pool=[];inspection_errors=[]
+        unique={}
+        for row in rows:unique.setdefault(row['id'].rsplit('/',1)[0],row)
+        tasks=((r,source/'.online-target-cache',getattr(args,'observation_size',384)) for r in unique.values())
+        for inspected,failure in page_map(_inspect_page,tasks,workers):
+            pool.extend(inspected)
+            if failure:inspection_errors.append(failure)
         pages={p['id']:p for p in read_jsonl(source/f'pages-{split}.jsonl')}
-        kept=[];selected=[];errors=[];counts=Counter()
+        kept=[];selected=[];errors=list(inspection_errors);counts=Counter()
         tasks=((args,out,split,index,target) for index,target in enumerate(pool))
         for index,(new,failure) in enumerate(page_map(_freeze_page,tasks,workers)):
             target=pool[index]

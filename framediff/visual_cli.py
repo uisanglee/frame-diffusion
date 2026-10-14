@@ -22,10 +22,6 @@ def add_parsers(sub):
     p.add_argument('--observation-size',type=int,default=384)
     p.add_argument('--max-pixel-mae',type=float,default=.01)
     p.add_argument('--max-box-error',type=float,default=1.)
-    p.add_argument('--recover-normalization',action='store_true',help='Keep pre-normalization render as goal and learn normalization+corruption recovery')
-    p.add_argument('--box-layout',action='store_true',help='Preserve DOM hierarchy, bake measured parent-relative x/y/width/height, verify rendering')
-    p.add_argument('--recovery-fit-steps',type=int,default=16,help='Deprecated, ignored: labels now restore original declarations directly')
-    p.add_argument('--reuse-normalized',help='Read-only old normalization cache; new output required')
     p.add_argument('--limit-pages',type=int,default=0,help='Smoke check: maximum pages per split; 0 means all')
     from .css_diffusion_experiment import add_parsers as add_css_diffusion_parsers
     add_css_diffusion_parsers(sub)
