@@ -153,6 +153,32 @@ class TreePolicy(nn.Module):
         return loss,int((labels!=-100).sum())
 
     @torch.no_grad()
+    def predict_batch(self,batch,target,current,states,allowed_owners=None):
+        """Greedy grammar decoding for independent pages sharing one model."""
+        memory,padding=self.memory(batch,target,current,states)
+        prefixes=[[] for _ in states];finished=[False]*len(states);results=[None]*len(states)
+        restrictions=allowed_owners or [None]*len(states)
+        limits=batch.get('explicit_owner_limits',[{} for _ in states])
+        for _ in range(self.tokenizer.max_length):
+            tokens=torch.tensor([[self.tokenizer.ids['BOS'],*p] for p in prefixes],device=target.device)
+            scores=self.logits(memory,padding,tokens)[:,-1]
+            for i,state in enumerate(states):
+                if finished[i]:
+                    prefixes[i].append(self.tokenizer.ids['EOS']);continue
+                allowed=self.tokenizer.allowed(prefixes[i],len(state),
+                    state=state if self.cfg.existing_values_only else None,
+                    size_limits=limits[i],preserve_priority=True)
+                if not prefixes[i] and restrictions[i] is not None:
+                    permitted={self.tokenizer.ids[f'N{n}'] for n in restrictions[i]}
+                    allowed=[v for v in allowed if v in permitted]
+                if not allowed:raise ValueError('No grammar-valid continuation')
+                token=allowed[int(scores[i,allowed].argmax())];prefixes[i].append(token)
+                if token==self.tokenizer.ids['EOS']:
+                    results[i]=self.tokenizer.decode(prefixes[i],len(state));finished[i]=True
+            if all(finished):return results
+        raise ValueError('Replacement exceeded grammar token limit')
+
+    @torch.no_grad()
     def predict(self,batch,target,current,states,encoded_pair=None,allowed_owners=None):
         if len(states)!=1: raise ValueError('Rollout decoder takes one page at a time')
         memory,padding=self.memory(batch,target,current,states,encoded_pair);prefix=[]

@@ -80,7 +80,8 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
     if cfg.mode=='abstract':
         if oracle_elements is None:
             if parser is None:raise ValueError('Predicted abstraction needs detector')
-            items=detect(parser,detector_input(target_path),threshold);stats['abstraction_calls']=1
+            items=(parser.detect_items(target_path,threshold) if hasattr(parser,'detect_items')
+                   else detect(parser,detector_input(target_path),threshold));stats['abstraction_calls']=1
             if not items:raise ValueError('Target abstraction detector found no elements; inspect detector validation/threshold')
         else:items=oracle_elements
         target=abstract_image(items,viewport,cfg.size)

@@ -40,10 +40,34 @@ with isolated page contexts. Worker count may change on resume. Successful
 per-page records are reused; incomplete pages are retried. Original rendering
 uses `RENDER_WORKERS`. Lazy train pages are materialized by online workers.
 
-These switches do not parallelize final test rollouts. Training validation CE
-uses batches under no-grad; symbolic decoding and final browser rollout are
-separate costs. Fixed test rollout is still sequential over pages, with its
-existing per-page resume cache. No end-to-end speedup factor is claimed.
+Training validation CE uses batches under no-grad; symbolic decoding and final
+browser rollout are separate costs. No end-to-end speedup factor is claimed.
+
+### Parallel frozen test rollout
+
+`visual-test-rollout --workers 4 --inference-batch-size 4 --batch-wait-ms 10
+--resume` runs CPU-only browser processes. The coordinator alone owns the GPU
+policy/detector; it batches ready requests by model, including autoregressive
+token decoding. Each page still executes edits sequentially with the existing
+MAE rollback, parent-first option and scroll guard. Batch size is an upper bound,
+not a requirement to wait indefinitely for other pages. Legacy non-replacement
+policies must use `--workers 1` (the CLI default).
+
+`run_webui_scale.sh` passes `ROLLOUT_WORKERS` (default 4), `ROLLOUT_BATCH_SIZE`
+(default 4), and `ROLLOUT_BATCH_WAIT_MS` (default 10). These resource settings
+may change on resume without changing the experiment configuration. A completed
+page's result is committed atomically after all methods/repeats; missing or
+truncated result manifests and missing HTML/PNG/trace files cause that page to be
+rerun. Earlier complete pages, including recorded failed rollouts, are retained.
+No claim is made that floating-point greedy decisions are bit-identical across
+all devices/batch shapes. A positive wall-clock time budget includes queue wait,
+so batch/worker changes can also affect budget-limited action counts.
+
+`execution.json` records this invocation's wall time, reused pages, actual batch
+counts and maximum observed batch. Parallel page latency includes queue wait;
+cached rows keep their original timing. Use a fresh output with `--workers 1`
+for isolated method-latency comparisons, and wall time for throughput comparisons.
+The browser and data caches are not deleted on interruption; rerun with `--resume`.
 
 The `css-owner-tree-v2` policy edits six declarations (width, height and four
 physical margins) on DOM inline styles **and embedded `<style>` rules**. An owner

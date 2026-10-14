@@ -10,6 +10,32 @@ fi
 size=$1
 data=$2
 runs=$3
+# Shared experiment defaults; caller-provided environment values take precedence.
+# Export these so the nested policy scripts receive the same configuration.
+export STAGE="${STAGE:-all}"
+export POLICY_SCALE="${POLICY_SCALE:-s}"
+export POLICY_MODES="${POLICY_MODES:-abstract screenshot}"
+export BATCH_SIZE="${BATCH_SIZE:-2}"
+export ACCUMULATION="${ACCUMULATION:-4}"
+export DETECTOR_STEPS="${DETECTOR_STEPS:-20000}"
+export DETECTOR_LR="${DETECTOR_LR:-0.0001}"
+export POLICY_STAGE1_STEPS="${POLICY_STAGE1_STEPS:-30000}"
+export POLICY_STAGE2_STEPS="${POLICY_STAGE2_STEPS:-15000}"
+export POLICY_LR="${POLICY_LR:-0.0001}"
+export POLICY_STAGE2_LR="${POLICY_STAGE2_LR:-0.00001}"
+export VAL_SAMPLES="${VAL_SAMPLES:-2000}" # Set 0 explicitly to use all validation views.
+export EVAL_EVERY="${EVAL_EVERY:-500}"
+export EARLY_STOP_PATIENCE="${EARLY_STOP_PATIENCE:-10}"
+export EARLY_STOP_MIN_DELTA="${EARLY_STOP_MIN_DELTA:-0}"
+export ONLINE_WORKERS="${ONLINE_WORKERS:-2}"
+export ONLINE_PREFETCH="${ONLINE_PREFETCH:-4}"
+export PARENT_FIRST="${PARENT_FIRST:-0}"
+export SEED="${SEED:-42}"
+export REPAIR_STEPS="${REPAIR_STEPS:-20}"
+export REPEATS="${REPEATS:-3}"
+export ROLLOUT_WORKERS="${ROLLOUT_WORKERS:-4}"
+export ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-4}"
+export ROLLOUT_BATCH_WAIT_MS="${ROLLOUT_BATCH_WAIT_MS:-10}"
 [[ "$size" =~ ^[0-9]+$ ]] || { echo 'SIZE must be numeric' >&2; exit 2; }
 base="$data/$size"
 output="$runs/$size"
@@ -18,7 +44,6 @@ common=$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["common_
 stage=${STAGE:-all}
 case "$stage" in all|detector|policy|evaluate) ;; *) echo 'STAGE must be all, detector, policy, or evaluate' >&2; exit 2;; esac
 device=${DEVICE:-cuda}
-export VAL_SAMPLES=${VAL_SAMPLES:-0} # All available validation views; 0 is unlimited.
 detector="$output/detector/best.pt"
 if [[ "$stage" == all || "$stage" == detector ]]; then
   options=()
@@ -30,7 +55,7 @@ if [[ "$stage" == all || "$stage" == detector ]]; then
     --batch-size "${BATCH_SIZE:-2}" --accumulation "${ACCUMULATION:-4}" \
     --val-samples "${VAL_SAMPLES:-2000}" --eval-every "${EVAL_EVERY:-500}" \
     --early-stop-patience "${EARLY_STOP_PATIENCE:-10}" \
-    --early-stop-min-delta "${EARLY_STOP_MIN_DELTA:-0}" "${options[@]}"
+    --early-stop-min-delta "${EARLY_STOP_MIN_DELTA:-0}" ${options[@]+"${options[@]}"}
   for population in own common; do
     testbase=$base
     [[ "$population" == common ]] && testbase="$data/$common"
@@ -61,7 +86,9 @@ if [[ "$stage" == all || "$stage" == evaluate ]]; then
       python -m framediff visual-test-rollout --data "$testbase/css/policy-test.jsonl" \
         --pages "$testbase/css/pages-test.jsonl" "$flag" "$checkpoint" \
         --detector-checkpoint "$detector" --out "$output/eval-${POLICY_SCALE:-s}-$mode-$population" \
-        --device "$device" --steps "${REPAIR_STEPS:-20}" --repeats "${REPEATS:-1}" --resume
+        --device "$device" --steps "$REPAIR_STEPS" --repeats "$REPEATS" \
+        --workers "${ROLLOUT_WORKERS:-4}" --inference-batch-size "${ROLLOUT_BATCH_SIZE:-4}" \
+        --batch-wait-ms "${ROLLOUT_BATCH_WAIT_MS:-10}" --resume
     done
   done
 fi

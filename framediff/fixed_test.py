@@ -13,7 +13,8 @@ import torch
 
 from . import css_owners
 from .html_bridge import HtmlBrowser
-from .ir import read_json, read_jsonl, write_json, write_jsonl
+from .ir import read_json, read_jsonl
+from .preparation_workers import write_json, write_jsonl
 from .metrics import box_metrics
 from .train import select_device
 from .visual import load_policy
@@ -135,6 +136,77 @@ def checkpoint_overlap(row, checkpoints):
     return False
 
 
+def evaluate_page(args,row,page,out,browser,methods,parser):
+    page_id=row['id'].rsplit('/',1)[0]
+    work=out/'pages'/signature(row['id'])[:20];work.mkdir(parents=True,exist_ok=True)
+    target_boxes=page['evaluation_target_boxes'];viewport=row['viewport'];tree=row['current']
+    root=tree['nodes'][0]['id'];initial_html=Path(row['current_html']).read_text()
+    shutil.copyfile(row['target_image'],work/'target.png')
+    shutil.copyfile(row['current_image'],work/'initial.png')
+    (work/'target.html').write_text(Path(row['target_html']).read_text())
+    (work/'initial.html').write_text(initial_html)
+    initial_geometry=box_metrics(row['current_boxes'],target_boxes,viewport,(root,))
+    local=[]
+    for repeat in range(1,args.repeats+1):
+        for method,policy in methods.items():
+            started=time.perf_counter();error=None;stats={};html=initial_html
+            try:
+                html,stats,_=rollout(browser,initial_html,copy.deepcopy(tree),viewport,row['target_image'],policy,
+                    parser if policy.cfg.mode=='abstract' else None,args.threshold,args.steps,args.time_budget,
+                    goal_threshold=(args.abstract_goal_threshold if policy.cfg.mode=='abstract' else args.goal_threshold))
+                if stats.get('failed'):error=stats.get('error') or 'Rollout failed'
+            except Exception as exc:error=str(exc)
+            html_path=work/f'{method}-r{repeat}.html';html_path.write_text(html)
+            browser.reset_context();browser.load(html,viewport)
+            final_boxes=boxes(browser,tree,viewport)
+            final_state=css_owners.read(browser,tree)['state']
+            png=work/f'{method}-r{repeat}.png'
+            browser.page.screenshot(path=str(png),animations='disabled')
+            final_geometry=box_metrics(final_boxes,target_boxes,viewport,(root,))
+            metrics={f'initial_{k}':v for k,v in initial_geometry.items()}
+            metrics.update({f'final_{k}':v for k,v in final_geometry.items()})
+            metrics.update(pixel_mae=pixel_mae(row['target_image'],png),
+                initial_symbolic_distance=state_distance(row['declaration_state'],row['target_declaration_state']),
+                final_symbolic_distance=state_distance(final_state,row['target_declaration_state']),
+                actions=stats.get('actions',0),seconds=stats.get('seconds',time.perf_counter()-started),
+                attempted_actions=stats.get('attempted_actions',stats.get('actions',0)),
+                rolled_back_actions=stats.get('rolled_back_actions',0),
+                parent_first=stats.get('parent_first',False),
+                parent_first_probes=stats.get('parent_first_probes',0),
+                scroll_guard_rolled_back=stats.get('scroll_guard_rolled_back',False),
+                scroll_guard_seconds=stats.get('scroll_guard_seconds',0.),
+                browser_executions=stats.get('browser_executions',0),
+                browser_screenshots=stats.get('browser_screenshots',0))
+            record={'id':row['id'],'page_id':page_id,
+                'logical_page_id':row.get('page_id',page_id),'view':row.get('view','legacy'),
+                'method':method,'repeat':repeat,
+                'failed':error is not None,'error':error,'html':str(html_path),'png':str(png),**metrics}
+            write_json(work/f'{method}-r{repeat}-trace.json',stats)
+            local.append(record)
+    write_json(work/'result.json',local)
+    return local
+
+
+def cached_page(out,row,methods,repeats):
+    work=out/'pages'/signature(row['id'])[:20]
+    try:
+        saved=read_json(work/'result.json')
+        expected={(m,r) for m in methods for r in range(1,repeats+1)}
+        if len(saved)!=len(expected) or {(r['method'],r['repeat']) for r in saved}!=expected:return None
+        for record in saved:
+            if record['id']!=row['id']:return None
+            for key in ('html','png'):
+                path=Path(record[key])
+                if not path.is_file() or not path.stat().st_size:return None
+            trace=work/f"{record['method']}-r{record['repeat']}-trace.json"
+            if not trace.is_file() or not trace.stat().st_size:return None
+            record.setdefault('logical_page_id',row.get('page_id',record['page_id']))
+            record.setdefault('view',row.get('view','legacy'))
+        return saved
+    except (OSError,ValueError,KeyError,TypeError):
+        return None
+
+
 def evaluate(args):
     if args.steps<1 or args.repeats<1 or args.limit<0 or args.time_budget<0 or not 0<=args.threshold<=1:
         raise ValueError('Invalid fixed-test rollout settings')
@@ -145,6 +217,11 @@ def evaluate(args):
     for key in ('goal_threshold','abstract_goal_threshold'):
         value=getattr(args,key,-1)
         if value!=-1 and not 0<=value<=1:raise ValueError(key+' must be -1 or in [0,1]')
+    workers=getattr(args,'workers',1)
+    batch_size=getattr(args,'inference_batch_size',4)
+    wait_ms=getattr(args,'batch_wait_ms',10.)
+    if workers<1 or batch_size<1 or not 0<=wait_ms<=1000:
+        raise ValueError('Invalid rollout worker/batch settings')
     device=select_device(args.device)
     if device=='cpu':torch.set_num_threads(args.cpu_threads)
     methods={};checkpoints=[];parser=None
@@ -160,6 +237,7 @@ def evaluate(args):
     rows=list(read_jsonl(args.data));rows=rows[:args.limit] if args.limit else rows
     page_rows={r['id']:r for r in read_jsonl(args.pages)}
     if not rows:raise ValueError('Empty frozen WebUI test set')
+    if len({r['id'] for r in rows})!=len(rows):raise ValueError('Duplicate frozen test row IDs')
     if any(r.get('split')!='test' for r in rows):raise ValueError('visual-test-rollout accepts test rows only')
     for row in rows:
         page_id=row['id'].rsplit('/',1)[0]
@@ -168,67 +246,33 @@ def evaluate(args):
             raise ValueError(f'Missing exact held-out target boxes for {page_id}')
         if checkpoint_overlap(row,checkpoints):raise ValueError('Held-out test overlaps policy/parser training')
     out=Path(args.out).resolve()
-    settings={k:v for k,v in vars(args).items() if k not in ('out','resume')}
+    settings={k:v for k,v in vars(args).items() if k not in ('out','resume','workers','inference_batch_size','batch_wait_ms')}
     paths=[args.data,args.pages,args.raw_checkpoint,args.abstract_checkpoint,args.detector_checkpoint]
     guard_run(out,{'kind':KIND,'inputs':{p:digest(p) for p in paths if p},'settings':settings},args.resume)
-    results=[]
-    with HtmlBrowser() as browser:
-        for index,row in enumerate(rows):
-            page_id=row['id'].rsplit('/',1)[0];page=page_rows[page_id]
-            work=out/'pages'/signature(row['id'])[:20];work.mkdir(parents=True,exist_ok=True)
-            cache=work/'result.json'
-            if args.resume and cache.exists():
-                saved=read_json(cache)
-                for record in saved:
-                    record.setdefault('logical_page_id',row.get('page_id',record['page_id']))
-                    record.setdefault('view',row.get('view','legacy'))
-                results.extend(saved);continue
-            target_boxes=page['evaluation_target_boxes'];viewport=row['viewport'];tree=row['current']
-            root=tree['nodes'][0]['id'];initial_html=Path(row['current_html']).read_text()
-            shutil.copyfile(row['target_image'],work/'target.png')
-            shutil.copyfile(row['current_image'],work/'initial.png')
-            (work/'target.html').write_text(Path(row['target_html']).read_text())
-            (work/'initial.html').write_text(initial_html)
-            initial_geometry=box_metrics(row['current_boxes'],target_boxes,viewport,(root,))
-            local=[]
-            for repeat in range(1,args.repeats+1):
-                for method,policy in methods.items():
-                    started=time.perf_counter();error=None;stats={};html=initial_html
-                    try:
-                        html,stats,_=rollout(browser,initial_html,copy.deepcopy(tree),viewport,row['target_image'],policy,
-                            parser if policy.cfg.mode=='abstract' else None,args.threshold,args.steps,args.time_budget,
-                            goal_threshold=(args.abstract_goal_threshold if policy.cfg.mode=='abstract' else args.goal_threshold))
-                        if stats.get('failed'):error=stats.get('error') or 'Rollout failed'
-                    except Exception as exc:error=str(exc)
-                    html_path=work/f'{method}-r{repeat}.html';html_path.write_text(html)
-                    browser.reset_context();browser.load(html,viewport)
-                    final_boxes=boxes(browser,tree,viewport)
-                    final_state=css_owners.read(browser,tree)['state']
-                    png=work/f'{method}-r{repeat}.png'
-                    browser.page.screenshot(path=str(png),animations='disabled')
-                    final_geometry=box_metrics(final_boxes,target_boxes,viewport,(root,))
-                    metrics={f'initial_{k}':v for k,v in initial_geometry.items()}
-                    metrics.update({f'final_{k}':v for k,v in final_geometry.items()})
-                    metrics.update(pixel_mae=pixel_mae(row['target_image'],png),
-                        initial_symbolic_distance=state_distance(row['declaration_state'],row['target_declaration_state']),
-                        final_symbolic_distance=state_distance(final_state,row['target_declaration_state']),
-                        actions=stats.get('actions',0),seconds=stats.get('seconds',time.perf_counter()-started),
-                        attempted_actions=stats.get('attempted_actions',stats.get('actions',0)),
-                        rolled_back_actions=stats.get('rolled_back_actions',0),
-                        parent_first=stats.get('parent_first',False),
-                        parent_first_probes=stats.get('parent_first_probes',0),
-                        scroll_guard_rolled_back=stats.get('scroll_guard_rolled_back',False),
-                        scroll_guard_seconds=stats.get('scroll_guard_seconds',0.),
-                        browser_executions=stats.get('browser_executions',0),
-                        browser_screenshots=stats.get('browser_screenshots',0))
-                    record={'id':row['id'],'page_id':page_id,
-                        'logical_page_id':row.get('page_id',page_id),'view':row.get('view','legacy'),
-                        'method':method,'repeat':repeat,
-                        'failed':error is not None,'error':error,'html':str(html_path),'png':str(png),**metrics}
-                    write_json(work/f'{method}-r{repeat}-trace.json',stats)
-                    local.append(record)
-            write_json(cache,local);results.extend(local);write_jsonl(out/'results.jsonl',results)
-            print(f'[{index+1}/{len(rows)}] {row["id"]}: fixed WebUI test rollout complete',flush=True)
+    completed={};pending=[]
+    for index,row in enumerate(rows):
+        cached=cached_page(out,row,methods,args.repeats) if args.resume else None
+        if cached is not None:completed[index]=cached
+        else:pending.append((index,args,row,page_rows[row['id'].rsplit('/',1)[0]],out))
+    def save(index,local):
+        completed[index]=local
+        write_jsonl(out/'results.jsonl',[r for i in sorted(completed) for r in completed[i]])
+        print(f'[{len(completed)}/{len(rows)}] {rows[index]["id"]}: fixed WebUI test rollout complete',flush=True)
+    execution={'workers':workers,'inference_batch_size':batch_size,'batch_wait_ms':wait_ms,
+               'cached_pages':len(completed),'pending_pages':len(pending),'timing_includes_queue_wait':workers>1}
+    started=time.perf_counter()
+    if workers>1 and pending:
+        from .rollout_workers import parallel_pages
+        for index,local in parallel_pages(pending,methods,parser,workers,batch_size,wait_ms,execution):
+            save(index,local)
+    elif pending:
+        with HtmlBrowser() as browser:
+            for index,_,row,page,_ in pending:
+                browser.reset_context()
+                save(index,evaluate_page(args,row,page,out,browser,methods,parser))
+    execution['wall_seconds']=time.perf_counter()-started
+    write_json(out/'execution.json',execution)
+    results=[r for i in sorted(completed) for r in completed[i]]
     write_jsonl(out/'results.jsonl',results)
     summary=[]
     for method in methods:
@@ -269,7 +313,10 @@ def evaluate(args):
                      f'{s["final_box_iou"]:.4f} | {s["pixel_mae"]:.4f} | {s["initial_symbolic_distance"]:.3f} | '
                      f'{s["final_symbolic_distance"]:.3f} | {s["actions"]:.2f} | {s["attempted_actions"]:.2f} | '
                      f'{s["rolled_back_actions"]:.2f} | {s["seconds"]:.3f} |')
-    lines += ['', '## Per-viewport quality','',
+    lines += ['', 'Rollout seconds include scheduling/inference queue wait in parallel mode. '
+              'See execution.json for this invocation’s worker count, observed batches, wall time and reused pages; '
+              'cached rows retain their original timing. Do not treat parallel per-page latency as isolated model latency.',
+        '', '## Per-viewport quality','',
         '| Method | View | n | pages | failed | initial IoU | final IoU | pixel MAE | actions | seconds |',
         '|---|---|---:|---:|---:|---:|---:|---:|---:|---:|']
     for s in summary:
