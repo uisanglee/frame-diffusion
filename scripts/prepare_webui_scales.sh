@@ -26,12 +26,54 @@ if [[ -n "${ALLOCATION_COUNTS:-}" ]]; then
 fi
 python -m framediff visual-webui-scales-prepare --root "$raw" --out "$data" \
   --sizes "${sizes[@]}" --views "${views[@]}" --seed "${SEED:-42}" "${split_options[@]}" --resume
-# No historical 10K input, detector checkpoint or offline trajectories required.
-python -m framediff visual-build-data --manifest "$data/master/source/manifest.jsonl" \
-  --workers "${RENDER_WORKERS:-${PREPARE_WORKERS:-4}}" \
-  --out "$data/master/rendered" --clean-only --lazy-train --abstract-size "${IMAGE_SIZE:-384}" \
-  --seed "${SEED:-42}" --min-elements "${MIN_ELEMENTS:-3}" \
-  --max-source-mae "${MAX_SOURCE_MAE:-1.0}" --resume
+# REUSE_RENDERED may point at a complete master/rendered directory from an
+# identical source manifest.  This keeps the expensive HTML rendering cache
+# while allowing labels/CSS data to be rebuilt in a fresh experiment root.
+if [[ -n "${REUSE_RENDERED:-}" ]]; then
+  python - "$data" "$REUSE_RENDERED" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+
+data = Path(sys.argv[1])
+source = Path(sys.argv[2]).resolve()
+target = data / "master/rendered"
+manifest = data / "master/source/manifest.jsonl"
+source_manifest = source.parent / "source/manifest.jsonl"
+
+if not source.is_dir():
+    raise SystemExit(f"REUSE_RENDERED is not a directory: {source}")
+required = (
+    "detector-train.jsonl", "detector-val.jsonl", "detector-test.jsonl",
+    "policy-train.jsonl", "policy-val.jsonl", "policy-test.jsonl",
+)
+missing = [name for name in required if not (source / name).is_file()]
+if missing:
+    raise SystemExit(f"Incomplete rendered cache {source}; missing: {missing}")
+if not source_manifest.is_file():
+    raise SystemExit(f"Cannot verify rendered cache manifest: {source_manifest}")
+digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+if digest(manifest) != digest(source_manifest):
+    raise SystemExit("Source manifests differ; refusing to reuse rendered cache")
+if target.is_symlink():
+    if target.resolve() != source:
+        raise SystemExit(f"Rendered symlink points elsewhere: {target} -> {target.resolve()}")
+elif target.exists():
+    if target.resolve() != source:
+        raise SystemExit(f"Rendered output already exists and is not the requested cache: {target}")
+else:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.symlink_to(source, target_is_directory=True)
+print(f"Reusing verified rendered cache: {source}")
+PY
+else
+  # No historical detector checkpoint or offline trajectories required.
+  python -m framediff visual-build-data --manifest "$data/master/source/manifest.jsonl" \
+    --workers "${RENDER_WORKERS:-${PREPARE_WORKERS:-4}}" \
+    --out "$data/master/rendered" --clean-only --lazy-train --abstract-size "${IMAGE_SIZE:-384}" \
+    --seed "${SEED:-42}" --min-elements "${MIN_ELEMENTS:-3}" \
+    --max-source-mae "${MAX_SOURCE_MAE:-1.0}" --resume
+fi
 python -m framediff visual-tree-normalize --rendered "$data/master/rendered" \
   --out "$data/master/labels" --workers "${PREPARE_WORKERS:-4}" \
   --seed "${SEED:-42}" --max-css-owners "${MAX_CSS_OWNERS:-512}" \
