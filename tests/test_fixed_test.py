@@ -29,7 +29,8 @@ def test_fixed_test_coverage_includes_preprocessing_attrition(tmp_path):
 
 
 @pytest.mark.browser
-def test_frozen_webui_test_rollout_exports_html_png_and_metrics(tmp_path,monkeypatch):
+@pytest.mark.parametrize('recovery_mode',[False,True])
+def test_frozen_webui_test_rollout_exports_html_png_and_metrics(tmp_path,monkeypatch,recovery_mode):
     from framediff.cli import main
     from framediff.html_bridge import HtmlBrowser
     from framediff.plans import dom_tree
@@ -52,6 +53,9 @@ def test_frozen_webui_test_rollout_exports_html_png_and_metrics(tmp_path,monkeyp
         current=tree,current_boxes=current_boxes,current_html=str(current_html),current_image=str(current_png),
         target_html=str(target_html),target_image=str(target),target_elements=elements(tree,target_boxes,[320,240]),
         css_owners=parsed['owners'],declaration_state=current_state,target_declaration_state=parsed['state'])
+    if recovery_mode:
+        row.update(reference_html=str(target_html),target_html=str(current_html),
+                   recovery_contract='pre-normalization-render-recovery-v1',recovery_report={})
     data=tmp_path/'policy-test.jsonl';pages=tmp_path/'pages-test.jsonl'
     write_jsonl(data,[row]);write_jsonl(pages,[dict(id='page',group='held-out',split='test',source_sha='held-out',
         viewport=[320,240],evaluation_target_boxes=target_boxes)])
@@ -78,6 +82,12 @@ def test_frozen_webui_test_rollout_exports_html_png_and_metrics(tmp_path,monkeyp
     assert Path(result['html']).is_file() and Path(result['png']).is_file()
     assert result['initial_box_iou']<1 and result['final_box_iou']==result['initial_box_iou']
     assert (out/'report.md').is_file() and (out/'summary.json').is_file()
+    if recovery_mode:
+        work=Path(result['html']).parent
+        assert (work/'target.html').read_text()==target_html.read_text()
+        assert (work/'normalized-initial.html').read_text()==current_html.read_text()
+        assert result['target_reference']=='pre_normalization_server_render'
+        assert 'fitted teacher CSS state' in (out/'report.md').read_text()
     coverage=read_json(out/'coverage.json')
     assert coverage['source_test_pages']==3 and coverage['normalization_rejected_pages']==1
     assert coverage['fixed_corruption_rejected_pages']==1 and coverage['evaluated_pages']==1

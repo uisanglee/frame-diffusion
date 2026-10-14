@@ -60,6 +60,10 @@ def relabel_validation(rows,size):
             browser.reset_context();browser.load(Path(row['target_html']).read_text(),row['viewport'])
             mask,_,_=abstraction(browser,row['current'],row['viewport'],size)
             clean=css_owners.read(browser,row['current'])['state']
+            if row.get('recovery_contract'):
+                from .visual import semantic_masks
+                mask=semantic_masks(row['target_elements'],row['viewport'],size)
+                clean=row['target_declaration_state']
             browser.load(Path(row['current_html']).read_text(),row['viewport'])
             parsed=css_owners.read(browser,row['current'])
             if parsed['owners']!=row['css_owners']:raise ValueError('Validation owner identity changed')

@@ -25,9 +25,17 @@ def _prepare_page(task):
         if split!='train':raise ValueError('Lazy held-out normalization is forbidden')
         settings={**row['lazy_settings'],**{k:getattr(args,k) for k in
             ('max_css_owners','observation_size','max_pixel_mae','max_box_error')}}
-        new={**row,'lazy_settings':settings,'normalization_contract':CONTRACT,
+        contract=CONTRACT
+        if getattr(args,'recover_normalization',False):
+            from .normalization_recovery import CONTRACT as contract
+            settings.update(recover_normalization=True,
+                            recovery_fit_steps=getattr(args,'recovery_fit_steps',16))
+        new={**row,'lazy_settings':settings,'normalization_contract':contract,
              'teacher_strategy':css_owners.CONTRACT}
         return new,{**pages[page_id],**new,'id':page_id},None
+    if getattr(args,'recover_normalization',False):
+        from .normalization_recovery import prepare_page
+        return prepare_page(task)
     folder=out/'normalized-pages'/split/hashlib.sha256(page_id.encode()).hexdigest()
     folder.mkdir(parents=True,exist_ok=True)
     html_path=Path(row['current_html'] if row['id'].endswith('/clean') else row['target_html'])
@@ -148,12 +156,20 @@ def prepare(args):
     if source==out or source in out.parents:
         raise ValueError('Use a separate normalized output directory')
     files=[source/f'{kind}-{split}.jsonl' for split in ('train','val','test') for kind in ('policy','pages')]
-    guard_run(out,dict(kind=css_owners.CONTRACT,normalization=CONTRACT,
+    config=dict(kind=css_owners.CONTRACT,normalization=CONTRACT,
         normalizer_sha=digest(Path(__file__).with_name('explicit_html.py')),
         sources={str(p):digest(p) for p in files},seed=args.seed,limit_pages=limit,
         max_css_owners=args.max_css_owners,observation_size=args.observation_size,
         max_pixel_mae=args.max_pixel_mae,max_box_error=args.max_box_error,
-        corruption=ONLINE_CONTRACT,sampling=SAMPLING_CONTRACT),args.resume)
+        corruption=ONLINE_CONTRACT,sampling=SAMPLING_CONTRACT)
+    if getattr(args,'recover_normalization',False):
+        from .normalization_recovery import CONTRACT as recovery_contract
+        if getattr(args,'recovery_fit_steps',16)<1:raise ValueError('recovery-fit-steps must be positive')
+        reuse=getattr(args,'reuse_normalized',None)
+        if reuse and Path(reuse).resolve()==out:raise ValueError('Reuse old cache in a separate output directory')
+        config.update(recovery_contract=recovery_contract,recovery_fit_steps=args.recovery_fit_steps,
+                      reuse_normalized=str(Path(reuse).resolve()) if reuse else None)
+    guard_run(out,config,args.resume)
     report={};all_rows=[]
     # Per-page normalization closes its browser before the corruption sampler
     # starts another synchronous Playwright runtime.
@@ -204,6 +220,12 @@ def prepare(args):
                 'rejected':clean_pages-kept_pages,'rejected_views':len(errors),'top_errors':reasons.most_common(10),
                 'kept_with_frozen_sizes':sum((r.get('normalization_stats',{}).get('normalized_elements') or 0)>0 for r in kept),
                 'kept_without_frozen_sizes':sum((r.get('normalization_stats',{}).get('normalized_elements') or 0)==0 for r in kept)}
+            if getattr(args,'recover_normalization',False):
+                recovered=[r for r in kept if r.get('recovery_contract')]
+                report[split].update(target_reference='pre_normalization_server_render',
+                    reused_normalization=sum(r.get('normalization_stats',{}).get('reused_normalization',False) for r in recovered),
+                    kept_changed_normalization=sum(r['recovery_report']['initial_distance']>1e-8 for r in recovered),
+                    fitted_with_residual_geometry=sum(not r['recovery_report']['exact_geometry_recovery'] for r in recovered))
             if any(r.get('lazy_contract') for r in kept):
                 report[split].update(status='deferred',pending_pages=kept_pages,pending_views=len(kept),
                     verified_pages=0,kept_with_frozen_sizes=0,kept_without_frozen_sizes=0)

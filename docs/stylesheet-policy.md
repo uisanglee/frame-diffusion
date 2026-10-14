@@ -1,5 +1,41 @@
 # Inline and stylesheet declaration policy
 
+## Optional normalization-error recovery
+
+`scripts/prepare_normalization_recovery.sh RENDERED OLD_LABELS NEW_ROOT`
+creates an independent recovery corpus in `NEW_ROOT/labels` and `NEW_ROOT/css`.
+The target is the cached original HTML **server render before normalization**,
+not the raw WebUI screenshot. Existing rendered images are referenced, not rebuilt;
+verified old normalized HTML is reused read-only. All original clean rows are
+considered, including pages absent from the old accepted manifest. Rerunning the
+same command resumes completed page caches and retries failures. Keep the source
+rendered assets and use a new output root, not an old training dataset directory.
+
+Normalization preservation failures alone no longer exclude pages in this mode.
+A bounded preparation-only teacher search fits supported inline CSS values toward
+the original boxes and semantic masks (`RECOVERY_FIT_STEPS`, default 16). The
+fitted state supplies CE labels, but never replaces the original image/box target.
+Online sampling includes normalization-only states and normalization plus random
+corruption; teacher edits must reduce abstraction MAE against the original target.
+Unstable original renders, browser errors and states without an improving supported
+teacher still produce explicit rejection records. The finite search is not a
+guarantee that every page is recoverable; inspect `recovery-report.json` and the
+aggregate residual-geometry counts in `prepare-report.json`.
+
+Use `NEW_ROOT/css` as the data argument to existing `train_tuide_scale.sh` and
+`visual-test-rollout` workflows, with **new policy output directories**. Regenerate
+`visual-cache-targets` manifests for the new rows; `--reuse-cache OLD_PREDICTED_SPLIT`
+can reuse matching detector/image predictions without retraining the detector.
+Stage 1 and stage 2 remain token-CE training with oracle and detector conditioning,
+respectively. Rollout evaluates original target images/boxes and exports both
+`target.html` and `normalized-initial.html`. Symbolic distance is explicitly marked
+as distance to fitted teacher CSS, not visual ground truth. Inference receives no
+fitted target CSS. The existing rendering-preserving mode remains unchanged.
+
+The scaling preparation script exposes the same option with
+`RECOVER_NORMALIZATION=1`, `RECOVERY_FIT_STEPS`, and optional `REUSE_NORMALIZED`;
+use a new scaling output root when changing this data contract.
+
 The `css-owner-tree-v2` policy edits six declarations (width, height and four
 physical margins) on DOM inline styles **and embedded `<style>` rules**. An owner
 is either a DOM ID or a style-block index plus nested CSS rule index path. Selector

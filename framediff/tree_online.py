@@ -196,7 +196,7 @@ def target_pool(rows, manifest=None, cache_dir=None, observation_size=384, diagn
         for key in ('page_id','view'):
             if key in row:target[key]=row[key]
         for key in ('predicted_target_elements','parser_provenance','parser_sha','css_owners',
-                    'target_declaration_state','normalization_contract'):
+                    'target_declaration_state','normalization_contract','recovery_contract','reference_html','recovery_report'):
             if key in row: target[key] = row[key]
         target.update(id=page_id,target_html=str(Path(html).resolve()),corruption_observation_size=observation_size)
         clean_state=row.get('target_declaration_state')
@@ -262,7 +262,8 @@ def target_pool(rows, manifest=None, cache_dir=None, observation_size=384, diagn
                 else:no_visible+=1
             else:
                 reason='usable'
-                target['target_declaration_state'] = state
+                if not target.get('recovery_contract'):target['target_declaration_state'] = state
+                if target.get('recovery_contract'):metadata.pop('target_elements',None)
                 target.update({k:v for k,v in metadata.items() if k!='inspection_diagnostics'})
                 for node,label in zip(target['current']['nodes'],metadata['visual_classes']):node['visual_class']=label
             record(dict(id=page_id,status='kept' if reason=='usable' else 'excluded',reason=reason,
@@ -387,7 +388,10 @@ class OnlineSampler:
                 html=self.html(target['target_html'])
                 if 'visible_candidates' not in target:
                     inspected,metadata=inspect_candidates(browser,target,html)
-                    target.update(metadata,target_declaration_state=inspected)
+                    if target.get('recovery_contract'):
+                        metadata.pop('target_elements',None)
+                        target.update(metadata)
+                    else:target.update(metadata,target_declaration_state=inspected)
                     for node,label in zip(tree['nodes'],metadata['visual_classes']):node['visual_class']=label
                     self.clean_state.cache_clear()
                 if not target['visible_candidates']:raise ValueError('No visible corruption candidates')
@@ -406,7 +410,13 @@ class OnlineSampler:
                 clean_mask,clean_boxes,_=abstraction(browser,tree,viewport,size)
                 frame=clean_mask
                 state=state_now();noise=[];probe_rejections=0
-                for _ in range(rng.randint(1,self.max_noise)):
+                recovery=bool(target.get('recovery_contract'))
+                if recovery:
+                    from .visual import semantic_masks
+                    clean_mask=semantic_masks(target['target_elements'],viewport,size)
+                # Include normalization-only states as well as combined corruption.
+                noise_count=0 if recovery and state!=clean and index%2==0 else rng.randint(1,self.max_noise)
+                for _ in range(noise_count):
                     if self.stop is not None and self.stop.is_set(): raise RuntimeError('Online producer stopped')
                     for trial in range(24):
                         eligible={(e[0],e[1]) for e in target['visible_candidates']}
@@ -453,6 +463,18 @@ class OnlineSampler:
                     apply([teacher[0],teacher[1],*old])
                     if changed(frame,next_frame):break
                 else:raise ValueError('No abstraction-changing reverse label')
+                if recovery:
+                    distance=float((frame-clean_mask).abs().mean());best_gain=0.;best_teacher=None
+                    for candidate in remaining:
+                        old=state[candidate[0]][FIELDS.index(candidate[1])]
+                        try:
+                            apply(candidate)
+                            candidate_frame,_,_=abstraction(browser,tree,viewport,size)
+                            gain=distance-float((candidate_frame-clean_mask).abs().mean())
+                            if gain>best_gain+1e-8:best_gain=gain;best_teacher=candidate
+                        finally:apply([candidate[0],candidate[1],*old])
+                    if best_teacher is None:raise ValueError('No action improves the fixed pre-normalization target')
+                    teacher=best_teacher
                 if self.parent_first:
                     from .parent_first import improving_teacher
                     teacher,gain=improving_teacher(browser,tree,viewport,size,state,remaining,clean_mask,owners)
@@ -463,6 +485,9 @@ class OnlineSampler:
                         'replacement_edit':teacher,
                         'teacher_strategy':css_owners.CONTRACT if owner_mode else CONTRACT,'symbolic_distance':len(remaining),
                         'corruption_contract':ONLINE_CONTRACT}
+                if recovery:
+                    result['symbolic_reference']='fitted_teacher_state_not_ground_truth_pixels'
+                    result['normalization_error_included']=True
                 from .explicit_html import feedback_metadata
                 result.update(feedback_metadata(browser,tree))
                 if owner_mode:
@@ -479,6 +504,8 @@ class OnlineSampler:
                                   'corruptions':noise,'reverse_prefix':depth,'path_length':len(path),
                                   'screenshot_captures':int(self.mode=='screenshot'),
                                   'seconds':time.perf_counter()-started,'errors':errors}
+                if recovery:result['online'].update(normalization_only=noise_count==0,
+                    recovery_teacher_gain=gain if self.parent_first else best_gain)
                 if self.parent_first:
                     result['online'].update(parent_first=True,parent_first_gain=gain)
                 if owner_mode:

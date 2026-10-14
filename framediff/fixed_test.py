@@ -187,7 +187,9 @@ def evaluate(args):
             root=tree['nodes'][0]['id'];initial_html=Path(row['current_html']).read_text()
             shutil.copyfile(row['target_image'],work/'target.png')
             shutil.copyfile(row['current_image'],work/'initial.png')
-            (work/'target.html').write_text(Path(row['target_html']).read_text())
+            (work/'target.html').write_text(Path(row.get('reference_html',row['target_html'])).read_text())
+            if row.get('recovery_contract'):
+                (work/'normalized-initial.html').write_text(Path(row['target_html']).read_text())
             (work/'initial.html').write_text(initial_html)
             initial_geometry=box_metrics(row['current_boxes'],target_boxes,viewport,(root,))
             local=[]
@@ -225,6 +227,11 @@ def evaluate(args):
                         'logical_page_id':row.get('page_id',page_id),'view':row.get('view','legacy'),
                         'method':method,'repeat':repeat,
                         'failed':error is not None,'error':error,'html':str(html_path),'png':str(png),**metrics}
+                    if row.get('recovery_contract'):
+                        record.update(recovery_contract=row['recovery_contract'],
+                            target_reference='pre_normalization_server_render',
+                            symbolic_reference='fitted_teacher_state_not_ground_truth_pixels',
+                            recovery_report=row.get('recovery_report'))
                     write_json(work/f'{method}-r{repeat}-trace.json',stats)
                     local.append(record)
             write_json(cache,local);results.extend(local);write_jsonl(out/'results.jsonl',results)
@@ -264,11 +271,16 @@ def evaluate(args):
            'Fixed test corruptions only; no VLM generation and no target state is used for action selection.','',
            '| Method | n | failed | initial IoU | final IoU | pixel MAE | symbolic before | symbolic after | actions | attempted | rollback | seconds |',
            '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|']
+    recovery_mode=any(row.get('recovery_contract') for row in rows)
     for s in summary:
         lines.append(f'| {s["method"]} | {s["n"]} | {s["failure_rate"]:.3f} | {s["initial_box_iou"]:.4f} | '
                      f'{s["final_box_iou"]:.4f} | {s["pixel_mae"]:.4f} | {s["initial_symbolic_distance"]:.3f} | '
                      f'{s["final_symbolic_distance"]:.3f} | {s["actions"]:.2f} | {s["attempted_actions"]:.2f} | '
                      f'{s["rolled_back_actions"]:.2f} | {s["seconds"]:.3f} |')
+    if recovery_mode:
+        lines += ['', 'Recovery targets are the original server renders BEFORE normalization. '
+                  'Symbolic distance measures the fitted teacher CSS state, not visual ground truth. '
+                  'Normalization changes and additional corruption are evaluated together.']
     lines += ['', '## Per-viewport quality','',
         '| Method | View | n | pages | failed | initial IoU | final IoU | pixel MAE | actions | seconds |',
         '|---|---|---:|---:|---:|---:|---:|---:|---:|---:|']
@@ -284,7 +296,7 @@ def evaluate(args):
         '|---|---:|---:|---:|---:|',
         f'| Upstream corpus construction | {coverage["source_test_pages"]} | {coverage["upstream_available_pages"]} | {coverage["upstream_unavailable"]} | {coverage["upstream_available_pages"]/coverage["source_test_pages"] if coverage["source_test_pages"] else 0.:.3f} |',
         f'| Clean target availability | {coverage["upstream_available_pages"]} | {coverage["normalization_input_pages"]} | {coverage["missing_clean_records"]} | {coverage["normalization_input_pages"]/coverage["upstream_available_pages"] if coverage["upstream_available_pages"] else 0.:.3f} |',
-        f'| Rendering-preserving normalization | {coverage["normalization_input_pages"]} | {coverage["normalization_kept_pages"]} | {coverage["normalization_rejected_pages"]} | {coverage["normalization_kept_pages"]/coverage["normalization_input_pages"] if coverage["normalization_input_pages"] else 0.:.3f} |',
+        f'| {"Normalization and recovery-label availability" if recovery_mode else "Rendering-preserving normalization"} | {coverage["normalization_input_pages"]} | {coverage["normalization_kept_pages"]} | {coverage["normalization_rejected_pages"]} | {coverage["normalization_kept_pages"]/coverage["normalization_input_pages"] if coverage["normalization_input_pages"] else 0.:.3f} |',
         f'| Fixed test corruption | {coverage["normalization_kept_pages"]} | {coverage["fixed_corruption_kept_pages"]} | {coverage["fixed_corruption_rejected_pages"]} | {coverage["preprocessing_coverage"]:.3f} |',
         f'| Rollout selection | {coverage["fixed_corruption_kept_pages"]} | {coverage["evaluated_pages"]} | {coverage["evaluation_limit_excluded_pages"]} | {coverage["evaluated_coverage"]:.3f} |']
     for method in methods:

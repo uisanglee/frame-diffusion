@@ -1,7 +1,7 @@
 """Image-conditioned replacement decoder and ordinary teacher-forced token CE.
 
-No image reward in labels/loss, no set loss, no learned STOP, no box oracle at
-inference. Grammar constraints belong to decoding; success belongs to execution.
+Ordinary token CE, no set loss, no learned STOP, no box oracle at inference.
+Optional normalization recovery uses a preparation-only visual teacher.
 """
 import contextlib
 import json
@@ -517,6 +517,9 @@ def train(args):
                          'best':best,'early_stopping':early}
                 if cfg.parent_first:metrics['parent_first']=True
                 if cfg.stylesheets:metrics['validation_by_teacher']=breakdown
+                if any(r.get('recovery_contract') for r in selected):
+                    metrics.update(target_reference='pre_normalization_server_render',
+                                   symbolic_reference='fitted_teacher_state_not_ground_truth_pixels')
                 if metric_rows:
                     metric_started=time.perf_counter()
                     metrics.update(symbolic_policy_metrics(net,metric_rows,metric_targets,device,
