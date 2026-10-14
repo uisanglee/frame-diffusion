@@ -1,5 +1,101 @@
 # Inline and stylesheet declaration policy
 
+## Default: safe sizes with the original six-field CE policy
+
+`prepare_stylesheet_policy.sh` now uses `flow-preserved-safe-size-margin-v1`.
+Its default outputs are `data/webui-safe-size-margin-v1` (labels in the `-labels`
+sibling) and `runs/webui-safe-size-margin-v1-shared`. `train_tuide_scale.sh`
+uses these same defaults and new `runs/tuide-safe-size-margin-*` policy outputs.
+Pass explicit source and detector paths as usual. For scaling, leave
+`BOX_LAYOUT=0` and `RECOVER_NORMALIZATION=0`.
+
+The action schema remains width, height, margin-left/right/top/bottom. The policy
+and token CE are unchanged; oracle stage 1 and frozen-detector stage 2 remain.
+Clean labels are the accepted clean program's six CSS values, not x/y coordinates
+or an undo journal. Online corruption and fixed held-out corruption retain the
+existing visibility probes and six-field sampling contract.
+
+The normalizer measures the original layout, tries measured px assignments and
+only relevant min/max neutralization, and verifies viewport plus scroll pixels.
+It never changes position, display, DOM hierarchy, flex behavior or grid rules.
+If a combined assignment fails, individual fields are verified against the
+original and only safe ones retained. Rejected fields remain original and are
+excluded from actions. This does NOT promise arbitrary requested CSS sizes will
+equal final rendered sizes: normal layout constraints still participate.
+Reports include rejected fields, partial normalization and scroll checks.
+The bounded field/scroll verification may leave unsupported fields untouched or
+reject unverifiable pages; these are never treated as extra corruption labels.
+
+New checkpoints record `safe_sizes=true`, enabling the same conversion on initial
+HTML during rollout. Already prepared fixed test HTML is not converted twice.
+Use new output directories; original rendering and detector weights can be reused,
+but changed manifests need new conditioning-cache manifests. Existing trained
+weights are not silently resumed with a different data/preprocessing contract.
+
+## Parent-preserving pixel boxes (new, independent protocol)
+
+Use `bash scripts/prepare_box_layout.sh RENDERED NEW_ROOT` to prepare
+`NEW_ROOT/labels` and fixed held-out examples in `NEW_ROOT/css`.
+`RENDERED` must contain existing `policy-{train,val,test}.jsonl` and
+`pages-{train,val,test}.jsonl` plus their referenced assets. `PREPARE_WORKERS`
+controls workers. Re-running resumes verified page records and retries failures.
+Original rendered HTML/images are reused read-only; old normalized outputs and
+old policy checkpoints must not be used as this protocol's clean programs.
+
+The `parent-relative-xywh-v1` protocol measures all geometry before writing any
+styles. DOM parent-child relationships remain unchanged. Supporting HTML boxes
+are also frozen to avoid unselected siblings reflowing, but only tagged visual
+targets are editable. Targets use parent-containing-block-relative `left/top`
+(action names `x/y`) and border-box `width/height`, all in px. Padding/borders
+are retained; size actions respect their minimum physical size. Moving a parent
+moves its children. Changing a parent's size does not rescale its frozen children.
+This replaces automatic flow with fixed-viewport positioning, not responsive CSS.
+
+The serialized result is reloaded and checked for pixel, target-box, clipping,
+scroll-region and DOM-parent preservation. Reports and before/after PNGs are in
+`labels/normalized-pages/SPLIT/HASH/`. Unsupported geometry or a failed preservation
+check is a reported conversion failure, **not** extra training corruption.
+Inline formatting islands and table subtrees retain their original layout and
+are excluded from individual box actions (`preserved_noneditable_targets` in
+the report); their editable ancestors can still move them. Fixed elements keep
+viewport-relative fixed positioning, unlike ordinary parent-relative boxes.
+BODY geometry and zero-size containing blocks are handled explicitly.
+Transforms and sticky positioning are currently unsupported. This mode
+cannot be combined with `--recover-normalization`.
+
+Preservation now also compares rendered pixels at tiled document scroll positions
+and separate nested-scroller positions, plus scroll extents. It does not claim
+all combinations of nested offsets are tested. More than 128 required frames is
+an explicit verification failure, not an accepted unchecked page. Verification
+PNG pairs are retained in each page's `scroll-before/` and `scroll-after/` folders.
+Use a new output root after this change: the cache contract includes converter
+and scroll-guard code hashes, so old weaker verification results cannot resume
+silently as new results.
+
+Online corruption changes one or more target coordinates/sizes by sampled
+±8/16/32 px steps (sizes clamped above their border/padding floor). The clean
+measured box program provides exact restoration labels. CE predicts owner,
+one of `x/y/width/height`, and a replacement px value. There is no REMOVE,
+margin action, original-CSS undo journal, or visual teacher search in this path.
+Validation/test use fixed corruptions of the same clean measured program.
+
+Before using `train_tuide_scale.sh`, generate new `visual-cache-targets` manifests
+for `NEW_ROOT/css/policy-{train,val}.jsonl`, with the existing detector checkpoint,
+into a new shared run directory. Matching old predictions can be reused with
+`--reuse-cache`; the detector does not need retraining. Then pass explicit
+`s|m|l NEW_ROOT/css DETECTOR NEW_SHARED_RUN NEW_POLICY_RUN` arguments to
+`train_tuide_scale.sh`. Stage 1/2 keep their oracle/detector conditioning and CE;
+the four-field contract is detected from the manifests. Never use the legacy
+default data/run paths for this experiment.
+
+Use `visual-test-rollout --data NEW_ROOT/css/policy-test.jsonl --pages
+NEW_ROOT/css/pages-test.jsonl` with the new policy checkpoint(s). It exports
+target/initial/final HTML and screenshots and evaluates against the original
+preserved render. Symbolic distance here means differing clean box coordinates,
+not original CSS syntax. Ground-truth box values are supervision/evaluation only,
+never rollout action selection inputs. Scaling preparation exposes `BOX_LAYOUT=1`
+with a new output root; existing source rendering caches can still be reused.
+
 ## Optional normalization-error recovery
 
 `scripts/prepare_normalization_recovery.sh RENDERED OLD_LABELS NEW_ROOT`
@@ -12,15 +108,26 @@ same command resumes completed page caches and retries failures. Keep the source
 rendered assets and use a new output root, not an old training dataset directory.
 
 Normalization preservation failures alone no longer exclude pages in this mode.
-A bounded preparation-only teacher search fits supported inline CSS values toward
-the original boxes and semantic masks (`RECOVERY_FIT_STEPS`, default 16). The
-fitted state supplies CE labels, but never replaces the original image/box target.
-Online sampling includes normalization-only states and normalization plus random
-corruption; teacher edits must reduce abstraction MAE against the original target.
-Unstable original renders, browser errors and states without an improving supported
-teacher still produce explicit rejection records. The finite search is not a
-guarantee that every page is recoverable; inspect `recovery-report.json` and the
-aggregate residual-geometry counts in `prepare-report.json`.
+The `original-declaration-normalization-corruption-v2` contract records original
+values, declaration absence and priorities in `normalization-journal.json`.
+Labels restore those recorded values directly; there is no teacher search or
+per-step visual-improvement acceptance test. Online sampling includes normalization
+alone and normalization plus random corruption. A repair path may contain a
+temporarily neutral or worsening edit: the label still restores an original
+declaration. Parent-first supervision orders these direct labels by owner depth.
+
+Normalization changes only supported width/height/physical-margin fields in this
+mode. Non-action declarations such as min/max constraints remain original.
+Unsupported original values (e.g. calc expressions) are preserved and their fields
+excluded, not approximated with guessed labels. Original percentages, auto,
+absence (REMOVE), and priority restoration are supported. Restoring all differing
+declarations therefore has a known target, rather than a fitted approximation.
+The journal is supervision metadata, not a policy input or an inference lookup.
+
+Unstable original renders and technical browser errors still have separate
+rejection records. A page without any supervised edit remains in held-out rollout
+manifests; it is omitted only from CE and counted in `ce_supervision_coverage`.
+No claim is made that every restored CSS declaration improves pixels individually.
 
 Use `NEW_ROOT/css` as the data argument to existing `train_tuide_scale.sh` and
 `visual-test-rollout` workflows, with **new policy output directories**. Regenerate
@@ -29,12 +136,15 @@ can reuse matching detector/image predictions without retraining the detector.
 Stage 1 and stage 2 remain token-CE training with oracle and detector conditioning,
 respectively. Rollout evaluates original target images/boxes and exports both
 `target.html` and `normalized-initial.html`. Symbolic distance is explicitly marked
-as distance to fitted teacher CSS, not visual ground truth. Inference receives no
-fitted target CSS. The existing rendering-preserving mode remains unchanged.
+as distance to original declarations, not pixel distance. Inference receives no
+original target CSS. The existing rendering-preserving mode remains unchanged.
 
 The scaling preparation script exposes the same option with
-`RECOVER_NORMALIZATION=1`, `RECOVERY_FIT_STEPS`, and optional `REUSE_NORMALIZED`;
+`RECOVER_NORMALIZATION=1` and optional `REUSE_NORMALIZED`;
 use a new scaling output root when changing this data contract.
+The former `--recovery-fit-steps` argument is accepted but ignored for compatibility.
+Search-based v1 manifests must not be resumed as v2 training data; reuse their
+verified normalization assets in a new output root instead.
 
 The `css-owner-tree-v2` policy edits six declarations (width, height and four
 physical margins) on DOM inline styles **and embedded `<style>` rules**. An owner

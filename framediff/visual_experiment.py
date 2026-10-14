@@ -96,6 +96,32 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
         with torch.inference_mode():target_tokens,_=policy.encode_image(target_tensor)
         sync(device);stats['target_encoding_seconds']=time.perf_counter()-t;stats['target_image_encodings']=1
     root=tree['nodes'][0]['id'];ids=[n['id'] for n in tree['nodes'][1:]]
+    if getattr(cfg,'safe_sizes',False):
+        import tempfile
+        from .safe_sizes import convert as safe_convert,CONTRACT as SAFE_CONTRACT
+        browser.load(html,viewport)
+        if browser.page.evaluate("document.documentElement.getAttribute('data-tuide-safe-sizes')")!=SAFE_CONTRACT:
+            with tempfile.TemporaryDirectory(prefix='tuide-safe-inference-') as temporary:
+                qa=safe_convert(browser,html,viewport,temporary,
+                    action_ids=[n['id'] for n in tree['nodes'][1:] if n.get('visual_class',0)>0],target_tree=tree)
+                stats['safe_size_conversion']=qa
+                if not qa['accepted']:raise ValueError('Safe size conversion failed preservation checks')
+                html=Path(temporary,'normalized.html').read_text()
+    from .box_layout import CONTRACT as BOX_CONTRACT
+    if getattr(cfg,'action_contract',None)==BOX_CONTRACT:
+        import tempfile
+        from .box_layout import convert
+        browser.load(html,viewport)
+        if browser.page.evaluate("document.documentElement.getAttribute('data-tuide-box-layout')")!=BOX_CONTRACT:
+            # Deployment converts the INITIAL HTML only. Target CSS is unavailable.
+            # Failed conversion returns the original input through rollout's guard.
+            t=time.perf_counter()
+            with tempfile.TemporaryDirectory(prefix='tuide-box-inference-') as temporary:
+                qa=convert(browser,html,viewport,temporary,tree,max_pixel_mae=.001)
+                stats['box_conversion']=qa
+                stats['box_conversion_seconds']=time.perf_counter()-t
+                if not qa['accepted']:raise ValueError('Initial HTML box conversion failed preservation checks')
+                html=Path(temporary,'normalized.html').read_text()
     t=time.perf_counter();browser.load(html,viewport);stats['layout_seconds']+=time.perf_counter()-t
     stats['_loaded']=True
     current_html=html;current_tree=copy.deepcopy(tree)

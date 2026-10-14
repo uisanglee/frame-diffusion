@@ -188,7 +188,7 @@ def evaluate(args):
             shutil.copyfile(row['target_image'],work/'target.png')
             shutil.copyfile(row['current_image'],work/'initial.png')
             (work/'target.html').write_text(Path(row.get('reference_html',row['target_html'])).read_text())
-            if row.get('recovery_contract'):
+            if row.get('recovery_contract') or row.get('box_layout_contract'):
                 (work/'normalized-initial.html').write_text(Path(row['target_html']).read_text())
             (work/'initial.html').write_text(initial_html)
             initial_geometry=box_metrics(row['current_boxes'],target_boxes,viewport,(root,))
@@ -227,10 +227,14 @@ def evaluate(args):
                         'logical_page_id':row.get('page_id',page_id),'view':row.get('view','legacy'),
                         'method':method,'repeat':repeat,
                         'failed':error is not None,'error':error,'html':str(html_path),'png':str(png),**metrics}
+                    if row.get('box_layout_contract'):
+                        record.update(box_layout_contract=row['box_layout_contract'],
+                            target_reference='original_render_preserved_by_box_conversion',
+                            symbolic_reference='clean_parent_relative_xywh')
                     if row.get('recovery_contract'):
                         record.update(recovery_contract=row['recovery_contract'],
                             target_reference='pre_normalization_server_render',
-                            symbolic_reference='fitted_teacher_state_not_ground_truth_pixels',
+                            symbolic_reference='original_declarations',
                             recovery_report=row.get('recovery_report'))
                     write_json(work/f'{method}-r{repeat}-trace.json',stats)
                     local.append(record)
@@ -272,6 +276,7 @@ def evaluate(args):
            '| Method | n | failed | initial IoU | final IoU | pixel MAE | symbolic before | symbolic after | actions | attempted | rollback | seconds |',
            '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|']
     recovery_mode=any(row.get('recovery_contract') for row in rows)
+    box_mode=any(row.get('box_layout_contract') for row in rows)
     for s in summary:
         lines.append(f'| {s["method"]} | {s["n"]} | {s["failure_rate"]:.3f} | {s["initial_box_iou"]:.4f} | '
                      f'{s["final_box_iou"]:.4f} | {s["pixel_mae"]:.4f} | {s["initial_symbolic_distance"]:.3f} | '
@@ -279,8 +284,12 @@ def evaluate(args):
                      f'{s["rolled_back_actions"]:.2f} | {s["seconds"]:.3f} |')
     if recovery_mode:
         lines += ['', 'Recovery targets are the original server renders BEFORE normalization. '
-                  'Symbolic distance measures the fitted teacher CSS state, not visual ground truth. '
+                  'Symbolic distance measures original declarations, not pixel distance. '
                   'Normalization changes and additional corruption are evaluated together.']
+    if box_mode:
+        lines += ['', 'Parent-preserving px box programs: x/y are relative to the containing parent; '
+                  'width/height are border-box pixels. Conversion must preserve the original render. '
+                  'Symbolic distance is to clean box coordinates; conversion failures remain in coverage.']
     lines += ['', '## Per-viewport quality','',
         '| Method | View | n | pages | failed | initial IoU | final IoU | pixel MAE | actions | seconds |',
         '|---|---|---:|---:|---:|---:|---:|---:|---:|---:|']

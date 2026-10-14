@@ -29,8 +29,12 @@ python -m framediff visual-build-data --manifest "$data/master/source/manifest.j
   --seed "${SEED:-42}" --min-elements "${MIN_ELEMENTS:-3}" \
   --max-source-mae "${MAX_SOURCE_MAE:-1.0}" --resume
 recovery_options=()
+if [[ "${BOX_LAYOUT:-0}" == 1 && "${RECOVER_NORMALIZATION:-0}" == 1 ]]; then
+  echo 'Choose BOX_LAYOUT or RECOVER_NORMALIZATION, not both' >&2; exit 2
+fi
+if [[ "${BOX_LAYOUT:-0}" == 1 ]]; then recovery_options=(--box-layout); fi
 if [[ "${RECOVER_NORMALIZATION:-0}" == 1 ]]; then
-  recovery_options=(--recover-normalization --recovery-fit-steps "${RECOVERY_FIT_STEPS:-16}")
+  recovery_options=(--recover-normalization)
   if [[ -n "${REUSE_NORMALIZED:-}" ]]; then recovery_options+=(--reuse-normalized "$REUSE_NORMALIZED"); fi
 fi
 python -m framediff visual-tree-normalize --rendered "$data/master/rendered" \

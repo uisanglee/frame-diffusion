@@ -8,8 +8,8 @@ if [[ $# -gt 4 ]]; then
 fi
 source_corpus=${1:-data/webui-10k-v5-improvement-distribution}
 detector=${2:-runs/webui-10k-v3-nospacing-fresh-webui/detector/best.pt}
-data_out=${3:-data/webui-css-owners-v10-targeted-inline}
-cache_out=${4:-runs/css-owners-v10-targeted-inline-shared}
+data_out=${3:-data/webui-safe-size-margin-v1}
+cache_out=${4:-runs/webui-safe-size-margin-v1-shared}
 [[ -f "$source_corpus/rendered/policy-train.jsonl" ]] && source_corpus="$source_corpus/rendered"
 # Only abstracted DOM boxes receive editable inline values; keep source CSS.
 # Old normalization outputs have a different action space.

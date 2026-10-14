@@ -55,7 +55,7 @@ def test_frozen_webui_test_rollout_exports_html_png_and_metrics(tmp_path,monkeyp
         css_owners=parsed['owners'],declaration_state=current_state,target_declaration_state=parsed['state'])
     if recovery_mode:
         row.update(reference_html=str(target_html),target_html=str(current_html),
-                   recovery_contract='pre-normalization-render-recovery-v1',recovery_report={})
+                   recovery_contract='original-declaration-normalization-corruption-v2',recovery_report={})
     data=tmp_path/'policy-test.jsonl';pages=tmp_path/'pages-test.jsonl'
     write_jsonl(data,[row]);write_jsonl(pages,[dict(id='page',group='held-out',split='test',source_sha='held-out',
         viewport=[320,240],evaluation_target_boxes=target_boxes)])
@@ -87,7 +87,7 @@ def test_frozen_webui_test_rollout_exports_html_png_and_metrics(tmp_path,monkeyp
         assert (work/'target.html').read_text()==target_html.read_text()
         assert (work/'normalized-initial.html').read_text()==current_html.read_text()
         assert result['target_reference']=='pre_normalization_server_render'
-        assert 'fitted teacher CSS state' in (out/'report.md').read_text()
+        assert 'original declarations' in (out/'report.md').read_text()
     coverage=read_json(out/'coverage.json')
     assert coverage['source_test_pages']==3 and coverage['normalization_rejected_pages']==1
     assert coverage['fixed_corruption_rejected_pages']==1 and coverage['evaluated_pages']==1

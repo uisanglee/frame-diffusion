@@ -1,67 +1,74 @@
-"""Keep the pre-normalization render fixed; fit executable recovery labels.
+"""Normalization is reversible declaration corruption, not a new target.
 
-The bounded teacher search is preparation-only, never inference. A fitted CSS
-state is a supervision anchor, NOT a replacement ground-truth screenshot.
+Keep original declarations and a change journal. No visual teacher search.
+Unsupported declarations/constraints are preserved, never silently approximated.
 """
 import copy
 import hashlib
-import re
 from pathlib import Path
 
 from . import css_owners
 from .ir import read_json
 from .preparation_workers import write_json
-from .tree_edits import FIELDS
+from .tree_edits import FIELDS, value_valid, repair_path
 from .web_experiment import digest
 
-CONTRACT = 'pre-normalization-render-recovery-v1'
+CONTRACT = 'original-declaration-normalization-corruption-v2'
 
 
-def fit_reference(browser, tree, viewport, owners, target_boxes, target_elements, size, steps):
-    from .tree_online import abstraction
-    from .visual import semantic_masks
-    target = semantic_masks(target_elements, viewport, size)
-    ids = [n['id'] for n in tree['nodes'][1:] if n.get('visual_class', 0)>0]
-    def measure():
-        mask, boxes, _ = abstraction(browser, tree, viewport, size)
-        geometry = sum(sum(abs(a-b) / viewport[j%2] for j,(a,b) in enumerate(zip(boxes[k],target_boxes[k])))
-                       for k in ids) / max(1,4*len(ids))
-        visual = float((mask-target).abs().mean())
-        return geometry+visual, boxes, visual
-    initial, boxes, initial_visual = measure()
-    score=initial;trace=[]
-    for _ in range(steps):
-        if score<=1e-8:break
-        state=css_owners.read(browser,tree)['state'];best=None;best_score=score
-        for i,owner in enumerate(owners):
-            if owner.get('kind')!='inline' or owner.get('id') not in ids:continue
-            key=owner['id'];box=boxes[key];goal=target_boxes[key]
-            for field_index,field in enumerate(FIELDS):
-                value,priority=state[i][field_index]
-                if not re.fullmatch(r'-?(?:\d+(?:\.\d*)?|\.\d+)px',value):continue
-                old=float(value[:-2])
-                axis=2 if field=='width' else 3 if field=='height' else 0 if field in ('margin-left','margin-right') else 1
-                change=goal[axis]-box[axis]
-                proposals={old+change,old-change}
-                if field in ('width','height'):proposals.add(goal[axis])
-                for number in sorted(proposals):
-                    if abs(number-old)<1e-4 or (field in ('width','height') and number<=0):continue
-                    edit=[i,field,f'{number:.4f}px',priority]
-                    try:
-                        css_owners.execute(browser,owners,edit)
-                        candidate,_,_=measure()
-                        if candidate<best_score-1e-8:best_score=candidate;best=edit
-                    finally:css_owners.execute(browser,owners,[i,field,value,priority])
-        if best is None:break
-        css_owners.execute(browser,owners,best)
-        score,boxes,_=measure();trace.append(best)
-    _,_,final_visual=measure()
-    return css_owners.read(browser,tree)['state'],dict(
-        strategy='bounded-greedy-geometry-and-abstraction-v1',initial_distance=initial,
-        final_distance=score,initial_abstraction_mae=initial_visual,
-        final_abstraction_mae=final_visual,edits=trace,max_steps=steps,
-        exact_geometry_recovery=all(max(abs(a-b) for a,b in zip(boxes[k],target_boxes[k]))<=1 for k in ids),
-        note='Finite search; residual errors are reported, not relabeled as ground truth.')
+def record_corruption(browser, tree, original_html):
+    """Keep only reversible normalization edits, with exact original labels.
+
+Rebuild inline styles from the original, then apply supported normalized fields.
+This preserves min/max, padding, logical properties and all other fixed context.
+No original declarations are embedded in the model's HTML input.
+"""
+    ids=[n['id'] for n in tree['nodes'][1:]]
+    records=browser.page.evaluate('''({html,ids,fields})=>{
+      const original=new DOMParser().parseFromString(html,'text/html');
+      return ids.map(id=>{
+        const find=doc=>[...doc.querySelectorAll('[data-fd-id]')].find(e=>e.dataset.fdId===id);
+        const a=find(original),b=find(document);
+        if(!a||!b)throw Error('Missing normalization journal node: '+id);
+        const pairs=e=>Object.fromEntries([...e.style].map(p=>[p,[e.style.getPropertyValue(p),e.style.getPropertyPriority(p)]]));
+        return {id,style:a.getAttribute('style'),before:fields.map(p=>[a.style.getPropertyValue(p),a.style.getPropertyPriority(p)]),
+          after:fields.map(p=>[b.style.getPropertyValue(p),b.style.getPropertyPriority(p)]),
+          original_properties:pairs(a),normalized_properties:pairs(b),
+          editable:(b.getAttribute('data-tuide-editable-fields')||'').split(' ').filter(Boolean)};
+      });
+    }''',dict(html=original_html,ids=ids,fields=FIELDS))
+    goal=[[['',''] for _ in FIELDS]];journal=[];preserved=[]
+    for record in records:
+        allowed=[];state=[]
+        for j,field in enumerate(FIELDS):
+            before,after=record['before'][j],record['after'][j]
+            supported=(not before[0] or value_valid(before[0],field)) and (not after[0] or value_valid(after[0],field))
+            if field in record['editable'] and supported:
+                allowed.append(field);state.append(before)
+                if before!=after:journal.append(dict(id=record['id'],field=field,before=before,after=after))
+            else:
+                state.append(['',''])
+                if before!=after:preserved.append(dict(id=record['id'],field=field,reason='unsupported_or_readonly'))
+        for field in set(record['original_properties'])|set(record['normalized_properties']):
+            if field not in FIELDS and record['original_properties'].get(field)!=record['normalized_properties'].get(field):
+                preserved.append(dict(id=record['id'],field=field,reason='outside_action_schema'))
+        record['allowed']=allowed;goal.append(state)
+    browser.page.evaluate('''({records,fields})=>{
+      document.documentElement.setAttribute('data-tuide-inline-actions','targeted-v2');
+      for(const r of records){
+        const e=[...document.querySelectorAll('[data-fd-id]')].find(e=>e.dataset.fdId===r.id);
+        if(r.style===null)e.removeAttribute('style');else e.setAttribute('style',r.style);
+        for(const p of r.allowed){const [v,priority]=r.after[fields.indexOf(p)];
+          if(v)e.style.setProperty(p,v,priority);else e.style.removeProperty(p);}
+        e.setAttribute('data-tuide-editable-fields',r.allowed.join(' '));
+        e.removeAttribute('data-tuide-explicit-id');
+      }
+    }''',dict(records=records,fields=FIELDS))
+    parsed=css_owners.read(browser,tree)
+    return parsed,goal,dict(strategy='original-declaration-journal-v2',changes=journal,
+        preserved_unsupported_changes=preserved,
+        reverse_edits=repair_path(parsed['state'],goal),
+        note='Direct original values, absence and priorities; no distance-based label selection.')
 
 
 def prepare_page(task):
@@ -76,7 +83,7 @@ def prepare_page(task):
     source=Path(row['current_html'] if row['id'].endswith('/clean') else row['target_html'])
     signature={'html':digest(source),'target':digest(row['target_image']),
                'tree':row['current'],'boxes':row['current_boxes'],'elements':row['target_elements'],
-               'contract':CONTRACT,'fit_steps':args.recovery_fit_steps}
+               'contract':CONTRACT}
     cache=folder/'record.json';sampler=None;stage='recovery_source'
     try:
         if args.resume and cache.exists():
@@ -108,14 +115,11 @@ def prepare_page(task):
                 write_json(folder/'normalization-diagnostics.json',qa)
             browser.load(normalized.read_text(),row['viewport'])
             tree=copy.deepcopy(row['current']);annotate(browser,tree)
-            parsed=css_owners.read(browser,tree)
+            stage='original_declaration_journal'
+            parsed,goal,journal=record_corruption(browser,tree,source.read_text())
             if len(parsed['owners'])>args.max_css_owners:raise ValueError('Too many CSS owners')
-            stage='recovery_teacher'
-            goal,fit=fit_reference(browser,tree,row['viewport'],parsed['owners'],row['current_boxes'],
-                                   row['target_elements'],args.observation_size,args.recovery_fit_steps)
-            (folder/'fitted-teacher.html').write_text(browser.page.content())
-            write_json(folder/'recovery-report.json',fit)
-            browser.load(normalized.read_text(),row['viewport'])
+            normalized.write_text(browser.page.content())
+            write_json(folder/'normalization-journal.json',journal)
             boxes=browser.tagged_boxes([n['id'] for n in tree['nodes'][1:]])
             boxes[tree['nodes'][0]['id']]=[0,0,*row['viewport']]
             feedback=feedback_metadata(browser,tree)
@@ -124,16 +128,18 @@ def prepare_page(task):
         seed.update(id=page_id+'/seed',current=refresh_geometry(tree,boxes),current_boxes=boxes,
                     target_html=str(normalized),reference_html=str(source),recovery_contract=CONTRACT,
                     css_owners=parsed['owners'],target_declaration_state=goal,
-                    normalization_contract=CONTRACT,recovery_report=fit,**feedback)
-        stage='visible_candidate_inspection'
+                    normalization_contract=CONTRACT,recovery_report=journal,
+                    normalization_state=parsed['state'],**feedback)
+        stage='direct_recovery_labels'
         pool=target_pool([{**seed,'split':'train'}],cache_dir=out/'.online-target-cache',observation_size=args.observation_size)
         stage='recovery_sample'
-        sampler=OnlineSampler(pool,'screenshot',seed=args.seed,max_noise=1)
+        sampler=OnlineSampler(pool,'screenshot',seed=args.seed,max_noise=1,allow_clean=True)
         new=sampler.generate(index)
         initial=folder/'initial.html';png=folder/'initial.png'
         initial.write_text(new.pop('current_html_text'));png.write_bytes(new['current_image'])
         new.update(split=split,current_html=str(initial),current_image=str(png),
-                   normalization_stats={'reused_normalization':reused,'normalized_elements':len(parsed['owners'])-1})
+                   normalization_stats={'reused_normalization':reused,
+                       'normalized_elements':len({c['id'] for c in journal['changes']})})
         page={**pages[page_id],'html':str(normalized),'target_html':str(normalized),
               'reference_html':str(source),'screenshot':row['target_image'],'initial_html':str(initial),
               'evaluation_target_boxes':row['current_boxes'],'recovery_contract':CONTRACT}

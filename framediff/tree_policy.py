@@ -1,7 +1,7 @@
 """Image-conditioned replacement decoder and ordinary teacher-forced token CE.
 
 Ordinary token CE, no set loss, no learned STOP, no box oracle at inference.
-Optional normalization recovery uses a preparation-only visual teacher.
+Optional normalization corruption restores recorded original declarations.
 """
 import contextlib
 import json
@@ -55,6 +55,8 @@ class TreeConfig:
     # False keeps historical checkpoints loadable. New stylesheet training opts
     # in explicitly; inference then cannot add absent declarations/overrides.
     existing_values_only: bool = False
+    restore_original_priority: bool = False
+    safe_sizes: bool = False
     abstraction_contract: str = BOUNDARY_CONTRACT
     parent_first: bool = False
     parent_first_max_probes: int = 200
@@ -64,10 +66,16 @@ class TreeConfig:
         if self.abstraction_contract!=BOUNDARY_CONTRACT:
             raise ValueError('Retrain abstract policy for occupancy+boundary inputs')
         from .css_owners import CONTRACT as OWNER_CONTRACT
-        if self.mode not in ('abstract','screenshot') or self.action_contract != (OWNER_CONTRACT if self.stylesheets else CONTRACT) or self.policy_head != 'replacement':
+        from .box_layout import CONTRACT as BOX_CONTRACT
+        if self.mode not in ('abstract','screenshot') or self.action_contract not in ((OWNER_CONTRACT,BOX_CONTRACT) if self.stylesheets else (CONTRACT,)) or self.policy_head != 'replacement':
             raise ValueError('Replacement policy contract mismatch')
         if self.size < 32 or min(self.hidden,self.layers,self.heads,self.max_nodes,self.token_grid)<1 or self.hidden%self.heads:
             raise ValueError('Invalid model dimensions')
+
+    @property
+    def fields(self):
+        from .box_layout import CONTRACT as BOX_CONTRACT,FIELDS as BOX_FIELDS
+        return BOX_FIELDS if self.action_contract==BOX_CONTRACT else FIELDS
 
     @property
     def semantic(self): return self.mode == 'abstract'
@@ -78,12 +86,12 @@ class TreeConfig:
 
 class TreePolicy(nn.Module):
     def __init__(self, cfg, pretrained=True):
-        super().__init__(); self.cfg=cfg; self.tokenizer=EditTokenizer(cfg.max_nodes)
+        super().__init__(); self.cfg=cfg; self.tokenizer=EditTokenizer(cfg.max_nodes,cfg.fields)
         self.vision=SpatialEncoder(cfg.hidden,cfg.token_grid,pretrained,3*SEMANTIC_CHANNELS if cfg.semantic else 9)
         self.token=nn.Embedding(len(self.tokenizer.tokens),cfg.hidden)
         self.byte=nn.Embedding(257,cfg.hidden,padding_idx=0)
         self.css_encoder=nn.GRU(cfg.hidden,cfg.hidden,batch_first=True)
-        self.css_projection=nn.Linear(len(FIELDS)*cfg.hidden,cfg.hidden)
+        self.css_projection=nn.Linear(len(cfg.fields)*cfg.hidden,cfg.hidden)
         if cfg.stylesheets:self.owner_type=nn.Embedding(3,cfg.hidden)
         self.geometry=nn.Linear(4,cfg.hidden)
         self.node=nn.Embedding(cfg.max_nodes,cfg.hidden)
@@ -100,11 +108,11 @@ class TreePolicy(nn.Module):
         from torchvision.ops import roi_align
         spatial,feature=self.encode_pair(target,current) if encoded_pair is None else encoded_pair
         b,n=batch['mask'].shape;device=target.device
-        declarations=torch.zeros(b,n,len(FIELDS),64,dtype=torch.long,device=device)
+        declarations=torch.zeros(b,n,len(self.cfg.fields),64,dtype=torch.long,device=device)
         for i,state in enumerate(states):
             if len(state)>self.cfg.max_nodes: raise ValueError('Too many DOM nodes')
             for j,props in enumerate(state):
-                if len(props)!=len(FIELDS):raise ValueError('CSS field schema changed; prepare six-field size/margin labels')
+                if len(props)!=len(self.cfg.fields):raise ValueError('Action field schema does not match checkpoint')
                 for k,(value,priority) in enumerate(props):
                     # Current CSS is context, not target CSS. Unsupported unchanged
                     # values remain visible as bytes; only replacements use grammar.
@@ -154,7 +162,8 @@ class TreePolicy(nn.Module):
         for _ in range(self.tokenizer.max_length):
             allowed=self.tokenizer.allowed(prefix,len(states[0]),
                 state=states[0] if self.cfg.existing_values_only else None,
-                size_limits=batch.get('explicit_owner_limits',[{}])[0])
+                size_limits=batch.get('explicit_owner_limits',[{}])[0],
+                preserve_priority=not self.cfg.restore_original_priority)
             if not prefix and allowed_owners is not None:
                 permitted={self.tokenizer.ids[f'N{i}'] for i in allowed_owners}
                 allowed=[v for v in allowed if v in permitted]
@@ -269,9 +278,10 @@ def symbolic_policy_metrics(net,rows,target_states,device,predicted,amp):
     """
     totals={'n':0,'improving':0,'worsening':0,'no_change':0,'invalid':0,
             'gain':0.,'normalized_gain':0.,'distance':0.,'positive_actions':0.}
-    per_property={field:{'n':0,'improving':0} for field in FIELDS}
+    fields=getattr(getattr(net,'cfg',None),'fields',FIELDS)
+    per_property={field:{'n':0,'improving':0} for field in fields}
     for row,target in zip(rows,target_states):
-        current=row['declaration_state'];before=len(repair_path(current,target))
+        current=row['declaration_state'];before=len(repair_path(current,target,fields=fields))
         if before<1:continue
         totals['n']+=1;totals['distance']+=before;totals['positive_actions']+=before
         try:
@@ -279,7 +289,7 @@ def symbolic_policy_metrics(net,rows,target_states,device,predicted,amp):
             with amp():action=net.predict(*inputs)
             from .explicit_html import check_record_edit
             check_record_edit(row,action)
-            after_state=apply_state(current,action);after=len(repair_path(after_state,target))
+            after_state=apply_state(current,action,fields);after=len(repair_path(after_state,target,fields=fields))
             gain=before-after;totals['gain']+=gain;totals['normalized_gain']+=gain/before
             entry=per_property[action[1]];entry['n']+=1
             if gain>0:totals['improving']+=1;entry['improving']+=1
@@ -315,6 +325,15 @@ def train(args):
     if args.resume and args.init_checkpoint: raise ValueError('Choose resume OR init-checkpoint')
     if getattr(args,'prediction_probability',0): raise ValueError('Use --predicted-targets; stochastic legacy target mixing is retired')
     training=list(read_jsonl(args.train));validation=list(read_jsonl(args.val))
+    supervision_counts={}
+    for name,rows in [('train',training),('validation',validation)]:
+        supervision_counts[name]=dict(available=len(rows),no_supervised_edit=sum(
+            r.get('supervision_available') is False for r in rows))
+    training=[r for r in training if r.get('supervision_available') is not False]
+    validation=[r for r in validation if r.get('supervision_available') is not False]
+    if any(v['no_supervised_edit'] for v in supervision_counts.values()):
+        print({'ce_supervision_coverage':supervision_counts,
+               'note':'No-label rows remain in prepared rollout manifests; excluded only from CE.'},flush=True)
     if not training or not validation: raise ValueError('Nonempty train and validation data required')
     normalizations={r.get('normalization_contract') for r in training+validation}
     if len(normalizations)>1:raise ValueError('Mixed normalized/original policy data; prepare matching train and validation')
@@ -324,15 +343,22 @@ def train(args):
     validate_splits(training+validation)
     if any(r['split']!='train' for r in training) or any(r['split']!='val' for r in validation): raise ValueError('Wrong split files')
     cfg=TreeConfig(**{k:getattr(args,k) for k in ('mode','size','hidden','layers','heads','max_nodes','token_grid')})
+    from .safe_sizes import CONTRACT as SAFE_SIZES_CONTRACT
+    cfg.safe_sizes=normalizations=={SAFE_SIZES_CONTRACT}
     cfg.parent_first=getattr(args,'parent_first',False)
     cfg.parent_first_max_probes=getattr(args,'parent_first_max_probes',200)
     if cfg.parent_first and not (getattr(args,'online_corruption',False) and getattr(args,'stylesheets',False)):
         raise ValueError('Parent-first training requires online corruption and stylesheet owners')
     if getattr(args,'stylesheets',False):
         from .css_owners import CONTRACT as OWNER_CONTRACT
-        cfg.stylesheets=True;cfg.action_contract=OWNER_CONTRACT;cfg.__post_init__()
+        cfg.stylesheets=True;cfg.action_contract=OWNER_CONTRACT
+        from .box_layout import CONTRACT as BOX_CONTRACT
+        if next(iter(normalizations))==BOX_CONTRACT:cfg.action_contract=BOX_CONTRACT
+        cfg.__post_init__()
         cfg.existing_values_only=True
-    tok=EditTokenizer(cfg.max_nodes)
+        cfg.restore_original_priority=any(r.get('recovery_contract') or
+            r.get('lazy_settings',{}).get('recover_normalization') for r in training)
+    tok=EditTokenizer(cfg.max_nodes,cfg.fields)
     for row in training+validation:
         if row.get('lazy_contract'):
             if not (row['split']=='train' and args.online_corruption and args.stylesheets):
@@ -343,7 +369,7 @@ def train(args):
         node_count=len(row['css_owners']) if cfg.stylesheets else len(row['current']['nodes'])
         if len(row['declaration_state'])!=node_count or node_count>cfg.max_nodes:
             raise ValueError('Invalid declaration state node count')
-        if any(len(p)!=len(FIELDS) for p in row['declaration_state']):
+        if any(len(p)!=len(cfg.fields) for p in row['declaration_state']):
             raise ValueError('CSS field schema changed; reprepare six-field size/margin labels')
         tok.encode(row['replacement_edit'],node_count)
         from .explicit_html import check_record_edit
@@ -356,8 +382,10 @@ def train(args):
             raise ValueError('Online worker, queue, retry and noise settings must be positive')
         cache_root=Path(args.online_targets or args.train).resolve().parent/'.online-target-cache'
         targets=target_pool(training,args.online_targets,cache_dir=cache_root,observation_size=cfg.size)
-        signatures['online']={'contract':ONLINE_CONTRACT,'sampling':SAMPLING_CONTRACT,'assets':asset_signatures(targets)}
-        if cfg.stylesheets and any(r.get('corruption_contract')!=ONLINE_CONTRACT for r in validation):
+        expected_corruption=cfg.action_contract if cfg.fields==('x','y','width','height') else ONLINE_CONTRACT
+        sampling_contract='box-site-uniform-px-v1' if cfg.fields==('x','y','width','height') else SAMPLING_CONTRACT
+        signatures['online']={'contract':expected_corruption,'sampling':sampling_contract,'assets':asset_signatures(targets)}
+        if cfg.stylesheets and any(r.get('corruption_contract')!=expected_corruption for r in validation):
             raise ValueError('Validation uses old corruption; rerun prepare_stylesheet_policy.sh in a new output directory (reuse target assets/cache)')
     out=Path(args.out).resolve();settings={k:v for k,v in vars(args).items() if k not in ('out','steps','resume','init_checkpoint','policy_scale')}
     config=asdict(cfg)
@@ -365,6 +393,7 @@ def train(args):
         config.pop('parent_first');settings.pop('parent_first',None)
         config.pop('parent_first_max_probes');settings.pop('parent_first_max_probes',None)
     if not cfg.existing_values_only:config.pop('existing_values_only')
+    if not cfg.restore_original_priority:config.pop('restore_original_priority')
     if not cfg.stylesheets:
         config.pop('stylesheets');settings.pop('stylesheets',None)
     # Resource tuning does not change the index-seeded sample stream.
@@ -442,7 +471,7 @@ def train(args):
                                                   parent_first=cfg.parent_first))
         wait_seconds=0.;producer_seconds=0.;sample_count=0;retry_count=0;remove_count=0;remaining_total=0;recent_errors=[]
         rule_count=0;probe_rejections=0
-        property_counts={field:0 for field in FIELDS};path_length_total=0;mutation_total=0
+        property_counts={field:0 for field in cfg.fields};path_length_total=0;mutation_total=0
         if device.startswith('cuda'):torch.cuda.reset_peak_memory_stats(device)
         started=time.perf_counter()
         for step in range(start+1,args.steps+1):
@@ -477,15 +506,15 @@ def train(args):
                          'examples_per_second':session_examples/max(elapsed,1e-9)}
                 if device.startswith('cuda'):metrics['peak_cuda_bytes']=torch.cuda.max_memory_allocated(device)
                 if stream:
-                    metrics.update(online_corruption_contract=ONLINE_CONTRACT,
-                        online_sampling_contract=SAMPLING_CONTRACT,
+                    metrics.update(online_corruption_contract=expected_corruption,
+                        online_sampling_contract=sampling_contract,
                         online_samples=stream.cursor,data_wait_s=wait_seconds,
                         producer_seconds=producer_seconds,online_retries=retry_count,
                         online_teacher_remove_rate=remove_count/max(1,sample_count),
                         online_mean_remaining_edits=remaining_total/max(1,sample_count),
                         online_mean_path_length=path_length_total/max(1,sample_count),
                         online_mean_mutations=mutation_total/max(1,sample_count),
-                        online_teacher_property_distribution={field:property_counts[field]/max(1,sample_count) for field in FIELDS},
+                        online_teacher_property_distribution={field:property_counts[field]/max(1,sample_count) for field in cfg.fields},
                         online_recent_errors=recent_errors)
                     if cfg.stylesheets:metrics.update(online_teacher_rule_rate=rule_count/max(1,sample_count),
                         online_probe_rejections=probe_rejections)
@@ -514,12 +543,13 @@ def train(args):
                          'validation_n':len(selected),'validation_available_n':len(validation),
                          'validation_complete':len(selected)==len(validation),
                          'validation_pages':len({r.get('page_id',r['id'].rsplit('/',1)[0]) for r in selected}),
+                         'ce_supervision_coverage':supervision_counts,
                          'best':best,'early_stopping':early}
                 if cfg.parent_first:metrics['parent_first']=True
                 if cfg.stylesheets:metrics['validation_by_teacher']=breakdown
                 if any(r.get('recovery_contract') for r in selected):
                     metrics.update(target_reference='pre_normalization_server_render',
-                                   symbolic_reference='fitted_teacher_state_not_ground_truth_pixels')
+                                   symbolic_reference='original_declarations')
                 if metric_rows:
                     metric_started=time.perf_counter()
                     metrics.update(symbolic_policy_metrics(net,metric_rows,metric_targets,device,

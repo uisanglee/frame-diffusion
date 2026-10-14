@@ -100,11 +100,18 @@ READ_JS = r'''({html, ids, fields, fixed=false}) => {
 
 
 def read(browser, tree, html=None, fixed=False):
+    marker='data-tuide-box-layout'
+    if (marker in html if html is not None else browser.page.evaluate("document.documentElement.hasAttribute('data-tuide-box-layout')")):
+        from .box_layout import read as read_boxes
+        return read_boxes(browser,tree,html)
     return browser.page.evaluate(READ_JS, dict(html=html,
         ids=[n['id'] for n in tree['nodes'][1:]], fields=FIELDS, fixed=fixed))
 
 
 def execute(browser, owners, edit):
+    if 0<edit[0]<len(owners) and owners[edit[0]].get('box_layout'):
+        from .box_layout import execute as execute_box
+        return execute_box(browser,owners,edit)
     index, field, value, priority = validate_edit(edit, len(owners))
     from .explicit_html import check_explicit_edit
     check_explicit_edit(browser,owners[index].get('matches',[]),field,value)

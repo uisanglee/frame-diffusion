@@ -22,7 +22,7 @@ def _freeze_page(task):
             if not Path(row['current_html']).is_file() or not Path(row['current_image']).is_file():
                 raise ValueError('Incomplete frozen page assets')
     else:
-        sampler=OnlineSampler([target],'screenshot',seed=args.seed,max_noise=args.max_noise)
+        sampler=OnlineSampler([target],'screenshot',seed=args.seed,max_noise=args.max_noise,allow_clean=True)
         new=[]
         try:
             page_dir.mkdir(parents=True,exist_ok=True)
@@ -46,19 +46,25 @@ def freeze(args):
     if out==source or source in out.parents:raise ValueError('Use a separate frozen-data output directory')
     if args.samples_per_page<1:raise ValueError('samples-per-page must be positive')
     files=[source/f'{kind}-{split}.jsonl' for split in ('train','val','test') for kind in ('policy','pages')]
-    guard_run(out,{'kind':CONTRACT+'-fixed-v1','corruption_contract':ONLINE_CONTRACT,
+    from .box_layout import CONTRACT as BOX_CONTRACT
+    train_rows=list(read_jsonl(source/'policy-train.jsonl'))
+    contracts={r.get('teacher_strategy') for r in train_rows}
+    if not contracts or not contracts <= {CONTRACT,BOX_CONTRACT} or len(contracts)!=1:
+        raise ValueError('Prepare nonempty, matching action-contract labels first')
+    corruption_contract=BOX_CONTRACT if BOX_CONTRACT in contracts else ONLINE_CONTRACT
+    guard_run(out,{'kind':CONTRACT+'-fixed-v1','corruption_contract':corruption_contract,
         'data':{str(p):digest(p) for p in files},
         'seed':args.seed,'max_noise':args.max_noise,'samples':args.samples_per_page,
         'observation_size':getattr(args,'observation_size',384)},args.resume)
     # Online training needs clean targets, not fresh stored train screenshots.
-    if any(r.get('teacher_strategy')!=CONTRACT for r in read_jsonl(source/'policy-train.jsonl')):
+    if any(r.get('teacher_strategy') not in (CONTRACT,BOX_CONTRACT) for r in read_jsonl(source/'policy-train.jsonl')):
         raise ValueError('Prepare --stylesheets labels with the current size/margin action contract first')
     for kind in ('policy','pages'):
         write_jsonl(out/f'{kind}-train.jsonl',list(read_jsonl(source/f'{kind}-train.jsonl')))
     report={}
     for split in ('val','test'):
         rows=list(read_jsonl(source/f'policy-{split}.jsonl'))
-        if any(r['teacher_strategy']!=CONTRACT for r in rows):raise ValueError('Prepare --stylesheets labels first')
+        if any(r['teacher_strategy'] not in contracts for r in rows):raise ValueError('Prepare matching labels first')
         # target_pool's train guard is for the actual training stream. This
         # command intentionally samples held-out pages and restores their split.
         pool=target_pool([{**r,'split':'train'} for r in rows],cache_dir=source/'.online-target-cache',
@@ -72,7 +78,10 @@ def freeze(args):
             kept.extend(new)
             if new:selected.append({**pages[target['id']],'initial_html':new[0]['current_html']})
             for row in new:
-                edit=row['replacement_edit'];owner=row['css_owners'][edit[0]]
+                edit=row['replacement_edit']
+                if edit is None:
+                    counts['no_supervised_edit']+=1;continue
+                owner=row['css_owners'][edit[0]]
                 counts[owner['kind']+'/'+('SET' if edit[2] else 'REMOVE')]+=1
                 counts['property/'+edit[1]]+=1
             if (index+1)%50==0 or index==len(pool)-1:
@@ -81,7 +90,7 @@ def freeze(args):
         write_jsonl(out/f'rejections-{split}.jsonl',errors)
         input_pages={r.get('page_id',r['id']) for r in pages.values()}
         kept_pages={r.get('page_id',r['id']) for r in selected}
-        report[split]={'corruption_contract':ONLINE_CONTRACT,'pages':len(kept_pages),
+        report[split]={'corruption_contract':corruption_contract,'pages':len(kept_pages),
             'page_views':len(selected),'rows':len(kept),'failed_pages':len(input_pages-kept_pages),
             'failed_page_views':len(pages)-len(selected),'teachers':dict(counts)}
         if not kept:raise ValueError(f'Empty frozen {split}; inspect rejection report')

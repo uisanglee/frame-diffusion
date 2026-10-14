@@ -57,6 +57,22 @@ def relabel_validation(rows,size):
     kept=[];excluded=[]
     with HtmlBrowser() as browser:
         for row in rows:
+            if row.get('box_layout_contract'):
+                from .box_layout import FIELDS as BOX_FIELDS
+                edits=repair_path(row['declaration_state'],row['target_declaration_state'],fields=BOX_FIELDS)
+                order={v:i for i,v in enumerate(owner_order(row['current'],row['css_owners']))}
+                if not edits:excluded.append(row['id']);continue
+                item=copy.copy(row);item['replacement_edit']=min(edits,key=lambda e:order[e[0]])
+                kept.append(item);continue
+            if row.get('recovery_contract'):
+                edits=repair_path(row['declaration_state'],row['target_declaration_state'])
+                order={v:i for i,v in enumerate(owner_order(row['current'],row['css_owners']))}
+                if not edits:
+                    excluded.append(row['id']);continue
+                item=copy.copy(row)
+                item['replacement_edit']=min(edits,key=lambda e:order.get(e[0],len(order)))
+                item['parent_first_label_source']='original_declaration_journal'
+                kept.append(item);continue
             browser.reset_context();browser.load(Path(row['target_html']).read_text(),row['viewport'])
             mask,_,_=abstraction(browser,row['current'],row['viewport'],size)
             clean=css_owners.read(browser,row['current'])['state']

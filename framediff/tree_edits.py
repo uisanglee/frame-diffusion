@@ -54,7 +54,7 @@ def keywords(field):
 
 
 def value_valid(value, field):
-    if field not in FIELDS: return False
+    if field not in (*FIELDS,'x','y'): return False
     if not isinstance(value, str) or len(value) > MAX_VALUE: return False
     if value in keywords(field): return True
     m = re.fullmatch(r'([+-]?(?:\d+(?:\.\d*)?|\.\d+))([a-z%]*)', value)
@@ -65,7 +65,7 @@ def value_valid(value, field):
 
 
 def value_prefix(value, field):
-    if field not in FIELDS: return False
+    if field not in (*FIELDS,'x','y'): return False
     if len(value) > MAX_VALUE: return False
     if any(k.startswith(value) for k in keywords(field)): return True
     sign = r'[+]?' if field in NONNEGATIVE_FIELDS else r'[+-]?'
@@ -75,9 +75,9 @@ def value_prefix(value, field):
     return bool(m and any(u.startswith(m[1]) and len(value) + len(u) - len(m[1]) <= MAX_VALUE for u in UNITS))
 
 
-def validate_edit(edit, node_count):
+def validate_edit(edit, node_count, fields=FIELDS):
     node, field, value, priority = edit
-    if type(node) is not int or not 0 < node < node_count or field not in FIELDS:
+    if type(node) is not int or not 0 < node < node_count or field not in fields:
         raise ValueError('Invalid CSS declaration position')
     if priority not in ('', 'important') or (value == '' and priority):
         raise ValueError('Invalid CSS declaration priority')
@@ -86,14 +86,14 @@ def validate_edit(edit, node_count):
     return list(edit)
 
 
-def apply_state(state, edit):
-    node, field, value, priority = validate_edit(edit, len(state))
+def apply_state(state, edit, fields=FIELDS):
+    node, field, value, priority = validate_edit(edit, len(state),fields)
     result = copy.deepcopy(state)
-    result[node][FIELDS.index(field)] = [value, priority]
+    result[node][fields.index(field)] = [value, priority]
     return result
 
 
-def repair_path(current, target, seed=0):
+def repair_path(current, target, seed=0, fields=FIELDS):
     """Diff actual declarations, not corruption history or negated deltas.
 
     For this fixed-topology, single-declaration grammar every differing child
@@ -103,12 +103,12 @@ def repair_path(current, target, seed=0):
     if len(current) != len(target): raise ValueError('DOM topology mismatch')
     path = []
     for node in range(1, len(current)):
-        for j, field in enumerate(FIELDS):
+        for j, field in enumerate(fields):
             if current[node][j] != target[node][j]:
-                path.append(validate_edit([node, field, *target[node][j]], len(current)))
+                path.append(validate_edit([node, field, *target[node][j]], len(current),fields))
     random.Random(seed).shuffle(path)
     state = current
-    for action in path: state = apply_state(state, action)
+    for action in path: state = apply_state(state, action,fields)
     if state != target: raise ValueError('Path does not restore target declarations')
     return path
 
@@ -277,22 +277,25 @@ def prepare(args):
 
 class EditTokenizer:
     """node → field → replacement value/absence → priority → EOS. No STOP."""
-    def __init__(self, max_nodes):
+    def __init__(self, max_nodes, fields=FIELDS):
+        self.fields=tuple(fields);self.boxes=self.fields==('x','y','width','height')
         self.tokens = ['PAD','BOS','EOS','SET','REMOVE','NORMAL','IMPORTANT']
-        self.tokens += [f'N{i}' for i in range(max_nodes)] + list(FIELDS)
+        self.tokens += [f'N{i}' for i in range(max_nodes)] + list(self.fields)
         self.tokens += list('0123456789.+-%abcdefghijklmnopqrstuvwxyz')
+        if self.boxes:self.tokens=list(dict.fromkeys(self.tokens))
         self.ids = {t:i for i,t in enumerate(self.tokens)}
         self.max_nodes = max_nodes; self.max_length = MAX_VALUE + 5
 
     def encode(self, edit, node_count):
-        node,field,value,priority = validate_edit(edit,node_count)
+        node,field,value,priority = validate_edit(edit,node_count,self.fields)
+        if self.boxes and not value.endswith('px'):raise ValueError('Box policy requires px SET labels')
         text = [f'N{node}',field] + (['SET',*value,'IMPORTANT' if priority else 'NORMAL'] if value else ['REMOVE']) + ['EOS']
         return [self.ids[t] for t in text]
 
-    def allowed(self, prefix, node_count, state=None, size_limits=None):
+    def allowed(self, prefix, node_count, state=None, size_limits=None, preserve_priority=True):
         p = [self.tokens[i] for i in prefix]
         if not p: choices = [f'N{i}' for i in range(1,min(node_count,self.max_nodes))]
-        elif len(p)==1: choices = list(FIELDS)
+        elif len(p)==1: choices = list(self.fields)
         elif len(p)==2: choices = ['SET','REMOVE']
         elif p[-1] == 'EOS': choices = []
         elif p[2]=='REMOVE' or p[-1] in ('NORMAL','IMPORTANT'): choices = ['EOS']
@@ -304,16 +307,22 @@ class EditTokenizer:
             # Restrict edits to currently present, supported values. REMOVE is
             # still a legal action for an existing unwanted declaration.
             def editable(node,field):
-                value=state[node][FIELDS.index(field)][0]
+                value=state[node][self.fields.index(field)][0]
                 return bool(value) and value_valid(value,field)
             if not p:
-                choices=[t for t in choices if any(editable(int(t[1:]),f) for f in FIELDS)]
+                choices=[t for t in choices if any(editable(int(t[1:]),f) for f in self.fields)]
             elif len(p)==1:
                 choices=[f for f in choices if editable(int(p[0][1:]),f)]
-            elif len(p)>2 and p[2]=='SET':
-                priority=state[int(p[0][1:])][FIELDS.index(p[1])][1]
+            elif len(p)>2 and p[2]=='SET' and preserve_priority:
+                priority=state[int(p[0][1:])][self.fields.index(p[1])][1]
                 forbidden='NORMAL' if priority else 'IMPORTANT'
                 choices=[t for t in choices if t!=forbidden]
+        if self.boxes and len(p)>=2:
+            if len(p)==2:choices=['SET']
+            elif p[2]=='SET' and p[-1] not in ('NORMAL','IMPORTANT','EOS'):
+                value=''.join(p[3:])
+                choices=[c for c in choices if (value.endswith('px') if c in ('NORMAL','IMPORTANT') else
+                    bool(re.fullmatch(r'[+-]?\d*(?:\.\d*)?(?:p|px)?',value+c)))]
         if len(p)>=2:
             minimum=(size_limits or {}).get(int(p[0][1:]),{}).get(p[1])
             if minimum is not None:
@@ -333,4 +342,4 @@ class EditTokenizer:
         if p[-1]!='EOS': raise ValueError('Incomplete replacement')
         edit=[int(p[0][1:]),p[1],'','']
         if p[2]=='SET': edit[2]=''.join(p[3:-2]);edit[3]='important' if p[-2]=='IMPORTANT' else ''
-        return validate_edit(edit,node_count)
+        return validate_edit(edit,node_count,self.fields)

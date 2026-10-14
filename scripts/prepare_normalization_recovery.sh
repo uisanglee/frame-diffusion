@@ -10,7 +10,6 @@ output=$3
 python -m framediff visual-tree-normalize \
   --rendered "$rendered" --reuse-normalized "$old_labels" \
   --out "$output/labels" --recover-normalization \
-  --recovery-fit-steps "${RECOVERY_FIT_STEPS:-16}" \
   --workers "${PREPARE_WORKERS:-4}" --seed "${SEED:-42}" \
   --max-css-owners "${MAX_CSS_OWNERS:-512}" \
   --observation-size "${IMAGE_SIZE:-384}" --resume
