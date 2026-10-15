@@ -35,6 +35,24 @@ def test_unsafe_height_is_rolled_back_not_a_corruption_label(tmp_path):
         parent_id=browser.page.locator('#parent').get_attribute('data-fd-id')
         qa=convert(browser,browser.page.content(),[400,300],tmp_path,action_ids=[parent_id],max_pixel_mae=.001)
         assert qa['accepted'] and qa['partial_normalization'],qa
+        assert qa['full_scroll_fallback'] and qa['scroll_verification_trials']>2,qa
         assert any(r['field']=='height' and r['reason']=='changes_render_or_scroll' for r in qa['rejected_fields'])
         assert browser.page.locator('#parent').evaluate('e=>e.style.height')=='auto'
         assert 'height' not in browser.page.locator('#parent').get_attribute('data-tuide-editable-fields').split()
+
+
+def test_scroll_only_failure_uses_full_fallback(tmp_path):
+    with HtmlBrowser() as browser:
+        html='''<html><head><style>body{margin:0}
+        #scroll{width:150px;height:100px;overflow:auto}
+        .spacer{height:400px}.danger{height:30px;background:red}
+        #scroll[data-tuide-explicit-id] .danger{background:blue!important}</style></head>
+        <body><div id="scroll"><div class="spacer"></div><div class="danger">below</div></div></body></html>'''
+        dom=browser.snapshot(html,[400,200],None,32)
+        tree,_,_=dom_tree(dom);annotate(browser,tree)
+        target=browser.page.locator('#scroll').get_attribute('data-fd-id')
+        qa=convert(browser,browser.page.content(),[400,200],tmp_path,
+                   action_ids=[target],max_pixel_mae=.001)
+        assert qa['accepted'] and qa['partial_normalization'],qa
+        assert qa['full_scroll_fallback'] and qa['scroll_verification_trials']>2,qa
+        assert any(r['field']=='width' for r in qa['rejected_fields'])

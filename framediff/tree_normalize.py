@@ -7,7 +7,7 @@ from pathlib import Path
 
 from . import css_owners
 from .explicit_html import feedback_metadata
-from .safe_sizes import convert, CONTRACT
+from .safe_sizes import convert, CONTRACT, COMPATIBLE_IMPLEMENTATION_SHAS
 from .html_bridge import HtmlBrowser
 from .html_feedback import refresh_geometry
 from .ir import read_json, read_jsonl
@@ -16,6 +16,30 @@ from .visual import annotate, elements
 from .visual_data import validate_splits
 from .web_experiment import digest, guard_run
 from .preparation_workers import page_map, write_json, write_jsonl
+
+
+def _guard_normalization_run(out,config,resume):
+    """Allow only the audited scroll-fast-path migration to reuse records."""
+    path=out/'config.json'
+    if not (resume and path.exists()):
+        guard_run(out,config,resume);return
+    previous=read_json(path)
+    if previous==config:return
+    old_sha=previous.get('safe_sizes_sha');new_sha=config.get('safe_sizes_sha')
+    allowed={new_sha,*COMPATIBLE_IMPLEMENTATION_SHAS}
+    def semantic(value):
+        value=dict(value)
+        value.pop('safe_sizes_sha',None)
+        value.pop('compatible_safe_sizes_shas',None)
+        return value
+    if (semantic(previous)==semantic(config) and old_sha in allowed and new_sha in allowed):
+        migrated={**config,'compatible_safe_sizes_shas':sorted(
+            set(previous.get('compatible_safe_sizes_shas',[]))|{old_sha,new_sha})}
+        write_json(path,migrated)
+        print({'normalization_cache_migration':'scroll-fast-path-v1',
+               'reused_safe_sizes_sha':old_sha,'current_safe_sizes_sha':new_sha},flush=True)
+        return
+    guard_run(out,config,resume)
 
 
 
@@ -65,7 +89,8 @@ def _prepare_page(task):
                         raise ValueError(qa.get('error') or 'Normalization changed rendering; see page report.json')
                     write_json(stamp,{'source_sha':signature,'sha':digest(normalized)})
                 qa=read_json(folder/'report.json')
-                stats={k:qa.get(k) for k in ('normalized_elements','partial_normalization','verification_trials')}
+                stats={k:qa.get(k) for k in ('normalized_elements','partial_normalization',
+                    'verification_trials','scroll_verification_trials','full_scroll_fallback')}
                 browser.load(normalized.read_text(),row['viewport'])
                 stage='css_owner_parsing'
                 tree=copy.deepcopy(row['current']);annotate(browser,tree)
@@ -157,7 +182,7 @@ def prepare(args):
         max_css_owners=args.max_css_owners,observation_size=args.observation_size,
         max_pixel_mae=args.max_pixel_mae,max_box_error=args.max_box_error,
         corruption=ONLINE_CONTRACT,sampling=SAMPLING_CONTRACT)
-    guard_run(out,config,args.resume)
+    _guard_normalization_run(out,config,args.resume)
     report={};all_rows=[]
     # Per-page normalization closes its browser before the corruption sampler
     # starts another synchronous Playwright runtime.
