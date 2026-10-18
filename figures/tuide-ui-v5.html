@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TUIDE UI figure assets</title>
+  <style>
+    @font-face {
+      font-family: "Inter";
+      src: url("./assets/InterVariable.ttf") format("truetype");
+      font-style: normal;
+      font-weight: 100 900;
+      font-display: block;
+    }
+
+    :root {
+      --orange: #f97316;
+      --orange-soft: #ffedd5;
+      --orange-pale: #fff7ed;
+      --ink: #1f2937;
+      --muted: #64748b;
+      --line: #e5e7eb;
+      --white: #ffffff;
+    }
+
+    * {
+      box-sizing: border-box;
+      font-family: "Inter", sans-serif !important;
+      font-weight: 400 !important;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: var(--white);
+      color: var(--ink);
+    }
+
+    body {
+      width: 1672px;
+      height: 941px;
+    }
+
+    .site-header {
+      height: 108px;
+      display: grid;
+      grid-template-columns: 300px 1fr 300px;
+      align-items: center;
+      padding: 0 52px;
+      border-bottom: 2px solid var(--line);
+      background: var(--white);
+    }
+
+    .brand {
+      color: var(--orange);
+      font-size: 58px;
+      letter-spacing: 1px;
+      line-height: 1;
+    }
+
+    .nav {
+      display: flex;
+      justify-content: center;
+      gap: 72px;
+      font-size: 28px;
+    }
+
+    .nav span:first-child {
+      padding-bottom: 12px;
+      border-bottom: 5px solid var(--orange);
+    }
+
+    .new-project {
+      justify-self: end;
+      min-width: 214px;
+      padding: 20px 28px;
+      border-radius: 18px;
+      background: var(--orange);
+      color: var(--white);
+      font-size: 26px;
+      text-align: center;
+      white-space: nowrap;
+    }
+
+    main {
+      height: calc(100% - 108px);
+      padding: 58px 52px 48px;
+      background: linear-gradient(180deg, #fff 0%, #fffaf6 100%);
+    }
+
+    .hero {
+      height: 466px;
+      display: grid;
+      grid-template-columns: 0.93fr 1.07fr;
+      gap: 74px;
+      align-items: center;
+    }
+
+    .hero-copy {
+      padding-left: 36px;
+    }
+
+    h1 {
+      margin: 0;
+      max-width: 590px;
+      font-size: 92px;
+      line-height: 1.02;
+      letter-spacing: -4px;
+    }
+
+    .subtitle {
+      margin: 26px 0 30px;
+      font-size: 38px;
+      line-height: 1.25;
+      color: #475569;
+    }
+
+    .cta {
+      display: inline-block;
+      min-width: 278px;
+      padding: 22px 30px;
+      border-radius: 16px;
+      background: var(--orange);
+      color: var(--white);
+      font-size: 34px;
+      text-align: center;
+    }
+
+    .project-panel {
+      min-height: 422px;
+      padding: 34px 40px 38px;
+      border: 2px solid #fed7aa;
+      border-radius: 28px;
+      background: var(--orange-soft);
+    }
+
+    .panel-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 28px;
+      font-size: 32px;
+    }
+
+    .dots {
+      letter-spacing: 8px;
+      color: #94a3b8;
+    }
+
+    .task {
+      height: 92px;
+      display: grid;
+      grid-template-columns: 54px 1fr auto;
+      align-items: center;
+      gap: 18px;
+      margin-top: 16px;
+      padding: 0 18px;
+      border: 2px solid #f1f5f9;
+      border-radius: 18px;
+      background: var(--white);
+      font-size: 27px;
+      white-space: nowrap;
+    }
+
+    .check {
+      width: 42px;
+      height: 42px;
+      border: 4px solid #cbd5e1;
+      border-radius: 50%;
+    }
+
+    .task.done .check {
+      border-color: var(--orange);
+      background: var(--orange-pale);
+      position: relative;
+    }
+
+    .task.done .check::after {
+      content: "";
+      position: absolute;
+      left: 10px;
+      top: 5px;
+      width: 11px;
+      height: 20px;
+      border-right: 4px solid var(--orange);
+      border-bottom: 4px solid var(--orange);
+      transform: rotate(42deg);
+    }
+
+    .status {
+      min-width: 132px;
+      padding: 13px 20px;
+      border-radius: 14px;
+      background: var(--orange-pale);
+      color: var(--ink);
+      text-align: center;
+      font-size: 24px;
+    }
+
+    .done .status,
+    .progress .status {
+      background: var(--orange);
+      color: var(--white);
+    }
+
+    .features {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 30px;
+      margin-top: 32px;
+    }
+
+    .feature {
+      height: 210px;
+      display: grid;
+      align-content: center;
+      padding: 28px 36px;
+      border: 2px solid var(--line);
+      border-top: 9px solid var(--orange);
+      border-radius: 18px;
+      background: var(--white);
+    }
+
+    .feature-name {
+      font-size: 48px;
+      color: var(--ink);
+    }
+
+    .feature-note {
+      margin-top: 13px;
+      font-size: 26px;
+      color: var(--muted);
+    }
+
+    /* Broken CSS geometry for the initial rendering. */
+    body.initial .site-header {
+      grid-template-columns: 235px 1fr 180px;
+      padding-right: 0;
+    }
+    body.initial .nav {
+      justify-content: start;
+      gap: 18px;
+    }
+    body.initial .new-project {
+      min-width: 180px;
+      transform: translateX(28px);
+    }
+    body.initial .hero {
+      grid-template-columns: 340px 1fr;
+      gap: 570px;
+    }
+    body.initial .hero-copy {
+      padding-left: 0;
+    }
+    body.initial h1 {
+      width: 280px;
+      font-size: 76px;
+      letter-spacing: -3px;
+    }
+    body.initial .subtitle {
+      width: 280px;
+      font-size: 31px;
+    }
+    body.initial .project-panel {
+      width: 760px;
+      transform: translateY(62px);
+    }
+    body.initial .task {
+      height: 70px;
+      margin-top: 8px;
+    }
+    body.initial .features {
+      grid-template-columns: 530px 580px 540px;
+      gap: 28px;
+    }
+    body.initial .feature:nth-child(2) {
+      transform: translateY(112px);
+    }
+    body.initial .feature:nth-child(3) {
+      transform: translate(56px, 170px);
+    }
+
+    /* One small residual error after repair. */
+    body.repaired .feature:nth-child(2) {
+      transform: translateY(8px);
+    }
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <div class="brand">TUIDE</div>
+    <nav class="nav" aria-label="Primary navigation">
+      <span>Home</span><span>Projects</span><span>Team</span>
+    </nav>
+    <div class="new-project">New project</div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="hero-copy">
+        <h1>Make work<br>flow.</h1>
+        <p class="subtitle">Plan projects and ship faster.</p>
+        <div class="cta">Get started</div>
+      </div>
+
+      <section class="project-panel">
+        <div class="panel-head"><span>My Projects</span><span class="dots">•••</span></div>
+        <div class="task done"><span class="check"></span><span>Design landing page</span><span class="status">Done</span></div>
+        <div class="task progress"><span class="check"></span><span>Build core features</span><span class="status">In progress</span></div>
+        <div class="task"><span class="check"></span><span>Launch to users</span><span class="status">Todo</span></div>
+      </section>
+    </section>
+
+    <section class="features">
+      <article class="feature"><div class="feature-name">PLAN</div><div class="feature-note">Define the next milestone</div></article>
+      <article class="feature"><div class="feature-name">BUILD</div><div class="feature-note">Move ideas into progress</div></article>
+      <article class="feature"><div class="feature-name">SHIP</div><div class="feature-note">Deliver work with clarity</div></article>
+    </section>
+  </main>
+
+  <script>
+    const state = new URLSearchParams(location.search).get("state") || "target";
+    document.body.className = ["target", "initial", "repaired"].includes(state) ? state : "target";
+  </script>
+</body>
+</html>

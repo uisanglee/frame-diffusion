@@ -33,17 +33,26 @@ case "${ONLINE_CORRUPTION:-1}" in
   0) ;;
   *) echo 'ONLINE_CORRUPTION must be 0 or 1' >&2; exit 2 ;;
 esac
-[[ -f "$detector" ]] || { echo "Missing detector: $detector" >&2; exit 2; }
 prepare=${PREPARE_DATA:-1}
-if [[ "$prepare" == 1 ]]; then
-  echo 'Run scripts/prepare_numeric_policy_tree.sh once, then set PREPARE_DATA=0.' >&2
-  exit 2
-elif [[ "$prepare" == 0 ]]; then
+if [[ "$prepare" != 0 && "$prepare" != 1 ]]; then
+  echo 'PREPARE_DATA must be 0 or 1' >&2;exit 2
+fi
+needs_predicted_targets=0
+for requested_mode in ${POLICY_MODES:-screenshot abstract}; do
+  [[ "$requested_mode" == screenshot || "$requested_mode" == abstract ]] || {
+    echo "Invalid POLICY_MODES item: $requested_mode" >&2; exit 2;
+  }
+  [[ "$requested_mode" == abstract ]] && needs_predicted_targets=1
+done
+if [[ "$needs_predicted_targets" == 1 ]]; then
+  [[ -f "$detector" ]] || { echo "Missing detector: $detector" >&2; exit 2; }
+  if [[ "$prepare" == 1 ]]; then
+    echo 'Run scripts/prepare_numeric_policy_tree.sh once, then set PREPARE_DATA=0.' >&2
+    exit 2
+  fi
   for required in predicted-train/data.jsonl predicted-val/data.jsonl; do
     [[ -s "$run/$required" ]] || { echo "PREPARE_DATA=0 but missing $run/$required" >&2; exit 2; }
   done
-else
-  echo 'PREPARE_DATA must be 0 or 1' >&2;exit 2
 fi
 for head in ${POLICY_HEADS:-replacement}; do
   for mode in ${POLICY_MODES:-screenshot abstract}; do
