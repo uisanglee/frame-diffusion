@@ -16,7 +16,7 @@ import time
 import tempfile
 from importlib.metadata import version
 from collections import deque
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, TimeoutError as FutureTimeoutError
 from functools import lru_cache
 from multiprocessing.util import Finalize
 from pathlib import Path
@@ -168,7 +168,8 @@ def target_pool(rows, manifest=None, cache_dir=None, observation_size=384, diagn
     if any(r.get('lazy_contract') for r in rows):
         if not all(r.get('lazy_contract') and r['split']=='train' for r in rows):
             raise ValueError('Lazy train descriptors cannot be mixed with eager or held-out rows')
-        return [dict(r,id=r['lazy_source']['id']) for r in rows]
+        lazy_cache=str(Path(cache_dir).resolve()/'lazy-train-views') if cache_dir is not None else None
+        return [dict(r,id=r['lazy_source']['id'],lazy_cache_dir=lazy_cache) for r in rows]
     if cache_dir is None and manifest:
         cache_dir = Path(manifest).resolve().parent/'.online-target-cache'
     pages = {p['id']:p for p in read_jsonl(manifest)} if manifest else {}
@@ -347,7 +348,9 @@ class OnlineSampler:
         self.browser=None
         self.parent_first=parent_first
         from .lazy_webui import TrainViewCache
-        self.view_cache=TrainViewCache()
+        cache_dirs={t.get('lazy_cache_dir') for t in targets if t.get('lazy_cache_dir')}
+        if len(cache_dirs)>1:raise ValueError('Mixed lazy train-view cache directories')
+        self.view_cache=TrainViewCache(cache_dir=next(iter(cache_dirs),None))
 
     @lru_cache(maxsize=64)
     def html(self,path): return Path(path).read_text()
@@ -383,7 +386,14 @@ class OnlineSampler:
                     # Materialization owns a Playwright runtime; close ours first.
                     self.close()
                     prepared=self.view_cache.get(descriptor,policy=True)
-                    target=target_pool([prepared],observation_size=descriptor['lazy_settings']['observation_size'])[0]
+                    # _prepare_page already performed and cached the expensive
+                    # browser witness probes. Reusing its enriched row avoids
+                    # running the same candidate inspection a second time.
+                    required=('visible_candidates','target_declaration_state','target_html','target_image')
+                    if any(k not in prepared for k in required):
+                        raise ValueError('Lazy policy cache lacks inspected target metadata')
+                    target=copy.deepcopy(prepared)
+                    target['id']=descriptor['lazy_source']['id']
                 if self.browser is None: self.browser=HtmlBrowser().__enter__()
                 else: self.browser.reset_context()
                 browser=self.browser;tree=target['current'];viewport=target['viewport']
@@ -526,13 +536,28 @@ class OnlineStream:
             raise ValueError('Invalid online stream configuration')
         self.args=(targets,mode,seed,max_noise,attempts,parent_first)
         self.workers=workers;self.prefetch=prefetch;self.timeout=timeout;self.cursor=start;self.next_index=start
-        self.pending=deque();self.pool=None
+        self.pending=deque();self.pool=None;self.timeout_skips=0
 
     def __enter__(self):
+        self._start_pool();return self
+
+    def _start_pool(self):
         context=mp.get_context('spawn')  # Never fork a CUDA-initialized parent.
         self.stop=context.Event()
         self.pool=ProcessPoolExecutor(self.workers,mp_context=context,initializer=_initialize,initargs=(*self.args,self.stop))
-        self._fill();return self
+        self.next_index=self.cursor;self.pending.clear();self._fill()
+
+    def _stop_pool(self,force=False):
+        if self.pool is None:return
+        self.stop.set()
+        for future in self.pending:future.cancel()
+        processes=list(getattr(self.pool,'_processes',{}).values()) if force else []
+        self.pool.shutdown(wait=not force,cancel_futures=True)
+        if force:
+            for process in processes:
+                if process.is_alive():process.terminate()
+            for process in processes:process.join(timeout=5)
+        self.pool=None;self.pending.clear()
 
     def _fill(self):
         while len(self.pending)<self.prefetch:
@@ -540,16 +565,21 @@ class OnlineStream:
 
     def take(self,count):
         rows=[]
-        for _ in range(count):
+        while len(rows)<count:
             if not self.pool: raise RuntimeError('Online stream is not open')
             try: row=self.pending[0].result(timeout=self.timeout)
+            except FutureTimeoutError:
+                skipped=self.cursor
+                self.timeout_skips+=1
+                print({'online_timeout_skip':skipped,'timeout_s':self.timeout,
+                       'action':'restart_worker_pool'},flush=True)
+                self.cursor+=1
+                self._stop_pool(force=True);self._start_pool()
+                continue
             except Exception as exc: raise RuntimeError(f'Online producer failed/stalled at sample {self.cursor}: {exc}') from exc
             if row['online']['index']!=self.cursor: raise RuntimeError('Online sample order changed')
             self.pending.popleft();self.cursor+=1;rows.append(row);self._fill()
         return rows
 
     def __exit__(self,*args):
-        if self.pool is not None:
-            self.stop.set()
-            for future in self.pending: future.cancel()
-            self.pool.shutdown(wait=True,cancel_futures=True);self.pool=None
+        self._stop_pool()

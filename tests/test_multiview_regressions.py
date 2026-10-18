@@ -81,7 +81,24 @@ def test_lazy_preparation_does_not_render_train(tmp_path):
 
 
 @pytest.mark.browser
-def test_lazy_detector_and_policy_materialization(tmp_path):
+def test_lazy_policy_disk_cache_survives_process_cache(tmp_path,monkeypatch):
+    from framediff.lazy_webui import TrainViewCache
+    row=lazy_descriptor(tmp_path);root=tmp_path/'persistent-lazy-cache'
+    first=TrainViewCache(capacity=1,cache_dir=root)
+    try:prepared=first.get(row,policy=True)
+    finally:first.close()
+    assert prepared['visible_candidates'] and prepared['target_declaration_state']
+    assert Path(prepared['target_html']).is_file() and Path(prepared['target_image']).is_file()
+    import framediff.visual_data as visual_data
+    monkeypatch.setattr(visual_data,'_render_page',lambda *a,**k: (_ for _ in ()).throw(
+        AssertionError('persistent lazy cache rerendered the page')))
+    second=TrainViewCache(capacity=1,cache_dir=root)
+    try:assert second.get(row,policy=True)==prepared
+    finally:second.close()
+
+
+@pytest.mark.browser
+def test_lazy_detector_and_policy_materialization(tmp_path,capsys):
     from framediff.lazy_webui import TrainViewCache,portable_images
     from framediff.tree_online import target_pool,OnlineSampler
     row=lazy_descriptor(tmp_path)
@@ -98,6 +115,7 @@ def test_lazy_detector_and_policy_materialization(tmp_path):
         assert Path(row['lazy_source']['html']).is_file()
         assert cache.get(row,policy=True)==policy
     finally:cache.close()
+    capsys.readouterr()
     sampler=OnlineSampler(target_pool([row]),'screenshot',max_noise=1)
     try:
         result=sampler.generate(0)
@@ -106,6 +124,9 @@ def test_lazy_detector_and_policy_materialization(tmp_path):
         assert result['replacement_edit'] and result['page_id']=='page'
     finally:
         sampler.close();sampler.view_cache.close()
+    # Lazy normalization performs the expensive witness probe once. The
+    # online sampler consumes that enriched result without a second probe.
+    assert capsys.readouterr().out.count("'online_target_filter'")==1
 
 
 @pytest.mark.browser

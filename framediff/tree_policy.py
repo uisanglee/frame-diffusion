@@ -15,7 +15,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from .ir import read_json, read_jsonl, write_json
-from .model import Block, ModelConfig, encode, collate
+from .model import Block, ModelConfig
 from .train import seed_all, select_device
 from .tree_edits import CONTRACT, FIELDS, EditTokenizer, apply_state, extract, repair_path
 from .visual import SpatialEncoder, elements, semantic_masks, image_tensor,BOUNDARY_CONTRACT,SEMANTIC_CHANNELS
@@ -521,7 +521,8 @@ def train(args):
                 if stream:
                     metrics.update(online_corruption_contract=expected_corruption,
                         online_sampling_contract=sampling_contract,
-                        online_samples=stream.cursor,data_wait_s=wait_seconds,
+                        online_samples=stream.cursor,online_timeout_skips=stream.timeout_skips,
+                        data_wait_s=wait_seconds,
                         producer_seconds=producer_seconds,online_retries=retry_count,
                         online_teacher_remove_rate=remove_count/max(1,sample_count),
                         online_mean_remaining_edits=remaining_total/max(1,sample_count),

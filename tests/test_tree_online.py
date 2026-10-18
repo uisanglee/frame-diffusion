@@ -1,5 +1,7 @@
 import copy
 import random
+from collections import deque
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 
 import pytest
@@ -176,6 +178,26 @@ def test_prefetch_bounded_order_and_resume(corpus):
         assert again['declaration_state']==rows[2]['declaration_state']
         assert again['replacement_edit']==rows[2]['replacement_edit']
     assert stream.pool is None and resumed.pool is None
+
+
+def test_timeout_skips_index_and_restarts_pool(monkeypatch,capsys):
+    class Future:
+        def __init__(self,value=None,timeout=False):self.value=value;self.timeout=timeout
+        def result(self,timeout=None):
+            if self.timeout:raise FutureTimeoutError()
+            return self.value
+    stream=OnlineStream([], 'screenshot',workers=1,prefetch=1,timeout=1)
+    stream.pool=object();stream.stop=object();stream.pending=deque([Future(timeout=True)])
+    stopped=[]
+    def stop(force=False):
+        stopped.append(force);stream.pool=None;stream.pending.clear()
+    def start():
+        stream.pool=object();stream.pending=deque([Future({'online':{'index':1}})])
+    monkeypatch.setattr(stream,'_stop_pool',stop);monkeypatch.setattr(stream,'_start_pool',start)
+    monkeypatch.setattr(stream,'_fill',lambda:None)
+    assert stream.take(1)==[{'online':{'index':1}}]
+    assert stream.cursor==2 and stream.timeout_skips==1 and stopped==[True]
+    assert "'online_timeout_skip': 0" in capsys.readouterr().out
 
 
 @pytest.mark.browser
