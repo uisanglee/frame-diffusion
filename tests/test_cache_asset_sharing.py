@@ -49,3 +49,34 @@ def test_bad_checksum_prevents_cleanup(tmp_path):
     with pytest.raises(ValueError,match='audit'):
         module().run(roots,tmp_path/'store',True)
     assert not (tmp_path/'store').exists()
+
+
+def test_committed_nested_staging_paths_are_hash_verified(tmp_path):
+    root=tmp_path/'lazy-train-views';key='a'*64
+    entry=root/key;folder=entry/'labels/normalized-pages/train'/('b'*64)
+    image,record=fixture(folder,b'same')
+    stale=root/('.'+key+'.random_123')/image.relative_to(entry)
+    value=json.loads(record.read_text());sha=next(iter(value['assets'].values()))
+    value['assets']={str(stale):sha};record.write_text(json.dumps(value))
+    (entry/'result.json').write_text(json.dumps({'contract':'lazy-webui-train-view-cache-v2-verified',
+                                               'result':{},'assets':{str(image):sha}}))
+    other,_=fixture(tmp_path/'normalized-pages',b'same')
+    report=module().run([root,other.parent],tmp_path/'store',True)
+    assert not report['errors'] and len(report['resolved_staging_paths'])==1
+    assert os.path.samefile(image,other)
+    assert json.loads(record.read_text())==value
+    # Matching name alone must never excuse a content mismatch.
+    value['assets'][str(stale)]='0'*64;record.write_text(json.dumps(value))
+    assert module().run([root],tmp_path/'store')['errors']
+    with pytest.raises(ValueError,match='audit'):
+        module().run([root],tmp_path/'store',True)
+
+
+def test_staging_mapping_requires_matching_completed_entry(tmp_path):
+    root=tmp_path/'lazy-train-views';entry=root/('a'*64)
+    image,record=fixture(entry/'labels',b'same')
+    value=json.loads(record.read_text());sha=next(iter(value['assets'].values()))
+    value['assets']={str(root/('.'+'c'*64+'.rand')/'labels/after.png'):sha}
+    record.write_text(json.dumps(value))
+    (entry/'result.json').write_text(json.dumps({'contract':'lazy-webui-train-view-cache-v2-verified'}))
+    assert module().run([root],tmp_path/'store')['errors']

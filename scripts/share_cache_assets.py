@@ -11,6 +11,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import tempfile
 
@@ -22,8 +23,31 @@ def digest(path):
     return h.hexdigest()
 
 
+def committed_asset(record, path):
+    """Resolve only a nested record's own staging path after atomic commit.
+
+    Historical lazy commits relocated result.json, not nested record.json.
+    Never search other entries or infer identity from the basename alone.
+    The caller must still check the recorded content hash.
+    """
+    if path.exists() or path.is_symlink():return path
+    for entry in record.parents:
+        if not re.fullmatch(r'[0-9a-f]{64}',entry.name):continue
+        completion=entry/'result.json'
+        if not completion.is_file():continue
+        if json.loads(completion.read_text()).get('contract')!='lazy-webui-train-view-cache-v2-verified':continue
+        for index,part in enumerate(path.parts):
+            if not re.fullmatch(r'\.'+entry.name+r'\.[A-Za-z0-9_-]+',part):continue
+            suffix=Path(*path.parts[index+1:])
+            if '..' in suffix.parts:continue
+            candidate=entry/suffix
+            if candidate.parent==record.parent and candidate.resolve().is_relative_to(entry.resolve()):
+                return candidate
+    return path
+
+
 def run(roots, store, apply=False):
-    groups=defaultdict(dict);errors=[];records=0
+    groups=defaultdict(dict);errors=[];records=0;relocated=[]
     for root in roots:
         for name in ('record.json','result.json'):
             for record in root.rglob(name):
@@ -37,14 +61,19 @@ def run(roots, store, apply=False):
                     records+=1
                     for filename,sha in assets.items():
                         path=Path(filename)
+                        original=path
+                        path=committed_asset(record,path)
                         if not path.is_absolute() or not any(path.is_relative_to(r) for r in roots):continue
                         if path.suffix.lower() not in ('.html','.png','.jpg','.jpeg','.webp'):continue
                         if path.is_symlink() or not path.is_file():raise ValueError(f'Missing/symlink asset: {path}')
                         if digest(path)!=sha:raise ValueError(f'Checksum mismatch: {path}')
+                        if path!=original:
+                            relocated.append({'record':str(record),'from':str(original),'to':str(path)})
                         groups[sha][str(path)]=path.stat()
                 except (OSError,ValueError,TypeError) as exc:
                     errors.append({'record':str(record),'error':str(exc)})
-    report={'records':records,'errors':errors,'duplicate_groups':[], 'estimated_reclaimable_bytes':0,
+    report={'records':records,'errors':errors,'resolved_staging_paths':relocated,
+            'duplicate_groups':[], 'estimated_reclaimable_bytes':0,
             'applied':False}
     for sha,files in groups.items():
         if len(files)<2:continue
@@ -89,7 +118,8 @@ def main():
     report=run(roots,Path(args.store).resolve(),args.apply)
     target=Path(args.report);target.parent.mkdir(parents=True,exist_ok=True)
     target.write_text(json.dumps(report,ensure_ascii=False,indent=2))
-    print(json.dumps({k:v for k,v in report.items() if k!='duplicate_groups'},ensure_ascii=False))
+    print(json.dumps({k:v for k,v in report.items() if k not in ('duplicate_groups','resolved_staging_paths')},ensure_ascii=False))
+    print(f'Resolved staging paths: {len(report["resolved_staging_paths"])}')
     print(f'Duplicate groups: {len(report["duplicate_groups"])}. Report: {target}')
 
 
