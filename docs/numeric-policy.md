@@ -165,18 +165,16 @@ not require rewriting existing labels or detector caches.
 
 ~~~bash
 mkdir -p log
-ONLINE_WORKERS=2 ONLINE_PREFETCH=4 nohup bash scripts/train_numeric_policy_gpu1.sh > log/css-tree-online-screenshot.log 2>&1 &
-ONLINE_WORKERS=2 ONLINE_PREFETCH=4 nohup bash scripts/train_numeric_policy_gpu3.sh > log/css-tree-online-abstract.log 2>&1 &
+CUDA_VISIBLE_DEVICES=1 PREPARE_DATA=0 POLICY_HEADS=replacement POLICY_MODES=screenshot POLICY_RUN_DIR=runs/css-tree-online-v1-screenshot ONLINE_WORKERS=2 ONLINE_PREFETCH=4 nohup bash scripts/train_numeric_policy.sh data/webui-css-tree-v1 /dev/null runs/css-tree-v1-shared > log/css-tree-online-screenshot.log 2>&1 &
+CUDA_VISIBLE_DEVICES=3 PREPARE_DATA=0 POLICY_HEADS=replacement POLICY_MODES=abstract POLICY_RUN_DIR=runs/css-tree-online-v1-abstract ONLINE_WORKERS=2 ONLINE_PREFETCH=4 nohup bash scripts/train_numeric_policy.sh data/webui-css-tree-v1 runs/webui-10k-v3-nospacing-fresh-webui/detector/best.pt runs/css-tree-v1-shared > log/css-tree-online-abstract.log 2>&1 &
 ~~~
 
 GPU 1: screenshot baseline. GPU 3: abstract policy.
-Both default to 30,000 stage-1 / 15,000 stage-2 maximum steps with early stopping.
+Abstract defaults to 30,000 stage-1 / 15,000 stage-2 maximum steps with early stopping.
 Stage 1 uses exact DOM target abstractions; stage 2 uses frozen detector outputs
-for the abstract model. Screenshot training keeps RGB for both stages.
-Each wrapper accepts the same four optional paths as documented in its usage.
-Defaults now write runs/css-tree-online-v1-screenshot and
-runs/css-tree-online-v1-abstract. For an offline ablation set ONLINE_CORRUPTION=0
-AND supply a different fourth positional argument for the output directory.
+for the abstract model. Screenshot training uses a single 30,000-step RGB stage.
+The GPU-specific wrappers were removed; use the generic script above.
+For an offline ablation set ONLINE_CORRUPTION=0 and a separate POLICY_RUN_DIR.
 
 Existing last.pt resumes only matching data/configuration. Stage 2 initializes
 from the new stage-1 best.pt. Do not point these runs to old delta-policy output

@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Resume the full-DOM detectors or the single-stage screenshot policy.
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+case "${1:-}" in
+  detector-7k) size=7000; gpu=2; steps=20000; mode=detector ;;
+  detector-56169) size=56169; gpu=3; steps=40000; mode=detector ;;
+  screenshot-7k) size=7000; gpu=4; mode=screenshot ;;
+  *) echo 'Usage: bash scripts/resume_webui_training.sh detector-7k|detector-56169|screenshot-7k' >&2; exit 2 ;;
+esac
+export CUDA_VISIBLE_DEVICES=$gpu
+export DEVICE=cuda PYTHONUNBUFFERED=1 TUIDE_SAVE_DIAGNOSTICS=0
+export TUIDE_SHARED_CACHE="${TUIDE_SHARED_CACHE:-$PWD/data/webui-shared-cache}"
+export BATCH_SIZE="${BATCH_SIZE:-2}" ACCUMULATION="${ACCUMULATION:-4}"
+export VAL_SAMPLES="${VAL_SAMPLES:-2000}" EVAL_EVERY="${EVAL_EVERY:-500}"
+export EARLY_STOP_PATIENCE="${EARLY_STOP_PATIENCE:-10}" EARLY_STOP_MIN_DELTA="${EARLY_STOP_MIN_DELTA:-0}"
+export SEED="${SEED:-42}"
+require_file() { [[ -s "$1" ]] || { echo "Missing required file: $1" >&2; exit 2; }; }
+if [[ "$mode" == detector ]]; then
+  data="data/webui-detector-full-dom-v1/$size/rendered"
+  output="runs/webui-detector-full-dom-v1/$size/detector"
+  require_file "$output/last.pt"
+  require_file "$data/detector-train.jsonl"
+  require_file "$data/detector-val.jsonl"
+  exec python -m framediff visual-train-detector \
+    --train "$data/detector-train.jsonl" --val "$data/detector-val.jsonl" \
+    --out "$output" --resume "$output/last.pt" --device "$DEVICE" --seed "$SEED" \
+    --steps "${DETECTOR_STEPS:-$steps}" --lr "${DETECTOR_LR:-0.0001}" \
+    --batch-size "$BATCH_SIZE" --accumulation "$ACCUMULATION" \
+    --loader-workers "${DETECTOR_LOADER_WORKERS:-2}" --loader-prefetch "${DETECTOR_LOADER_PREFETCH:-2}" \
+    --render-workers "${DETECTOR_RENDER_WORKERS:-2}" --render-prefetch "${DETECTOR_RENDER_PREFETCH:-4}" \
+    --render-timeout "${DETECTOR_RENDER_TIMEOUT:-900}" \
+    --val-samples "$VAL_SAMPLES" --eval-every "$EVAL_EVERY" \
+    --early-stop-patience "$EARLY_STOP_PATIENCE" --early-stop-min-delta "$EARLY_STOP_MIN_DELTA"
+fi
+export POLICY_MODES=screenshot POLICY_SCALE=s
+export POLICY_SCREENSHOT_STEPS="${POLICY_SCREENSHOT_STEPS:-30000}" POLICY_LR="${POLICY_LR:-0.0001}"
+export ONLINE_WORKERS="${ONLINE_WORKERS:-2}" ONLINE_PREFETCH="${ONLINE_PREFETCH:-4}"
+export ONLINE_TIMEOUT="${ONLINE_TIMEOUT:-900}" PARENT_FIRST=0
+output=runs/webui-screenshot-single-v1/7000/tuide-s-screenshot
+require_file "$output/replacement/raw-stage1/last.pt"
+exec bash scripts/train_tuide_scale.sh s \
+  data/webui-7k-56169-safe-margin-v1/7000/css /dev/null \
+  runs/webui-screenshot-single-v1/7000/shared-unused "$output"

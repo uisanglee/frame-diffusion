@@ -166,13 +166,17 @@ After preparation completes, and after previous jobs release the GPUs:
 
 ```bash
 mkdir -p log
-ONLINE_WORKERS=2 nohup bash scripts/train_stylesheet_policy_gpu1.sh \
+CUDA_VISIBLE_DEVICES=1 POLICY_MODES=screenshot ONLINE_WORKERS=2 nohup bash scripts/train_tuide_scale.sh s \
+  data/webui-css-owners-v10-targeted-inline /dev/null \
+  runs/css-owners-v10-targeted-inline-shared runs/css-owners-online-v3-screenshot \
   > log/css-owners-v3-screenshot.log 2>&1 &
-ONLINE_WORKERS=2 nohup bash scripts/train_stylesheet_policy_gpu3.sh \
+CUDA_VISIBLE_DEVICES=3 POLICY_MODES=abstract ONLINE_WORKERS=2 nohup bash scripts/train_tuide_scale.sh s \
+  data/webui-css-owners-v10-targeted-inline runs/webui-10k-v3-nospacing-fresh-webui/detector/best.pt \
+  runs/css-owners-v10-targeted-inline-shared runs/css-owners-online-v3-abstract \
   > log/css-owners-v3-abstract.log 2>&1 &
 ```
 
-Each script runs stage 1 then stage 2. Maximum steps remain 30,000/15,000;
+Screenshot runs a single 30,000-step stage. Abstract runs stages 1 and 2 (30,000/15,000);
 learning rates are 1e-4/1e-5, batch size 2, accumulation 4, validation every 500,
 early-stop patience 10. Existing environment overrides still apply. Both stages
 use new online corruption; abstract stage 2 switches to detector target masks.
