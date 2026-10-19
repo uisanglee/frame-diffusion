@@ -8,6 +8,7 @@ Run again to verify or resume; READY is only written after all inputs validate.
 import argparse
 import errno
 import hashlib
+from html import unescape
 import json
 import os
 from pathlib import Path
@@ -52,6 +53,7 @@ class Exporter:
     def __init__(self, out):
         self.out = out
         self.done = {}
+        self.url_warnings = 0
 
     def asset(self, path):
         path = Path(os.path.abspath(path))
@@ -68,11 +70,27 @@ class Exporter:
             text = path.read_text()
             references = re.findall(r'''(?:src|href|poster)\s*=\s*["']([^"']+)["']|url\(\s*["']?([^\s)'";]+)''', text, re.I)
             for pair in references:
-                ref = unquote(next(value for value in pair if value))
-                parsed = urlsplit(ref)
+                ref = unescape(next(value for value in pair if value)).strip()
+                try:
+                    parsed = urlsplit(ref)
+                except ValueError as exc:
+                    # Broken remote links are part of the original HTML, not
+                    # dependencies to copy. Do not change the HTML itself.
+                    scheme = re.match(r'^([a-zA-Z][a-zA-Z0-9+.-]*):', ref)
+                    remote = ref.startswith('//') or (scheme and scheme[1].lower() != 'file')
+                    if not remote:
+                        raise ValueError(f'Cannot safely resolve local resource in {path}: {ref}') from exc
+                    self.out.mkdir(parents=True, exist_ok=True)
+                    with (self.out/'url-warnings.jsonl').open('a') as log:
+                        log.write(json.dumps({'html':str(path), 'url':ref, 'error':str(exc),
+                                              'action':'ignored_invalid_external_url'}, ensure_ascii=False)+'\n')
+                    self.url_warnings += 1
+                    continue
                 if parsed.scheme not in ('', 'file') or ref.startswith(('#', '//')):
                     continue
-                local = Path(parsed.path)
+                # Decode only the path, after parsing; %23 and %3F can be
+                # literal filename characters rather than URL delimiters.
+                local = Path(unquote(parsed.path))
                 if not parsed.path:
                     continue
                 candidate = local if local.is_absolute() else path.parent/local
@@ -143,6 +161,7 @@ def main():
     Exporter.write(config_path, json.dumps(config, indent=2))
     (out/'READY').unlink(missing_ok=True)
     exporter = Exporter(out)
+    (out/'url-warnings.jsonl').write_text('')
     counts = {}
     for manifest in manifests:
         target = out/manifest.relative_to(source)
@@ -161,6 +180,7 @@ def main():
         counts[str(target.relative_to(out))] = count
         print(f'Exported {target}: {count} rows', flush=True)
     Exporter.write(out/'summary.json', json.dumps({'rows': counts, 'assets': len(exporter.done),
+        'invalid_external_urls': exporter.url_warnings,
         'source_preserved': True, 'asset_mode': 'hardlink',
         'warning': 'Do not modify linked HTML/images in place; JSON/manifests are independent.'}, indent=2))
     with (out/'asset-checksums.jsonl').open('w') as stream:

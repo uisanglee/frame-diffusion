@@ -140,3 +140,33 @@ def test_json_independent_and_old_copies_converted(tmp_path):
     shutil.rmtree(old)
     assert target.read_bytes() == b'image'
     assert result.is_file()
+
+
+def test_invalid_remote_url_keeps_html_and_local_assets(tmp_path):
+    module=exporter_module()
+    source=tmp_path/'old';source.mkdir()
+    image=source/'image#1?.png';image.write_bytes(b'pixels')
+    html=source/'page.html'
+    html.write_text('<a href="https://[broken">bad</a><img src="//[bad">'
+                    '<img src="image%231%3F.png"><a href="https://example.com">ok</a>')
+    original=html.read_bytes()
+    out=tmp_path/'out';exporter=module.Exporter(out)
+    result=Path(exporter.asset(html))
+    assert result.read_bytes()==original
+    assert os.path.samefile(result,html)
+    assert os.path.samefile(result.parent/image.name,image)
+    warnings=[json.loads(line) for line in (out/'url-warnings.jsonl').read_text().splitlines()]
+    assert len(warnings)==2 and exporter.url_warnings==2
+    assert all(w['error']=='Invalid IPv6 URL' for w in warnings)
+    inode=result.stat().st_ino
+    assert Path(module.Exporter(out).asset(html)).stat().st_ino==inode
+    shutil.rmtree(source)
+    assert result.read_bytes()==original
+    assert (result.parent/image.name).read_bytes()==b'pixels'
+
+
+def test_invalid_local_file_url_is_not_silently_ignored(tmp_path):
+    module=exporter_module()
+    html=tmp_path/'page.html';html.write_text('<img src="file://[bad/x.png">')
+    with pytest.raises(ValueError,match='Cannot safely resolve local resource'):
+        module.Exporter(tmp_path/'out').asset(html)
