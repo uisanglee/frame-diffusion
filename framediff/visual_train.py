@@ -394,6 +394,7 @@ def _train(args,stack):
         torch.set_rng_state(ck['torch_rng'].cpu())
         if device.startswith('cuda') and ck.get('cuda_rng'):torch.cuda.set_rng_state_all(ck['cuda_rng'])
         early=ck.get('early_stopping',{'reference_loss':best,'bad_validations':0,'stopped':False})
+    del ck
     write_json(out/'manifest.json',{'kind':kind,'config':cfg,'settings':vars(args),'data':data_signature,
         'policy_legality_filter':legality_report,
         'parameters':sum(p.numel() for p in net.parameters()),'pretrained_backbone':not args.no_pretrained,
@@ -447,6 +448,9 @@ def _train(args,stack):
         torch.nn.utils.clip_grad_norm_(net.parameters(),1.);opt.step()
         if step%args.log_every==0 or step==args.steps:
             row={'step':step,'loss':float(total),'elapsed_s':time.perf_counter()-started}
+            if device.startswith('cuda'):
+                row.update(cuda_allocated_bytes=torch.cuda.memory_allocated(device),
+                           cuda_reserved_bytes=torch.cuda.memory_reserved(device))
             if is_detector:
                 row.update(data_wait_s=data_wait,step_seconds=time.perf_counter()-step_started)
                 row['images_per_second']=args.batch_size*args.accumulation/row['step_seconds']

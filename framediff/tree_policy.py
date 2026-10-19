@@ -497,6 +497,9 @@ def train(args):
             stream=stack.enter_context(OnlineStream(targets,cfg.mode,args.seed,args.online_max_noise,
                                                   args.online_workers,args.online_prefetch,args.online_attempts,args.online_timeout,cursor,
                                                   parent_first=cfg.parent_first))
+        # load_state_dict has copied/restored these tensors. Keeping the loaded
+        # checkpoint retains a second CPU copy throughout resumed training.
+        del ck
         wait_seconds=0.;producer_seconds=0.;sample_count=0;retry_count=0;remove_count=0;remaining_total=0;recent_errors=[]
         rule_count=0;probe_rejections=0
         property_counts={field:0 for field in cfg.fields};path_length_total=0;mutation_total=0
@@ -532,7 +535,10 @@ def train(args):
                          'learning_rate':optimizer.param_groups[0]['lr'],
                          'examples_seen':step*args.batch_size*args.accumulation,
                          'examples_per_second':session_examples/max(elapsed,1e-9)}
-                if device.startswith('cuda'):metrics['peak_cuda_bytes']=torch.cuda.max_memory_allocated(device)
+                if device.startswith('cuda'):
+                    metrics.update(peak_cuda_bytes=torch.cuda.max_memory_allocated(device),
+                                   cuda_allocated_bytes=torch.cuda.memory_allocated(device),
+                                   cuda_reserved_bytes=torch.cuda.memory_reserved(device))
                 if lazy_detector is not None:
                     metrics.update(target_prediction_cache_hits=prediction_cache.hits,
                                    target_prediction_cache_misses=prediction_cache.misses)

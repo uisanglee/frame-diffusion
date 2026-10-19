@@ -363,11 +363,13 @@ class OnlineSampler:
         cache_dirs={t.get('lazy_cache_dir') for t in targets if t.get('lazy_cache_dir')}
         if len(cache_dirs)>1:raise ValueError('Mixed lazy train-view cache directories')
         self.view_cache=TrainViewCache(cache_dir=next(iter(cache_dirs),None))
+        # Instance-local caches: a class-level lru_cache retains old samplers
+        # (and their full target manifests) after a training session ends.
+        self.html=lru_cache(maxsize=64)(self.html)
+        self.clean_state=lru_cache(maxsize=64)(self.clean_state)
 
-    @lru_cache(maxsize=64)
     def html(self,path): return Path(path).read_text()
 
-    @lru_cache(maxsize=64)
     def clean_state(self,page_id):
         target=self.by_id[page_id]
         # The stylesheet preparation pass already parsed and validated this
@@ -382,7 +384,8 @@ class OnlineSampler:
 
     def close(self):
         if self.browser is not None:
-            self.browser.__exit__(None,None,None);self.browser=None
+            browser,self.browser=self.browser,None
+            browser.__exit__(None,None,None)
 
     def generate(self,index):
         rng=random.Random(task_seed(self.seed,index));errors=[];started=time.perf_counter()

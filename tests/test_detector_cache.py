@@ -197,6 +197,32 @@ def test_detector_pinned_transfer_matches_cpu(tmp_path):
                                    detector_input(row['image']),rtol=1e-6,atol=1e-7)
 
 
+def test_shared_prediction_cache_reuses_legacy_and_is_bounded(tmp_path,monkeypatch):
+    old=TargetPredictionCache(tmp_path/'old','sha',.4)
+    items=[dict(box=[0,0,1,1],label=4,score=.9)]
+    import json
+    (old.folder/'key.json').write_text(json.dumps({'key':'key','items':items}))
+    monkeypatch.setenv('TUIDE_SHARED_CACHE',str(tmp_path/'shared'))
+    cache=TargetPredictionCache(old.folder,'sha',.4,capacity=2)
+    assert cache.read('key')==items
+    assert (cache.folder/'key.json').stat().st_ino==(old.folder/'key.json').stat().st_ino
+    other=TargetPredictionCache(tmp_path/'other','sha',.4)
+    assert other.read('key')==items
+    for i in range(1000):cache.remember(str(i),items)
+    assert len(cache.memory)==2
+    assert len(list(cache.folder.glob('*.json')))==1
+
+
+def test_loader_close_releases_prefetched_batches():
+    from framediff.detector_support import DetectorLoader
+    from concurrent.futures import Future
+    loader=DetectorLoader({},random.Random(0),1)
+    future=Future();future.set_result(bytearray(1000000))
+    loader.pending.append((future,None))
+    loader.close()
+    assert not loader.pending
+
+
 def test_prediction_cache_batches_unique_misses_and_survives_restart(tmp_path,monkeypatch):
     import framediff.visual_train as train
     calls=[]

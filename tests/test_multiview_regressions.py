@@ -103,6 +103,11 @@ def test_stream_only_changes_do_not_invalidate_preparation(monkeypatch):
     finally:preparation_fingerprint.cache_clear()
 
 
+def test_sampler_memory_fix_preserves_existing_cache_fingerprint():
+    from framediff.lazy_webui import preparation_fingerprint
+    assert preparation_fingerprint()['online_preparation']=='e598fecb8a9bb423bba5e9cf118b338f89be0bbe3d83195d5512e4e7c2fbf53d'
+
+
 @pytest.mark.browser
 def test_corrupt_lazy_cache_is_rebuilt(tmp_path):
     from framediff.lazy_webui import TrainViewCache

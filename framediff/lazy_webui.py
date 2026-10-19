@@ -40,8 +40,12 @@ def preparation_fingerprint():
     # prepared training example. Unknown future edits still invalidate caches.
     if hashes['safe_sizes.py']=='1acceb2dff0b09384551c9c63276ceb3d4807dab1de160075129a97d4532b4a5':
         hashes['safe_sizes.py']='82670e65a792de714d8cb44f27f3514d717cce013a28d59e0d95c56cbaa4fbd2'
+    online_sha=hashlib.sha256(''.join(ast.dump(n) for n in semantic).encode()).hexdigest()
+    # Instance-local LRU ownership and browser release do not change labels.
+    if online_sha=='e98088a0e5027f27a10c2c038f23bb8d2a24227af7a4e294e5049ed9e7c8cfc4':
+        online_sha='e598fecb8a9bb423bba5e9cf118b338f89be0bbe3d83195d5512e4e7c2fbf53d'
     return {**hashes,
-            'online_preparation':hashlib.sha256(''.join(ast.dump(n) for n in semantic).encode()).hexdigest(),
+            'online_preparation':online_sha,
             'playwright':version('playwright')}
 
 

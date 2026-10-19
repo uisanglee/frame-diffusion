@@ -12,6 +12,29 @@ from framediff.tree_edits import CONTRACT,FIELDS,extract,current_state,execute,r
 from framediff.ir import write_jsonl,read_jsonl
 
 
+def test_sampler_cache_does_not_retain_finished_sessions(tmp_path):
+    import gc
+    import weakref
+    path=tmp_path/'page.html';path.write_text('same HTML')
+    refs=[]
+    for _ in range(200):
+        sampler=OnlineSampler([], 'screenshot')
+        assert sampler.html(str(path))=='same HTML'
+        refs.append(weakref.ref(sampler))
+        sampler.close();sampler.view_cache.close()
+    del sampler
+    gc.collect()
+    assert all(ref() is None for ref in refs)
+
+
+def test_sampler_caches_are_bounded_and_independent(tmp_path):
+    a=OnlineSampler([], 'screenshot');b=OnlineSampler([], 'abstract')
+    for i in range(200):
+        path=tmp_path/f'{i}.html';path.write_text(str(i));a.html(str(path))
+    assert a.html.cache_info().currsize==64
+    assert b.html.cache_info().currsize==0
+
+
 def test_mutations_only_replace_existing_supported_values_and_preserve_priority():
     state=[[['',''] for _ in FIELDS] for _ in range(3)]
     state[1][0]=['50%',''];state[1][1]=['calc(100px - 2px)','']

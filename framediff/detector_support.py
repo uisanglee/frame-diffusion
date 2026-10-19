@@ -53,7 +53,8 @@ class DetectorLoader:
         return batch
 
     def close(self):
-        self.pool.shutdown(wait=True,cancel_futures=True)
+        try:self.pool.shutdown(wait=True,cancel_futures=True)
+        finally:self.pending.clear()
 
 
 def detector_batches(rows,batch_size,workers=2,prefetch=2,pin=False):
@@ -77,7 +78,11 @@ def detector_batches(rows,batch_size,workers=2,prefetch=2,pin=False):
 class TargetPredictionCache:
     def __init__(self,folder,checkpoint_sha,threshold,capacity=256):
         from importlib.metadata import version
-        self.folder=Path(folder);self.folder.mkdir(parents=True,exist_ok=True)
+        if capacity<1:raise ValueError('Cache capacity must be positive')
+        self.legacy_folder=Path(folder)
+        shared=os.environ.get('TUIDE_SHARED_CACHE')
+        self.folder=Path(shared).resolve()/'target-predictions' if shared else self.legacy_folder
+        self.folder.mkdir(parents=True,exist_ok=True)
         self.identity={'contract':'frozen-target-prediction-v1','checkpoint':checkpoint_sha,
                        'threshold':threshold,'torchvision':version('torchvision')}
         self.threshold=threshold;self.capacity=capacity;self.memory=OrderedDict()
@@ -92,13 +97,25 @@ class TargetPredictionCache:
         if key in self.memory:
             self.memory.move_to_end(key);return self.memory[key]
         try:
-            saved=json.loads((self.folder/f'{key}.json').read_text())
+            path=self.folder/f'{key}.json'
+            if not path.exists() and self.folder!=self.legacy_folder:
+                old=self.legacy_folder/f'{key}.json'
+                if old.is_file():
+                    # Existing predictions remain reusable without re-inference.
+                    path=old
+            saved=json.loads(path.read_text())
             if saved['key']!=key:return None
             items=saved['items']
             if not isinstance(items,list):return None
             for item in items:
                 if (len(item['box'])!=4 or not all(math.isfinite(v) for v in item['box'])
                     or item['label'] not in range(1,len(CLASSES)) or not math.isfinite(item['score'])):return None
+            if path.parent!=self.folder:
+                try:os.link(path,self.folder/f'{key}.json')
+                except FileExistsError:pass
+                except OSError:
+                    # A different filesystem still permits reading the old cache.
+                    pass
             self.remember(key,items);return items
         except (OSError,ValueError,KeyError,TypeError):return None
 
