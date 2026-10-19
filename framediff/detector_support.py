@@ -17,6 +17,65 @@ from scipy.optimize import linear_sum_assignment
 from PIL import Image, ImageDraw
 from .visual import CLASSES
 from .ir import write_json
+from torchvision.models.detection.rpn import RegionProposalNetwork
+
+
+def bounded_box_matches(gt, anchors, matcher, similarity, gt_chunk=256, anchor_chunk=2048):
+    """Exact torchvision matching, including all low-quality ties, in blocks."""
+    import torch
+    if gt_chunk<1 or anchor_chunk<1:raise ValueError('Matching chunks must be positive')
+    if len(gt)*len(anchors)<=gt_chunk*anchor_chunk:
+        return matcher(similarity(gt,anchors))
+    with torch.no_grad():
+        best=anchors.new_full((len(anchors),),-float('inf'))
+        indices=torch.zeros(len(anchors),dtype=torch.int64,device=anchors.device)
+        gt_best=gt.new_full((len(gt),),-float('inf'))
+        for g in range(0,len(gt),gt_chunk):
+            for a in range(0,len(anchors),anchor_chunk):
+                scores=similarity(gt[g:g+gt_chunk],anchors[a:a+anchor_chunk])
+                values,local=scores.max(dim=0)
+                previous=best[a:a+anchor_chunk]
+                # Strict comparison preserves the first GT index on ties.
+                replace=values>previous
+                indices[a:a+anchor_chunk][replace]=local[replace]+g
+                previous.copy_(torch.maximum(previous,values))
+                gt_best[g:g+gt_chunk]=torch.maximum(gt_best[g:g+gt_chunk],scores.max(dim=1).values)
+        matches=indices.clone()
+        matches[best<matcher.low_threshold]=matcher.BELOW_LOW_THRESHOLD
+        matches[(best>=matcher.low_threshold)&(best<matcher.high_threshold)]=matcher.BETWEEN_THRESHOLDS
+        if matcher.allow_low_quality_matches:
+            for a in range(0,len(anchors),anchor_chunk):
+                tied=torch.zeros(len(anchors[a:a+anchor_chunk]),dtype=torch.bool,device=anchors.device)
+                for g in range(0,len(gt),gt_chunk):
+                    scores=similarity(gt[g:g+gt_chunk],anchors[a:a+anchor_chunk])
+                    tied|=(scores==gt_best[g:g+gt_chunk,None]).any(dim=0)
+                matches[a:a+anchor_chunk][tied]=indices[a:a+anchor_chunk][tied]
+        return matches
+
+
+class BoundedRegionProposalNetwork(RegionProposalNetwork):
+    @classmethod
+    def from_rpn(cls,rpn):
+        return cls(rpn.anchor_generator,rpn.head,rpn.proposal_matcher.high_threshold,
+                   rpn.proposal_matcher.low_threshold,rpn.fg_bg_sampler.batch_size_per_image,
+                   rpn.fg_bg_sampler.positive_fraction,rpn._pre_nms_top_n,rpn._post_nms_top_n,
+                   rpn.nms_thresh,rpn.score_thresh)
+
+    def assign_targets_to_anchors(self,anchors,targets):
+        import torch
+        labels=[];matched_boxes=[]
+        for boxes,target in zip(anchors,targets):
+            gt=target['boxes']
+            if gt.numel()==0:
+                matched_boxes.append(torch.zeros_like(boxes,dtype=torch.float32))
+                labels.append(torch.zeros(len(boxes),device=boxes.device,dtype=torch.float32))
+                continue
+            matches=bounded_box_matches(gt,boxes,self.proposal_matcher,self.box_similarity)
+            matched_boxes.append(gt[matches.clamp(min=0)])
+            label=(matches>=0).to(torch.float32)
+            label[matches==self.proposal_matcher.BETWEEN_THRESHOLDS]=-1.
+            labels.append(label)
+        return labels,matched_boxes
 
 
 def prepare_detector_batch(rows, pin=False):

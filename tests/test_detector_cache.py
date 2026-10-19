@@ -8,6 +8,77 @@ from PIL import Image
 from framediff.detector_support import TargetPredictionCache
 
 
+@pytest.mark.parametrize('low_quality',[False,True])
+@pytest.mark.parametrize('case',['random','ties','zeros','thresholds'])
+def test_block_matching_exactly_matches_torchvision(low_quality,case):
+    from torchvision.models.detection._utils import Matcher
+    from framediff.detector_support import bounded_box_matches
+    rng=torch.Generator().manual_seed(18)
+    scores=torch.rand(17,43,generator=rng)
+    if case=='ties':scores=(scores*3).floor()/3
+    if case=='zeros':scores.zero_()
+    if case=='thresholds':scores=(scores*3).floor()*.3
+    matcher=Matcher(.6,.3,allow_low_quality_matches=low_quality)
+    sizes=[]
+    def similarity(gt,anchors):
+        sizes.append((len(gt),len(anchors)))
+        return scores[gt[:,0].long()][:,anchors[:,0].long()]
+    actual=bounded_box_matches(torch.arange(17.).reshape(-1,1),torch.arange(43.).reshape(-1,1),
+                               matcher,similarity,gt_chunk=4,anchor_chunk=7)
+    assert torch.equal(actual,matcher(scores))
+    assert max(g for g,a in sizes)<=4 and max(a for g,a in sizes)<=7
+
+
+def test_bounded_rpn_preserves_checkpoint_losses_and_gradients():
+    from framediff.visual_train import detector
+    from framediff.detector_support import BoundedRegionProposalNetwork
+    from torchvision.models.detection.rpn import RegionProposalNetwork
+    old_threads=torch.get_num_threads();torch.set_num_threads(1)
+    try:
+        net=detector({'min_size':32,'max_size':64,'max_detections':10},False).train()
+        rpn=net.rpn
+        assert isinstance(rpn,BoundedRegionProposalNetwork)
+        baseline=RegionProposalNetwork(rpn.anchor_generator,rpn.head,.7,.3,256,.5,
+                                      rpn._pre_nms_top_n,rpn._post_nms_top_n,rpn.nms_thresh,rpn.score_thresh)
+        assert baseline.load_state_dict(rpn.state_dict(),strict=True).missing_keys==[]
+        boxes=[torch.tensor([[0.,0.,10.,10.],[20.,20.,25.,25.]])]
+        for gt in (torch.empty(0,4),torch.tensor([[1.,1.,9.,9.]])):
+            left=baseline.assign_targets_to_anchors(boxes,[{'boxes':gt}])
+            right=rpn.assign_targets_to_anchors(boxes,[{'boxes':gt}])
+            for a,b in zip(left,right):assert torch.equal(a[0],b[0])
+        image=torch.rand(3,32,48)
+        target={'boxes':torch.tensor([[1.,1.,14.,16.]]),'labels':torch.tensor([1])}
+        torch.manual_seed(42);losses=net([image],[target]);sum(losses.values()).backward()
+        grad=rpn.head.cls_logits.weight.grad.clone()
+        net.zero_grad(set_to_none=True);net.rpn=baseline
+        torch.manual_seed(42);expected=net([image],[target]);sum(expected.values()).backward()
+        for key in expected:torch.testing.assert_close(losses[key],expected[key],rtol=0,atol=0)
+        torch.testing.assert_close(grad,baseline.head.cls_logits.weight.grad,rtol=0,atol=0)
+    finally:torch.set_num_threads(old_threads)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA required for peak memory comparison')
+def test_bounded_matching_cuda_peak_memory():
+    from torchvision.ops import box_iou
+    from torchvision.models.detection._utils import Matcher
+    from framediff.detector_support import bounded_box_matches
+    generator=torch.Generator(device='cuda').manual_seed(21)
+    def boxes(n):
+        xy=torch.rand(n,2,generator=generator,device='cuda')*1000
+        return torch.cat((xy,xy+torch.rand(n,2,generator=generator,device='cuda')*100+1),dim=1)
+    gt=boxes(512);anchors=boxes(16384);matcher=Matcher(.7,.3,True)
+    torch.cuda.synchronize();torch.cuda.reset_peak_memory_stats()
+    baseline=torch.cuda.memory_allocated()
+    expected=matcher(box_iou(gt,anchors))
+    torch.cuda.synchronize();dense_peak=torch.cuda.max_memory_allocated()-baseline
+    torch.cuda.reset_peak_memory_stats();baseline=torch.cuda.memory_allocated()
+    actual=bounded_box_matches(gt,anchors,matcher,box_iou)
+    torch.cuda.synchronize();chunk_peak=torch.cuda.max_memory_allocated()-baseline
+    assert torch.equal(actual,expected)
+    assert chunk_peak<dense_peak
+    print({'dense_peak_bytes':dense_peak,'chunk_peak_bytes':chunk_peak})
+
+
 def test_detector_resume_microbatch_migration(tmp_path):
     import copy
     import json

@@ -59,8 +59,11 @@ def detector(config,pretrained=True):
     from torchvision.models.detection.backbone_utils import resnet_fpn_backbone
     backbone=resnet_fpn_backbone(backbone_name='resnet50',weights=ResNet50_Weights.DEFAULT if pretrained else None,
                                 trainable_layers=3)
-    return FasterRCNN(backbone,num_classes=len(CLASSES),min_size=config['min_size'],max_size=config['max_size'],
+    net=FasterRCNN(backbone,num_classes=len(CLASSES),min_size=config['min_size'],max_size=config['max_size'],
         box_detections_per_img=config['max_detections'])
+    from .detector_support import BoundedRegionProposalNetwork
+    net.rpn=BoundedRegionProposalNetwork.from_rpn(net.rpn)
+    return net
 
 
 def load_detector(path,device):
@@ -446,6 +449,7 @@ def _train(args,stack):
         render_stream=DetectorLoader(view_pools,rng,args.batch_size,loader_workers,loader_prefetch,
                                      device.startswith('cuda'))
         stack.callback(render_stream.close)
+    if device.startswith('cuda'):torch.cuda.reset_peak_memory_stats(device)
     for step in range(start+1,args.steps+1):
         step_started=time.perf_counter()
         net.train();opt.zero_grad(set_to_none=True);total=0.;step_parts={};data_wait=0.
@@ -483,7 +487,8 @@ def _train(args,stack):
             row={'step':step,'loss':float(total),'elapsed_s':time.perf_counter()-started}
             if device.startswith('cuda'):
                 row.update(cuda_allocated_bytes=torch.cuda.memory_allocated(device),
-                           cuda_reserved_bytes=torch.cuda.memory_reserved(device))
+                           cuda_reserved_bytes=torch.cuda.memory_reserved(device),
+                           peak_cuda_allocated_bytes=torch.cuda.max_memory_allocated(device))
             if is_detector:
                 row.update(data_wait_s=data_wait,step_seconds=time.perf_counter()-step_started)
                 row['images_per_second']=args.batch_size*args.accumulation/row['step_seconds']
