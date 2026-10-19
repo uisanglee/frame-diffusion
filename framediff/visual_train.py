@@ -24,6 +24,35 @@ from .visual_data import validate_splits
 from .web_experiment import digest,guard_run
 
 
+def guard_detector_resume(out, config, resume):
+    """Allow microbatch changes only at the same effective batch size."""
+    import copy
+    import json
+    current=copy.deepcopy(config)
+    settings=current['settings']
+    settings['validation_batch_size']=settings['batch_size']
+    path=out/'config.json'
+    if resume and path.exists():
+        saved=json.loads(path.read_text())
+        previous=saved['settings']
+        settings['validation_batch_size']=previous.get('validation_batch_size',previous['batch_size'])
+        comparable=copy.deepcopy(current)
+        comparable['settings'].pop('validation_batch_size')
+        old=copy.deepcopy(saved)
+        old['settings'].pop('validation_batch_size',None)
+        if previous['batch_size']*previous['accumulation']!=settings['batch_size']*settings['accumulation']:
+            raise ValueError('Detector resume requires unchanged batch_size * accumulation')
+        for key in ('batch_size','accumulation'):
+            comparable['settings'][key]=previous[key]
+        if comparable!=old:
+            raise ValueError('Resume configuration/input changed; use a new output directory')
+        guard_run(out,saved,True)
+        write_json(path,current)
+    else:
+        guard_run(out,current,resume)
+    return settings['validation_batch_size']
+
+
 def detector(config,pretrained=True):
     from torchvision.models import ResNet50_Weights
     from torchvision.models.detection import FasterRCNN
@@ -330,7 +359,11 @@ def _train(args,stack):
                   ('out','resume','steps','init_checkpoint','render_workers','render_prefetch','render_timeout',
                    'loader_workers','loader_prefetch')}
     run_settings['validation_sampling']='page-round-robin-v1'
-    guard_run(out,{'kind':kind,'config':cfg,'data':data_signature,'settings':run_settings},bool(args.resume))
+    run_config={'kind':kind,'config':cfg,'data':data_signature,'settings':run_settings}
+    if is_detector:
+        validation_batch_size=guard_detector_resume(out,run_config,bool(args.resume))
+    else:
+        guard_run(out,run_config,bool(args.resume))
     ck=torch.load(args.resume or args.init_checkpoint,map_location='cpu',weights_only=True) if args.resume or args.init_checkpoint else None
     legacy_policy_init=False
     if ck:
@@ -467,7 +500,7 @@ def _train(args,stack):
             with torch.random.fork_rng(),torch.no_grad():
                 torch.manual_seed(90210)
                 from .detector_support import detector_batches
-                batches=(detector_batches(selected,args.batch_size,loader_workers,loader_prefetch,device.startswith('cuda'))
+                batches=(detector_batches(selected,validation_batch_size,loader_workers,loader_prefetch,device.startswith('cuda'))
                          if is_detector else (selected[i:i+args.batch_size] for i in range(0,len(selected),args.batch_size)))
                 for rows in batches:
                     with amp():

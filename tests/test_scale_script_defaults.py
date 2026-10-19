@@ -46,7 +46,9 @@ def test_resume_launcher_fresh_resume_and_preserved_output(tmp_path):
         out.mkdir();(out/'last.pt').write_text('checkpoint')
         text=run()
         assert 'Resuming:' in text and 'Starting fresh' not in text
-        if mode.startswith('detector'):assert '--resume\n' in text
+        if mode.startswith('detector'):
+            assert '--resume\n' in text
+            assert '--batch-size\n1\n' in text and '--accumulation\n8\n' in text
         assert (out/'last.pt').read_text()=='checkpoint'
 
 

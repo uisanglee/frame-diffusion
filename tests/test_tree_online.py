@@ -12,6 +12,21 @@ from framediff.tree_edits import CONTRACT,FIELDS,extract,current_state,execute,r
 from framediff.ir import write_jsonl,read_jsonl
 
 
+def test_inspection_log_hides_single_page_success_only(monkeypatch,capsys):
+    from framediff.tree_online import _inspection_log
+    monkeypatch.delenv('TUIDE_VERBOSE_INSPECTION',raising=False)
+    _inspection_log({'online_target_inspection':1,'excluded_inspection_error':0})
+    _inspection_log({'online_target_filter':{'pages':1,'kept':1}})
+    assert capsys.readouterr().out==''
+    _inspection_log({'online_target_filter':{'pages':1,'excluded_inspection_error':1}})
+    assert 'excluded_inspection_error' in capsys.readouterr().out
+    _inspection_log({'online_target_filter':{'pages':100,'kept':100}})
+    assert 'online_target_filter' in capsys.readouterr().out
+    monkeypatch.setenv('TUIDE_VERBOSE_INSPECTION','1')
+    _inspection_log({'online_target_inspection':1})
+    assert 'online_target_inspection' in capsys.readouterr().out
+
+
 def test_sampler_cache_does_not_retain_finished_sessions(tmp_path):
     import gc
     import weakref

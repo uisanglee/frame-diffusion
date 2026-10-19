@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 import multiprocessing as mp
+import os
 import random
 import time
 import tempfile
@@ -26,6 +27,15 @@ from .html_feedback import refresh_geometry
 from .ir import read_jsonl
 from .tree_edits import FIELDS, CONTRACT, current_state, execute, extract, repair_path, value_valid
 from .web_experiment import digest
+
+def _inspection_log(payload):
+    """Hide successful per-page lazy preparation chatter, not failures."""
+    stats=payload.get('online_target_filter',payload)
+    failed=any(stats.get(k,0) for k in ('excluded_no_editable_css',
+               'excluded_no_visible_candidate','excluded_inspection_error'))
+    if (os.environ.get('TUIDE_VERBOSE_INSPECTION','0')=='1' or failed
+        or stats.get('pages',0)>1 or stats.get('online_target_inspection',0)>1):
+        print(payload,flush=True)
 
 ONLINE_CONTRACT = 'online-css-visible-values-v6-size-margin'
 SAMPLING_CONTRACT = 'property-first-owner-uniform-v1'
@@ -286,18 +296,18 @@ def target_pool(rows, manifest=None, cache_dir=None, observation_size=384, diagn
                         error=error,cache_hit=cached,**metadata.get('inspection_diagnostics',{})))
             processed = inspected + cache_hits
             if processed == 1 or processed % 100 == 0:
-                print({'online_target_inspection': inspected, 'cache_hits': cache_hits,
+                _inspection_log({'online_target_inspection': inspected, 'cache_hits': cache_hits,
                        'excluded_no_editable_css': no_editable,
                        'excluded_no_visible_candidate':no_visible,
-                       'excluded_inspection_error': inspection_errors}, flush=True)
+                       'excluded_inspection_error': inspection_errors})
     finally:
         if browser is not None: browser.__exit__(None,None,None)
-    print({'online_target_filter': {'pages': len(seen), 'kept': len(targets),
+    _inspection_log({'online_target_filter': {'pages': len(seen), 'kept': len(targets),
           'visible_candidates':sum(len(t['visible_candidates']) for t in targets.values()),
           'excluded_no_editable_css': no_editable,
           'excluded_no_visible_candidate':no_visible,
           'excluded_inspection_error': inspection_errors, 'inspected_missing_states': inspected,
-          'cache_hits': cache_hits, 'cache_dir': str(cache_dir) if cache_dir is not None else None}}, flush=True)
+          'cache_hits': cache_hits, 'cache_dir': str(cache_dir) if cache_dir is not None else None}})
     if not targets: raise EmptyTargetPoolError(records)
     # Stable order makes sample indices independent of repeated offline examples.
     return [targets[k] for k in sorted(targets)]

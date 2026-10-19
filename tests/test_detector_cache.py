@@ -8,6 +8,27 @@ from PIL import Image
 from framediff.detector_support import TargetPredictionCache
 
 
+def test_detector_resume_microbatch_migration(tmp_path):
+    import copy
+    import json
+    from framediff.visual_train import guard_detector_resume
+    old={'kind':'visual-detector-v1','config':{'model':'same'},'data':{'train':'same'},
+         'settings':{'batch_size':2,'accumulation':4,'lr':.0001}}
+    path=tmp_path/'config.json';path.write_text(json.dumps(old))
+    new=copy.deepcopy(old);new['settings'].update(batch_size=1,accumulation=8)
+    assert guard_detector_resume(tmp_path,new,True)==2
+    assert guard_detector_resume(tmp_path,new,True)==2
+    saved=path.read_text()
+    for change in ({'accumulation':4},{'lr':.01}):
+        bad=copy.deepcopy(new);bad['settings'].update(change)
+        with pytest.raises(ValueError):guard_detector_resume(tmp_path,bad,True)
+        assert path.read_text()==saved
+    bad=copy.deepcopy(new);bad['data']['train']='changed'
+    with pytest.raises(ValueError):guard_detector_resume(tmp_path,bad,True)
+    fresh=tmp_path/'fresh'
+    assert guard_detector_resume(fresh,new,False)==1
+
+
 def detector_rows(tmp_path):
     rows=[]
     for i in range(5):
@@ -166,11 +187,11 @@ def test_detector_training_prefetch_and_resume_preserve_checkpoint(tmp_path,monk
         write_jsonl(tmp_path/f'{split}.jsonl',[{**r,'id':split+'/'+r['id'],'page_id':split+'/'+r['page_id'],
                                                'split':split,'group':split,'source_sha':split,
                                                'contract':CONTRACT} for r in rows])
-    def run(name,workers,steps,resume=False):
+    def run(name,workers,steps,resume=False,batch_size=2,accumulation=2):
         out=tmp_path/name
         args=['visual-train-detector','--train',str(tmp_path/'train.jsonl'),'--val',str(tmp_path/'val.jsonl'),
               '--out',str(out),'--device','cpu','--no-pretrained','--cpu-threads','1','--steps',str(steps),
-              '--batch-size','2','--accumulation','2','--eval-every','1','--val-samples','3',
+              '--batch-size',str(batch_size),'--accumulation',str(accumulation),'--eval-every','1','--val-samples','3',
               '--loader-workers',str(workers),'--loader-prefetch','2']
         if resume:args+=['--resume',str(out/'last.pt')]
         main(args)
@@ -184,6 +205,11 @@ def test_detector_training_prefetch_and_resume_preserve_checkpoint(tmp_path,monk
         for key,value in direct['model'].items():assert torch.equal(checkpoint['model'][key],value)
         for key,value in direct['optimizer']['state'][0].items():
             assert torch.equal(checkpoint['optimizer']['state'][0][key],value)
+    before=run('microbatch',2,1,batch_size=2,accumulation=4)
+    after=run('microbatch',2,2,True,batch_size=1,accumulation=8)
+    assert before['step']==1 and after['step']==2
+    assert after['optimizer']['state'][0]['step'].item()==2
+    assert torch.isfinite(after['model']['weight'])
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA required for pinned transfer')
