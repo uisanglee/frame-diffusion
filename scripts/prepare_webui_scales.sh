@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Raw WebUI -> shared assets -> nested 8:1:1 dataset manifests.
+# TUIDE_SAVE_DIAGNOSTICS=1 retains normalization/scroll screenshots; default 0.
 set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"

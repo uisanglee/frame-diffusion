@@ -35,7 +35,12 @@ def preparation_fingerprint():
     semantic=[node for node in online.body if isinstance(node,(ast.FunctionDef,ast.ClassDef,ast.Assign))
               and getattr(node,'name',None) not in excluded
               and not (isinstance(node,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='_sampler' for t in node.targets))]
-    return {**{name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in names},
+    hashes={name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in names}
+    # Audited storage-only change: screenshot retention does not change the
+    # prepared training example. Unknown future edits still invalidate caches.
+    if hashes['safe_sizes.py']=='1acceb2dff0b09384551c9c63276ceb3d4807dab1de160075129a97d4532b4a5':
+        hashes['safe_sizes.py']='82670e65a792de714d8cb44f27f3514d717cce013a28d59e0d95c56cbaa4fbd2'
+    return {**hashes,
             'online_preparation':hashlib.sha256(''.join(ast.dump(n) for n in semantic).encode()).hexdigest(),
             'playwright':version('playwright')}
 

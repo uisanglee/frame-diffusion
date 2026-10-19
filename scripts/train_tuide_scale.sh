@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Reuse prepared CSS owners, fixed validation and frozen detector cache.
+# Lazy normalization inherits TUIDE_SAVE_DIAGNOSTICS (default 0; 1 for debugging).
 set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"

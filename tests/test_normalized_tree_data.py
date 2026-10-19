@@ -10,6 +10,42 @@ from framediff.tree_freeze import freeze
 from framediff.visual import annotate
 
 
+def test_diagnostic_retention_does_not_change_normalization(tmp_path,monkeypatch):
+    import json
+    from framediff.safe_sizes import convert
+    with HtmlBrowser() as browser:
+        dom=browser.snapshot('<div style="width:100px;height:40px;background:red">A</div>',[400,200],max_nodes=16)
+        tree,_,_=dom_tree(dom);annotate(browser,tree)
+        monkeypatch.delenv('TUIDE_SAVE_DIAGNOSTICS',raising=False)
+        a=convert(browser,dom['html'],[400,200],tmp_path/'off',target_tree=tree)
+        monkeypatch.setenv('TUIDE_SAVE_DIAGNOSTICS','1')
+        b=convert(browser,dom['html'],[400,200],tmp_path/'on',target_tree=tree)
+    assert a==b and a['accepted']
+    for name in ('normalized.html','after.png','report.json'):
+        assert (tmp_path/'off'/name).read_bytes()==(tmp_path/'on'/name).read_bytes()
+    assert not (tmp_path/'off/before.png').exists()
+    assert not (tmp_path/'off/scroll-before').exists()
+    assert (tmp_path/'on/before.png').is_file()
+    assert list((tmp_path/'on/scroll-before').glob('*.png'))
+    assert json.loads((tmp_path/'off/report.json').read_text())['accepted']
+
+
+def test_diagnostics_off_preserves_failure_reports(tmp_path,monkeypatch):
+    from pathlib import Path
+    from framediff import safe_sizes
+    monkeypatch.delenv('TUIDE_SAVE_DIAGNOSTICS',raising=False)
+    def fail(browser,html,viewport,out,**kwargs):
+        out=Path(out)
+        (out/'report.json').write_text('{"accepted":false,"error":"unstable"}')
+        (out/'before.png').write_bytes(b'png')
+        raise RuntimeError('unstable')
+    monkeypatch.setattr(safe_sizes,'_convert',fail)
+    with pytest.raises(RuntimeError,match='unstable'):
+        safe_sizes.convert(None,'',[400,200],tmp_path/'failure')
+    assert (tmp_path/'failure/report.json').is_file()
+    assert not (tmp_path/'failure/before.png').exists()
+
+
 def test_resume_retries_rejected_page_without_rebuilding_successes(tmp_path, monkeypatch):
     import pytest
     from framediff import tree_normalize as mod
@@ -51,6 +87,7 @@ def test_resume_retries_rejected_page_without_rebuilding_successes(tmp_path, mon
 
 @pytest.mark.parametrize('workers', [1, 2])
 def test_normalize_then_corrupt_and_resume(tmp_path, monkeypatch, workers):
+    monkeypatch.setenv('TUIDE_SAVE_DIAGNOSTICS','1')
     source=tmp_path/'source';source.mkdir();out=tmp_path/'normalized'
     with HtmlBrowser() as browser:
         for split in ('train','val','test'):
@@ -70,6 +107,7 @@ def test_normalize_then_corrupt_and_resume(tmp_path, monkeypatch, workers):
                          max_css_owners=64,observation_size=96,max_pixel_mae=.01,max_box_error=1.)
     args.workers=workers
     prepare(args)
+    monkeypatch.delenv('TUIDE_SAVE_DIAGNOSTICS')
     # Remove real scroll diagnostics, then exercise the original downstream
     # normalization resume, online corruption and fixed evaluation checks.
     import importlib.util

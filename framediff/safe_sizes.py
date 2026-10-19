@@ -1,5 +1,7 @@
 """Six-field CE preparation: preserve flow, accept only verified px assignments."""
-import copy
+import os
+import shutil
+import tempfile
 from pathlib import Path
 from .explicit_html import SIZE_SNAPSHOT_JS,SIZE_BOXES_JS,compare_renders
 from .box_scroll_guard import capture,compare
@@ -11,12 +13,36 @@ CONTRACT='flow-preserved-safe-size-margin-v1'
 # trial.  Successful records produced by it remain valid; failed/incomplete
 # records may be retried with the fast-path implementation below.
 COMPATIBLE_IMPLEMENTATION_SHAS={
+    '82670e65a792de714d8cb44f27f3514d717cce013a28d59e0d95c56cbaa4fbd2',
     '1d22f3fd46d95398b87e177878f376323130f0b15d8af55a4831762cf17c30db',
 }
 
 
 def convert(browser,html,viewport,out,mode='sizes',max_pixel_mae=.01,max_box_error=1.,
             action_ids=None,target_tree=None,observation_size=384):
+    save=os.environ.get('TUIDE_SAVE_DIAGNOSTICS','0')
+    if save not in ('0','1'):raise ValueError('TUIDE_SAVE_DIAGNOSTICS must be 0 or 1')
+    options=dict(mode=mode,max_pixel_mae=max_pixel_mae,max_box_error=max_box_error,
+                 action_ids=action_ids,target_tree=target_tree,observation_size=observation_size)
+    if save=='1':return _convert(browser,html,viewport,out,**options)
+    # Preserve every verification step, but discard its temporary screenshots.
+    # Reports survive rejection/errors; successful after.png is a training asset.
+    out=Path(out);out.mkdir(parents=True,exist_ok=True)
+    result=None
+    with tempfile.TemporaryDirectory(prefix='tuide-normalization-qa-') as temporary:
+        work=Path(temporary)
+        try:
+            result=_convert(browser,html,viewport,work,**options)
+            return result
+        finally:
+            for path in work.iterdir():
+                if path.is_dir() or path.name in ('before.png','reloaded.png'):continue
+                if path.suffix=='.png' and not (path.name=='after.png' and result and result.get('accepted')):continue
+                shutil.copyfile(path,out/path.name)
+
+
+def _convert(browser,html,viewport,out,mode='sizes',max_pixel_mae=.01,max_box_error=1.,
+             action_ids=None,target_tree=None,observation_size=384):
     if mode!='sizes':raise ValueError('Safe flow normalization only supports sizes')
     out=Path(out);out.mkdir(parents=True,exist_ok=True)
     browser.load(html,viewport)
