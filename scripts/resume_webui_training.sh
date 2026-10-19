@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Resume the full-DOM detectors or the single-stage screenshot policy.
+# Resume when last.pt exists; otherwise start a fresh training run.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 case "${1:-}" in
@@ -16,15 +16,29 @@ export VAL_SAMPLES="${VAL_SAMPLES:-2000}" EVAL_EVERY="${EVAL_EVERY:-500}"
 export EARLY_STOP_PATIENCE="${EARLY_STOP_PATIENCE:-10}" EARLY_STOP_MIN_DELTA="${EARLY_STOP_MIN_DELTA:-0}"
 export SEED="${SEED:-42}"
 require_file() { [[ -s "$1" ]] || { echo "Missing required file: $1" >&2; exit 2; }; }
+prepare_output() {
+  options=()
+  if [[ -f "$1/last.pt" ]]; then
+    options=(--resume "$1/last.pt")
+    echo "Resuming: $1/last.pt"
+  else
+    if [[ -d "$1" ]]; then
+      backup=$(mktemp -d "$1.backup.XXXXXX")
+      mv "$1" "$backup/run"
+      echo "Previous output preserved: $backup/run"
+    fi
+    echo "Starting fresh: $1 (existing data/cache reused)"
+  fi
+}
 if [[ "$mode" == detector ]]; then
   data="data/webui-detector-full-dom-v1/$size/rendered"
   output="runs/webui-detector-full-dom-v1/$size/detector"
-  require_file "$output/last.pt"
   require_file "$data/detector-train.jsonl"
   require_file "$data/detector-val.jsonl"
+  prepare_output "$output"
   exec python -m framediff visual-train-detector \
     --train "$data/detector-train.jsonl" --val "$data/detector-val.jsonl" \
-    --out "$output" --resume "$output/last.pt" --device "$DEVICE" --seed "$SEED" \
+    --out "$output" ${options[@]+"${options[@]}"} --device "$DEVICE" --seed "$SEED" \
     --steps "${DETECTOR_STEPS:-$steps}" --lr "${DETECTOR_LR:-0.0001}" \
     --batch-size "$BATCH_SIZE" --accumulation "$ACCUMULATION" \
     --loader-workers "${DETECTOR_LOADER_WORKERS:-2}" --loader-prefetch "${DETECTOR_LOADER_PREFETCH:-2}" \
@@ -38,7 +52,10 @@ export POLICY_SCREENSHOT_STEPS="${POLICY_SCREENSHOT_STEPS:-30000}" POLICY_LR="${
 export ONLINE_WORKERS="${ONLINE_WORKERS:-2}" ONLINE_PREFETCH="${ONLINE_PREFETCH:-4}"
 export ONLINE_TIMEOUT="${ONLINE_TIMEOUT:-900}" PARENT_FIRST=0
 output=runs/webui-screenshot-single-v1/7000/tuide-s-screenshot
-require_file "$output/replacement/raw-stage1/last.pt"
+for input in policy-train.jsonl policy-val.jsonl pages-train.jsonl; do
+  require_file "data/webui-7k-56169-safe-margin-v1/7000/css/$input"
+done
+prepare_output "$output/replacement/raw-stage1"
 exec bash scripts/train_tuide_scale.sh s \
   data/webui-7k-56169-safe-margin-v1/7000/css /dev/null \
   runs/webui-screenshot-single-v1/7000/shared-unused "$output"

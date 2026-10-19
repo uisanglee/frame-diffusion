@@ -16,6 +16,40 @@ DEFAULTS = dict(STAGE='all', POLICY_SCALE='s', POLICY_MODES='abstract screenshot
     REPEATS='3', ROLLOUT_WORKERS='4', ROLLOUT_BATCH_SIZE='4', ROLLOUT_BATCH_WAIT_MS='10')
 
 
+def test_resume_launcher_fresh_resume_and_preserved_output(tmp_path):
+    scripts=tmp_path/'scripts';scripts.mkdir()
+    source=Path(__file__).resolve().parents[1]/'scripts/resume_webui_training.sh'
+    shutil.copyfile(source,scripts/source.name)
+    (scripts/'train_tuide_scale.sh').write_text('echo screenshot-stub\n')
+    binary=tmp_path/'bin';binary.mkdir()
+    stub=binary/'python';stub.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n');stub.chmod(0o755)
+    env={**os.environ,'PATH':str(binary)+os.pathsep+os.environ['PATH']}
+    for mode,size,output in (
+        ('detector-7k',7000,'runs/webui-detector-full-dom-v1/7000/detector'),
+        ('detector-56169',56169,'runs/webui-detector-full-dom-v1/56169/detector'),
+        ('screenshot-7k',7000,'runs/webui-screenshot-single-v1/7000/tuide-s-screenshot/replacement/raw-stage1')):
+        data=tmp_path/f'data/webui-detector-full-dom-v1/{size}/rendered'
+        names=['detector-train.jsonl','detector-val.jsonl']
+        if mode=='screenshot-7k':
+            data=tmp_path/'data/webui-7k-56169-safe-margin-v1/7000/css'
+            names=['policy-train.jsonl','policy-val.jsonl','pages-train.jsonl']
+        data.mkdir(parents=True,exist_ok=True)
+        for name in names:(data/name).write_text('{}\n')
+        def run():
+            return subprocess.run(['bash',str(scripts/source.name),mode],env=env,check=True,capture_output=True,text=True).stdout
+        assert 'Starting fresh' in run()
+        out=tmp_path/output;out.mkdir(parents=True)
+        (out/'config.json').write_text('old-config')
+        assert 'Previous output preserved' in run()
+        backups=list(out.parent.glob(out.name+'.backup.*/run/config.json'))
+        assert len(backups)==1 and backups[0].read_text()=='old-config'
+        out.mkdir();(out/'last.pt').write_text('checkpoint')
+        text=run()
+        assert 'Resuming:' in text and 'Starting fresh' not in text
+        if mode.startswith('detector'):assert '--resume\n' in text
+        assert (out/'last.pt').read_text()=='checkpoint'
+
+
 def run_script(tmp_path, overrides):
     scripts=tmp_path/'scripts';scripts.mkdir()
     source=Path(__file__).resolve().parents[1]/'scripts/run_webui_scale.sh'
