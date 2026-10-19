@@ -111,6 +111,12 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
     t=time.perf_counter();browser.load(html,viewport);stats['layout_seconds']+=time.perf_counter()-t
     stats['_loaded']=True
     current_html=html;current_tree=copy.deepcopy(tree)
+    geometry_contract=getattr(cfg,'visual_geometry_contract',None)
+    if geometry_contract:
+        from .visual import annotate
+        annotate(browser,current_tree,visual_boxes=True)
+    elif current_tree.get('visual_geometry_contract'):
+        raise ValueError('Policy and rollout visual label versions differ')
     from .scroll_guard import snapshot as scroll_snapshot, compare as compare_scroll
     t=time.perf_counter();scroll_before=scroll_snapshot(browser)
     stats['scroll_guard_seconds']=time.perf_counter()-t
@@ -340,6 +346,8 @@ def evaluate(args):
         if raw is not None:raw.cfg.decoding=args.decoding
         abstract.cfg.decoding=args.decoding
     parser,parser_ck=load_detector(args.detector_checkpoint,device)
+    if parser_ck.get('config',{}).get('visual_geometry_contract')!=getattr(abstract.cfg,'visual_geometry_contract',None):
+        raise ValueError('Detector and policy visual label versions differ')
     if (raw is not None and raw.cfg.mode!='screenshot') or abstract.cfg.mode!='abstract':raise ValueError('Policy modality mismatch')
     for key in ('hidden','layers','heads','max_nodes','token_grid','policy_head','numeric_only','stylesheets','existing_values_only'):
         if raw is not None and getattr(raw.cfg,key,False)!=getattr(abstract.cfg,key,False):raise ValueError('Matched policies must share tree/policy architecture')

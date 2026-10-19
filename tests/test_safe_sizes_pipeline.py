@@ -18,7 +18,8 @@ def test_retired_protocols_cannot_enter_current_training():
 def test_preparation_online_training_resume_and_rollout(tmp_path,monkeypatch):
     import torch
     from framediff.cli import main
-    from framediff.ir import write_jsonl,read_jsonl,read_json
+    from framediff.ir import write_jsonl,read_jsonl
+    from framediff.visual import VISUAL_GEOMETRY_CONTRACT
     sources=[]
     for split in ('train','val','test'):
         html=tmp_path/f'{split}.html'
@@ -27,6 +28,9 @@ def test_preparation_online_training_resume_and_rollout(tmp_path,monkeypatch):
     manifest=tmp_path/'source.jsonl';write_jsonl(manifest,sources)
     rendered=tmp_path/'rendered';labels=tmp_path/'labels';frozen=tmp_path/'frozen'
     main(['visual-build-data','--manifest',str(manifest),'--out',str(rendered),'--clean-only'])
+    detection=list(read_jsonl(rendered/'detector-train.jsonl'))[0]
+    assert detection['visual_geometry_contract']==VISUAL_GEOMETRY_CONTRACT
+    assert all('owner_id' in e for e in detection['elements'] if e['label']==1)
     prepare=['visual-tree-normalize','--rendered',str(rendered),'--out',str(labels),'--resume']
     main(prepare)
     saved=(labels/'policy-train.jsonl').read_bytes()
@@ -44,6 +48,7 @@ def test_preparation_online_training_resume_and_rollout(tmp_path,monkeypatch):
     ck=torch.load(checkpoint,weights_only=True)
     from framediff.css_owners import CONTRACT as OWNER_CONTRACT
     assert ck['config']['action_contract']==OWNER_CONTRACT
+    assert ck['config']['visual_geometry_contract']==VISUAL_GEOMETRY_CONTRACT
     assert ck['config']['safe_sizes'] and ck['online_cursor']==2
     from framediff.tree_policy import TreePolicy,TreeConfig
     from framediff.visual_experiment import rollout
@@ -69,7 +74,8 @@ def test_preparation_online_training_resume_and_rollout(tmp_path,monkeypatch):
             # Conditioning plumbing fixture, not a detector quality test.
             write_json(path,row['target_elements'])
             row['predicted_target_elements']=str(path)
-            row['parser_provenance']={'parser_training_groups':[],'fixture':True}
+            row['parser_provenance']={'parser_training_groups':[],'fixture':True,
+                                     'visual_geometry_contract':VISUAL_GEOMETRY_CONTRACT}
         path=tmp_path/f'cached-{split}.jsonl';write_jsonl(path,rows)
         stage2[stage2.index(flag)+1]=str(path)
     main([*stage2,'--steps','1','--predicted-targets','--init-checkpoint',str(tmp_path/'abstract-stage1/best.pt')])

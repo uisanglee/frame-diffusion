@@ -47,6 +47,75 @@ def fixture_tree():
     return tree,{'page':[0,0,320,240],'card':[16,20,80,30]}
 
 
+@pytest.mark.browser
+def test_visual_text_boxes_separate_owner_and_refresh_after_edit():
+    from framediff.html_bridge import HtmlBrowser
+    from framediff.plans import dom_tree
+    from framediff.visual import annotate
+    from framediff.explicit_html import feedback_metadata
+    from framediff.tree_online import abstraction
+    with HtmlBrowser() as browser:
+        def measure(width):
+            dom=browser.snapshot('<html><body style="margin:0;font:20px/30px Arial">'
+                f'<div style="width:{width};height:30px">Hello</div></body></html>',[600,400])
+            tree,boxes,_=dom_tree(dom);annotate(browser,tree,visual_boxes=True)
+            return tree,boxes,elements(tree,boxes,[600,400]),browser.page.screenshot()
+        wide,wb,wi,wp=measure('600px');tight,tb,ti,tp=measure('max-content')
+        assert wp==tp and wi==ti
+        owner=wi[0]['owner_id']
+        assert wb[owner][2]==600 and tb[owner][2]<60
+        browser.page.eval_on_selector(f'[data-fd-id="{owner}"]','e=>e.style.marginLeft="80px"')
+        _,boxes,items=abstraction(browser,tight,[600,400],64)
+        assert items[0]['box'][0]==80 and boxes[owner][0]==80
+        feedback_metadata(browser,tight)
+        assert elements(tight,boxes,[600,400])==items
+
+
+@pytest.mark.browser
+def test_visible_selection_excludes_offscreen_and_transparent_ancestors():
+    from framediff.html_bridge import HtmlBrowser
+    from framediff.plans import dom_tree
+    from framediff.visual import annotate
+    html='<html><body style="margin:0"><p>Visible</p><div style="opacity:0"><button>Hidden</button></div>'
+    html+='<div style="position:absolute;top:1000px">'+'<button>Outside</button>'*140+'</div></body></html>'
+    with HtmlBrowser() as browser:
+        dom=browser.snapshot(html,[600,400],max_nodes=16)
+        assert all(n['name'] not in ('Hidden','Outside') for n in dom['nodes'])
+        tree,boxes,_=dom_tree(dom);annotate(browser,tree,visual_boxes=True)
+        assert len(elements(tree,boxes,[600,400]))==1
+
+
+@pytest.mark.browser
+def test_text_lines_nested_owners_clipping_and_transparency():
+    from framediff.html_bridge import HtmlBrowser
+    from framediff.plans import dom_tree
+    from framediff.visual import annotate,refresh_visual_geometry
+    html='<html><body style="margin:0;font:20px/30px Arial">'
+    html+='<div style="width:100px">alpha beta gamma delta <span>child</span></div>'
+    html+='<div style="height:10px;overflow:hidden"><p style="margin:0">clipped</p></div>'
+    html+='<p style="color:transparent">invisible</p></body></html>'
+    with HtmlBrowser() as browser:
+        dom=browser.snapshot(html,[600,400]);tree,boxes,_=dom_tree(dom);annotate(browser,tree,visual_boxes=True)
+        items=elements(tree,boxes,[600,400]);owners={n['name']:n['id'] for n in dom['nodes']}
+        assert sum(e['owner_id']==owners['alpha beta gamma delta child'] for e in items)>=2
+        assert sum(e['owner_id']==owners['child'] for e in items)==1
+        assert not any(e['owner_id']==owners['invisible'] for e in items)
+        assert all(e['box'][3]-e['box'][1]<=10 for e in items if e['owner_id']==owners['clipped'])
+        browser.page.evaluate('document.body.style.opacity="0"')
+        refresh_visual_geometry(browser,tree)
+        assert elements(tree,boxes,[600,400])==[]
+
+
+def test_visual_label_contract_rejects_mixed_versions_and_legacy_config_loads():
+    from framediff.visual import VISUAL_GEOMETRY_CONTRACT,label_contract
+    from framediff.tree_policy import TreeConfig
+    assert TreeConfig().visual_geometry_contract is None
+    assert label_contract([{}]) is None
+    assert label_contract([{'visual_geometry_contract':VISUAL_GEOMETRY_CONTRACT}])==VISUAL_GEOMETRY_CONTRACT
+    with pytest.raises(ValueError,match='Mixed visual label'):
+        label_contract([{}, {'visual_geometry_contract':VISUAL_GEOMETRY_CONTRACT}])
+
+
 def test_validation_sampling_covers_pages_and_is_repeatable():
     from framediff.visual_train import validation_sample
     rows=[{'id':f'{page}/{state}','source_sha':str(page),'target_image':f'{page}.png'}

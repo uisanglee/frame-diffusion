@@ -92,16 +92,20 @@ class HtmlBrowser(Browser):
           s.textContent='*,*::before,*::after{animation:none!important;transition:none!important}';
           document.head.appendChild(s);} """)
 
-    def snapshot(self, html, viewport, screenshot=None, max_nodes=127):
+    def snapshot(self, html, viewport, screenshot=None, max_nodes=127, visual_geometry=True):
+        from .visual import VISUAL_GEOMETRY_JS
         self.load(html, viewport)
         # Stable IDs are assigned on the initial DOM and persisted in serialized HTML.
         # Existing data-frame-id values are intentionally ignored.
-        result = self.page.evaluate('''(limit) => {
+        result = self.page.evaluate('''([limit,visualGeometry]) => {
+          const measure=('''+VISUAL_GEOMETRY_JS+''');
           document.querySelectorAll('[data-fd-id]').forEach(e=>e.removeAttribute('data-fd-id'));
           const all=[document.body,...document.body.querySelectorAll('*')].filter(e=>{
             const r=e.getBoundingClientRect(),s=getComputedStyle(e);
             return !['SCRIPT','STYLE','META','LINK','NOSCRIPT'].includes(e.tagName) &&
-              r.width>0 && r.height>0 && s.visibility!=='hidden' && s.display!=='none';
+              r.width>0 && r.height>0 && s.visibility!=='hidden' && s.display!=='none' &&
+              (!visualGeometry || e===document.body ||
+                (r.right>0 && r.bottom>0 && r.left<innerWidth && r.top<innerHeight && measure(e).visible));
           });
           const ranked=all.filter(e=>e!==document.body).map((e,i)=>({e,i,score:
             (['IMG','BUTTON','INPUT','SVG'].includes(e.tagName)?1e12:0)+
@@ -119,7 +123,7 @@ class HtmlBrowser(Browser):
               box:[r.x,r.y,r.width,r.height]};
           });
           return {nodes,total_visible_nodes:all.length};
-        }''', max_nodes)
+        }''', [max_nodes,visual_geometry])
         if not result['nodes']:
             raise ValueError('No visible DOM elements')
         if screenshot:

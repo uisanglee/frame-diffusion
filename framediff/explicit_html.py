@@ -1,7 +1,6 @@
 """Parent-preserving, single-viewport CSS normalization and visual feedback."""
 import hashlib
 import io
-import json
 import math
 from pathlib import Path
 
@@ -63,6 +62,8 @@ def check_record_edit(row,edit):
 
 def feedback_metadata(browser, tree):
     """Only current HTML constraints; never target sizes or target clipping."""
+    from .visual import refresh_visual_geometry
+    refresh_visual_geometry(browser,tree)
     ids=[n['id'] for n in tree['nodes'][1:]]
     limits=explicit_size_limits(browser,ids)
     return {'explicit_size_limits':limits,'current_clip_boxes':current_clip_boxes(browser,ids),
@@ -128,7 +129,7 @@ def compare_renders(before, after, before_png, after_png, max_box_error=1., max_
                 max_pixel_mae=max_pixel_mae,max_box_error=max_box_error)
 
 
-def target_abstraction(rows, target_ids, viewport, size, tree=None):
+def target_abstraction(rows, target_ids, viewport, size, tree=None, geometry=None):
     """Use the policy's clipped occupancy/boundary raster, not RGB colors."""
     from .visual import elements, semantic_masks
     if tree is None:
@@ -137,6 +138,9 @@ def target_abstraction(rows, target_ids, viewport, size, tree=None):
     boxes={r['fd_id']:r['box'] for r in rows if r.get('fd_id') in target_ids}
     clips={r['fd_id']:r['visible_clip'] for r in rows if r.get('fd_id') in target_ids}
     tree={**tree,'nodes':[n for n in tree['nodes'] if n['id'] in boxes]}
+    if geometry is not None:
+        tree={**tree,'nodes':[{**n,'visual_visible':geometry.get(n['id'],{}).get('visible',False),
+                              'visual_boxes':geometry.get(n['id'],{}).get('text_boxes',[])} for n in tree['nodes']]}
     return semantic_masks(elements(tree,boxes,viewport,clips),viewport,size)
 
 
@@ -415,6 +419,9 @@ def normalize_sizes(browser, html, viewport, out, max_pixel_mae, max_box_error, 
                 stability.append(dict(attempt=attempt+1,error=str(exc),technical_retry=attempt==0))
                 if attempt==1:raise
     before_png=load_capture(html)
+    from .visual import visual_geometry,VISUAL_GEOMETRY_CONTRACT
+    visual_labels=(target_tree or {}).get('visual_geometry_contract')==VISUAL_GEOMETRY_CONTRACT
+    reference_geometry=visual_geometry(browser) if visual_labels else None
     snapshot=browser.page.evaluate(SIZE_SNAPSHOT_JS,action_ids)
     baseline=browser.page.content()
     (out/'before.png').write_bytes(before_png)
@@ -430,8 +437,9 @@ def normalize_sizes(browser, html, viewport, out, max_pixel_mae, max_box_error, 
                            geometry_target_ids=target_ids)
         before_ids={r.get('fd_id') for r in reference};after_ids={r.get('fd_id') for r in actual}
         missing=sorted(target_ids-before_ids | target_ids-after_ids)
-        a=target_abstraction(reference,target_ids,viewport,observation_size,target_tree)
-        b=target_abstraction(actual,target_ids,viewport,observation_size,target_tree)
+        a=target_abstraction(reference,target_ids,viewport,observation_size,target_tree,reference_geometry)
+        b=target_abstraction(actual,target_ids,viewport,observation_size,target_tree,
+                             visual_geometry(browser) if visual_labels else None)
         abstract_mae=float((a-b).abs().mean())
         qa.update(abstraction_mae=abstract_mae,max_abstraction_mae=max_pixel_mae,
                   missing_target_ids=missing,target_count=len(target_ids))

@@ -236,6 +236,10 @@ def evaluate(args):
     rows=list(read_jsonl(args.data));rows=rows[:args.limit] if args.limit else rows
     page_rows={r['id']:r for r in read_jsonl(args.pages)}
     if not rows:raise ValueError('Empty frozen WebUI test set')
+    from .visual import label_contract
+    geometry_contract=label_contract(rows)
+    if any(c.get('config',{}).get('visual_geometry_contract')!=geometry_contract for c in checkpoints):
+        raise ValueError('Rollout data and checkpoints use different visual label versions')
     if len({r['id'] for r in rows})!=len(rows):raise ValueError('Duplicate frozen test row IDs')
     if any(r.get('split')!='test' for r in rows):raise ValueError('visual-test-rollout accepts test rows only')
     for row in rows:

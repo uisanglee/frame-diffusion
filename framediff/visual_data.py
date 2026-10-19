@@ -13,7 +13,7 @@ from .html_bridge import HtmlBrowser,embed_placeholder
 from .html_feedback import refresh_geometry
 from .plans import dom_tree
 from .visual import (CONTRACT,ACTION_CONTRACT,ACTION_VALUES,
-                     annotate,elements,abstract_image)
+                     annotate,elements,abstract_image,VISUAL_GEOMETRY_CONTRACT)
 from .web_experiment import guard_run,digest
 
 
@@ -65,11 +65,13 @@ def generate(args):
 
 def _render_page(task):
     args, out, index, source = task
+    geometry_contract=getattr(args,'visual_geometry_contract',VISUAL_GEOMETRY_CONTRACT)
     if getattr(args,'lazy_train',False) and source['split']=='train':
         from .lazy_webui import CONTRACT as LAZY
         settings={k:getattr(args,k) for k in ('seed','max_nodes','abstract_size','min_elements','max_source_mae')}
-        settings.update(resume=True,clean_only=True,lazy_train=False)
+        settings.update(resume=True,clean_only=True,lazy_train=False,visual_geometry_contract=geometry_contract)
         row={**source,'id':source['id']+'/clean','lazy_contract':LAZY,
+             'visual_geometry_contract':geometry_contract,
              'lazy_source':source,'lazy_settings':settings,'contract':CONTRACT}
         return {'page':{**row,'id':source['id']},'policy':[row],'detection':[row]},None,False
     work=out/'pages'/hashlib.sha256(source['id'].encode()).hexdigest()[:20]
@@ -83,7 +85,8 @@ def _render_page(task):
                 assets.update(record[k] for k in ('current_html','current_image','current_abstract',
                                                    'target_image','target_abstract'))
             if (saved['page']['source_sha']==source['source_sha'] and saved['policy'] and
-                saved['detection'] and all(Path(path).is_file() for path in assets)):
+                saved['detection'] and saved.get('visual_geometry_contract')==geometry_contract
+                and all(Path(path).is_file() for path in assets)):
                 return saved, None, True
         except (OSError, ValueError, KeyError, TypeError):
             pass  # An interrupted/invalid completion record is regenerated.
@@ -93,8 +96,8 @@ def _render_page(task):
             viewport=source.get('viewport',[1280,800]);raw=Path(source['html']).read_text()
             asset=Path(source['html']).parent/'rick.jpg'
             if asset.exists():raw=embed_placeholder(raw,asset)
-            dom=browser.snapshot(raw,viewport,work/'target.png',args.max_nodes-1)
-            tree,target_boxes,_=dom_tree(dom);annotate(browser,tree)
+            dom=browser.snapshot(raw,viewport,work/'target.png',args.max_nodes-1,visual_geometry=bool(geometry_contract))
+            tree,target_boxes,_=dom_tree(dom);annotate(browser,tree,visual_boxes=bool(geometry_contract))
             from .explicit_html import feedback_metadata
             target_feedback=feedback_metadata(browser,tree)
             target_elements=elements(tree,target_boxes,viewport,target_feedback.get('current_clip_boxes'))
@@ -114,20 +117,22 @@ def _render_page(task):
             base={k:source[k] for k in ('id','group','split','source_sha')}
             for key in ('page_id','view'):
                 if key in source:base[key]=source[key]
-            base.update(contract=CONTRACT,action_contract=ACTION_CONTRACT,viewport=viewport,target_image=str(work/'target.png'),
+            base.update(contract=CONTRACT,action_contract=ACTION_CONTRACT,visual_geometry_contract=geometry_contract,
+                        viewport=viewport,target_image=str(work/'target.png'),
                         target_abstract=str(work/'target-abstract.png'),
                         teacher_strategy='unlabeled-css-corruption-v1',target_elements=target_elements)
             abstract_image(target_elements,viewport,args.abstract_size).save(base['target_abstract'])
             def observe():
                 boxes=browser.tagged_boxes(ids);boxes[root]=[0,0,*viewport];return boxes
             def save_example(name,current_html,boxes,corruption=None):
-                current_tree=refresh_geometry(tree,boxes)
                 from .explicit_html import feedback_screenshot
                 screenshot=work/f'{name}.png';feedback_screenshot(browser,path=str(screenshot),animations='disabled')
                 browser.screenshots+=1
+                boxes=observe()
+                current_tree=refresh_geometry(tree,boxes)
                 abstract=work/f'{name}-abstract.png'
-                feedback=feedback_metadata(browser,tree)
-                labels=elements(tree,boxes,viewport,feedback.get('current_clip_boxes'))
+                feedback=feedback_metadata(browser,current_tree)
+                labels=elements(current_tree,boxes,viewport,feedback.get('current_clip_boxes'))
                 abstract_image(labels,viewport,args.abstract_size).save(abstract)
                 html_path=work/f'{name}.html';html_path.write_text(current_html)
                 record={**base,'id':source['id']+'/'+name,'current':current_tree,'current_boxes':copy.deepcopy(boxes),
@@ -136,9 +141,18 @@ def _render_page(task):
                 local_policy.append(record)
                 local_detection.append({**base,'id':record['id'],'image':str(screenshot),'elements':labels})
             browser.load(tagged,viewport);save_example('clean',tagged,target_boxes)
+            # Screenshot waits for fonts. Use geometry measured after that same
+            # capture for both supervision and the clean corruption reference.
+            clean=local_policy[0]
+            tree=copy.deepcopy(clean['current']);target_boxes=copy.deepcopy(clean['current_boxes'])
+            target_elements=local_detection[0]['elements']
+            base['target_elements']=target_elements
+            for record in (local_policy[0],local_detection[0]):record['target_elements']=target_elements
+            (work/'target.png').write_bytes(Path(clean['current_image']).read_bytes())
+            abstract_image(target_elements,viewport,args.abstract_size).save(base['target_abstract'])
             last_corrupted=None
             for trajectory in range(0 if getattr(args,'clean_only',False) else args.trajectories):
-                html=tagged;boxes=target_boxes
+                html=tagged
                 for step in range(args.max_noise):
                     accepted=False
                     for attempt in range(30):
@@ -157,7 +171,7 @@ def _render_page(task):
                         # actual declarations later, never negate this delta.
                         if candidate_html==html:continue
                         save_example(f't{trajectory}-s{step}',candidate_html,candidate,[i,field,value])
-                        html,boxes=candidate_html,candidate;accepted=True
+                        html=candidate_html;accepted=True
                         last_corrupted=local_policy[-1];break
                     if not accepted:break
             if getattr(args,'clean_only',False):last_corrupted=local_policy[0]
@@ -168,7 +182,8 @@ def _render_page(task):
                   'source_screenshot':source.get('screenshot'),'source_pixel_mae':source_mae,
                   'construction':('clean normalization input; no corruption' if getattr(args,'clean_only',False)
                                   else 'controlled same-DOM corruption; not screenshot-generated initial HTML')}
-            saved={'page':page,'policy':local_policy,'detection':local_detection};write_json(cache,saved)
+            saved={'page':page,'policy':local_policy,'detection':local_detection,
+                   'visual_geometry_contract':geometry_contract};write_json(cache,saved)
         return saved, None, False
     except Exception as error:
         failure={'id':source['id'],'error':str(error)}
@@ -187,6 +202,7 @@ def build(args):
     if len({r['id'] for r in sources})!=len(sources):raise ValueError('Duplicate source IDs')
     out=Path(args.out).resolve()
     config={'kind':'visual-data-v7-cached-css-corruptions','contract':CONTRACT,'action_contract':ACTION_CONTRACT,
+            'visual_geometry_contract':VISUAL_GEOMETRY_CONTRACT,
             'sources':sources,'settings':{k:v for k,v in vars(args).items() if k not in ('out','resume','workers')}}
     if not getattr(args,'clean_only',False):config['settings'].pop('clean_only',None)
     if any(r.get('hierarchy') for r in sources):raise ValueError('Use original parent-preserving HTML, not flat manifests')

@@ -70,6 +70,7 @@ def inspection_cache_entry(directory, target, html, fingerprint):
         yield None
         return
     signature = {'code': fingerprint, 'html': hashlib.sha256(html.encode()).hexdigest(),
+                 'visual_geometry_contract':target['current'].get('visual_geometry_contract'),
                  'viewport': target['viewport'],
                  'ids': [n['id'] for n in target['current']['nodes']],
                  'observation_size':target.get('corruption_observation_size',384),
@@ -101,10 +102,11 @@ def save_inspection(path, state, error=None, **metadata):
 
 def abstraction(browser, tree, viewport, size):
     """Same clipped occupancy+boundary representation used by the policy."""
-    from .visual import elements,semantic_masks
+    from .visual import elements,semantic_masks,refresh_visual_geometry
     from .explicit_html import current_clip_boxes
     ids=[n['id'] for n in tree['nodes'][1:]]
     boxes=browser.tagged_boxes(ids);boxes[tree['nodes'][0]['id']]=[0,0,*viewport]
+    refresh_visual_geometry(browser,tree)
     items=elements(tree,boxes,viewport,current_clip_boxes(browser,ids))
     return semantic_masks(items,viewport,size),boxes,items
 
@@ -211,7 +213,7 @@ def target_pool(rows, manifest=None, cache_dir=None, observation_size=384, diagn
         for key in ('page_id','view'):
             if key in row:target[key]=row[key]
         for key in ('predicted_target_elements','parser_provenance','parser_sha','css_owners',
-                    'target_declaration_state','normalization_contract'):
+                    'target_declaration_state','normalization_contract','visual_geometry_contract'):
             if key in row: target[key] = row[key]
         target.update(id=page_id,target_html=str(Path(html).resolve()),corruption_observation_size=observation_size)
         clean_state=row.get('target_declaration_state')
@@ -490,7 +492,7 @@ class OnlineSampler:
                         'teacher_strategy':css_owners.CONTRACT if owner_mode else CONTRACT,'symbolic_distance':len(remaining),
                         'corruption_contract':ONLINE_CONTRACT}
                 from .explicit_html import feedback_metadata
-                result.update(feedback_metadata(browser,tree))
+                result.update(feedback_metadata(browser,result['current']))
                 if owner_mode:
                     result['css_owners']=owners
                     result['current_html_text']=browser.page.content()

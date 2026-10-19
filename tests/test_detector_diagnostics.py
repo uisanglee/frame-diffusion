@@ -52,6 +52,13 @@ def test_evaluation_single_inference_sweep_and_visualization(tmp_path,monkeypatc
                          visualize_dir=str(tmp_path/'viz'),visualize_limit=1)
     report=visual_train.evaluate_detector(args)
     assert len(calls)==1
+    from framediff.visual import VISUAL_GEOMETRY_CONTRACT
+    monkeypatch.setattr(visual_train,'load_detector',lambda *a:(net,{
+        'training_groups':[],'training_hashes':[],
+        'config':{'visual_geometry_contract':VISUAL_GEOMETRY_CONTRACT}}))
+    with pytest.raises(ValueError,match='visual label versions differ'):
+        visual_train.evaluate_detector(args)
+    assert len(calls)==1
     assert report['threshold_sweep']['0.3']['precision_iou50']==.5
     assert report['threshold_sweep']['0.4']['precision_iou50']==1
     assert report['threshold_sweep']['0.9']['recall_iou50']==0

@@ -62,6 +62,8 @@ def _prepare_page(task):
         if args.resume and cache.exists():
             saved=read_json(cache)
             if saved['source_sha']!=signature:raise ValueError('Source HTML changed; use a new output directory')
+            if saved['row'].get('visual_geometry_contract')!=row.get('visual_geometry_contract'):
+                raise ValueError('Visual labels changed; use a new normalized output directory')
             for key,sha in saved['assets'].items():
                 if digest(key)!=sha:raise ValueError('Normalized cache assets changed')
             new=saved['row'];page=saved['page']
@@ -105,6 +107,7 @@ def _prepare_page(task):
             for key in ('page_id','view'):
                 if key in row:seed[key]=row[key]
             seed.update(id=page_id+'/seed',current=tree,current_boxes=boxes,
+                visual_geometry_contract=tree.get('visual_geometry_contract'),
                 target_html=str(normalized),target_image=str(folder/'after.png'),
                 target_elements=target_elements,css_owners=parsed['owners'],
                 target_declaration_state=parsed['state'],normalization_contract=CONTRACT,**feedback)
@@ -137,6 +140,7 @@ def _prepare_page(task):
             for key in ('page_id','view'):
                 if key in pages[page_id]:page[key]=pages[page_id][key]
             page.update(html=str(normalized),target_html=str(normalized),
+                visual_geometry_contract=tree.get('visual_geometry_contract'),
                 screenshot=str(folder/'after.png'),initial_html=str(initial),
                 evaluation_target_boxes=boxes,policy_subset=css_owners.CONTRACT,
                 normalization_contract=CONTRACT,original_html=str(html_path))

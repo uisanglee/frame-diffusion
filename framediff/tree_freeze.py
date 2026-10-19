@@ -31,6 +31,8 @@ def _freeze_page(task):
         if saved['signature']!=signature:raise ValueError('Frozen target assets changed; use a new output directory')
         new=saved['rows']
         for row in new:
+            if row.get('visual_geometry_contract')!=target.get('visual_geometry_contract'):
+                raise ValueError('Frozen visual labels changed; use a new output directory')
             if not Path(row['current_html']).is_file() or not Path(row['current_image']).is_file():
                 raise ValueError('Incomplete frozen page assets')
     else:

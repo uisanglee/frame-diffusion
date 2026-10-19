@@ -19,6 +19,66 @@ from .model import encode, collate, Block, ModelConfig
 CONTRACT = 'visible-ui-v1'
 ACTION_CONTRACT = 'single-css-declaration-normalized-v3-no-padding-gap'
 CLASSES = ('background', 'text', 'image', 'control', 'painted-region')
+VISUAL_GEOMETRY_CONTRACT = 'visible-text-fragments-owner-v1'
+# CSS owner boxes remain untouched. Ranges measure only this owner's direct
+# text, avoiding duplicate supervision for text belonging to child owners.
+VISUAL_GEOMETRY_JS = r'''e => {
+  let l=0,t=0,r=innerWidth,b=innerHeight;
+  for(let p=e;p;p=p.parentElement){
+    const s=getComputedStyle(p);
+    if(s.display==='none'||s.visibility==='hidden'||s.visibility==='collapse'||Number(s.opacity)===0)
+      return {visible:false,text_boxes:[]};
+    if(p!==e){const q=p.getBoundingClientRect();
+      if(['hidden','clip','scroll','auto'].includes(s.overflowX)){l=Math.max(l,q.left+p.clientLeft);r=Math.min(r,q.left+p.clientLeft+p.clientWidth);}
+      if(['hidden','clip','scroll','auto'].includes(s.overflowY)){t=Math.max(t,q.top+p.clientTop);b=Math.min(b,q.top+p.clientTop+p.clientHeight);}
+    }
+  }
+  const clip=q=>[Math.max(l,q.left),Math.max(t,q.top),Math.min(r,q.right),Math.min(b,q.bottom)];
+  const valid=q=>q[2]>q[0]&&q[3]>q[1];
+  const own=e.getBoundingClientRect(),visible=valid(clip(own));
+  if(!visible)return {visible:false,text_boxes:[]};
+  const style=getComputedStyle(e),color=style.webkitTextFillColor||style.color;
+  const transparent=color==='transparent'||/rgba\([^)]*,\s*0\s*\)$/.test(color);
+  const text_boxes=[];
+  if(['hidden','clip','scroll','auto'].includes(style.overflowX)){l=Math.max(l,own.left+e.clientLeft);r=Math.min(r,own.left+e.clientLeft+e.clientWidth);}
+  if(['hidden','clip','scroll','auto'].includes(style.overflowY)){t=Math.max(t,own.top+e.clientTop);b=Math.min(b,own.top+e.clientTop+e.clientHeight);}
+  if(!transparent)for(const node of e.childNodes){
+    if(node.nodeType!==3||!node.textContent.trim())continue;
+    const text=node.textContent,range=document.createRange();
+    range.setStart(node,text.search(/\S/));range.setEnd(node,text.trimEnd().length);
+    for(const rect of range.getClientRects()){
+      const q=clip(rect);if(valid(q))text_boxes.push(q);
+    }
+  }
+  return {visible,text_boxes};
+}'''
+
+
+def visual_geometry(browser):
+    return browser.page.evaluate('''() => {
+      const measure=('''+VISUAL_GEOMETRY_JS+''');
+      return Object.fromEntries([...document.querySelectorAll('[data-fd-id]')].map(e=>[e.dataset.fdId,measure(e)]));
+    }''')
+
+
+def refresh_visual_geometry(browser, tree):
+    if tree.get('visual_geometry_contract') != VISUAL_GEOMETRY_CONTRACT:return
+    geometry=visual_geometry(browser)
+    for node in tree['nodes']:
+        info=geometry.get(node['id'],{'visible':False,'text_boxes':[]})
+        node['visual_visible']=info['visible'];node['visual_boxes']=info['text_boxes']
+
+
+def label_contract(rows):
+    for row in rows:
+        tree_contract=row.get('current',{}).get('visual_geometry_contract')
+        if 'current' in row and 'visual_geometry_contract' in row and row['visual_geometry_contract']!=tree_contract:
+            raise ValueError('Row and DOM tree visual label versions differ')
+    values={r.get('visual_geometry_contract',r.get('current',{}).get('visual_geometry_contract')) for r in rows}
+    if len(values)>1:raise ValueError('Mixed visual label versions; rebuild matching train/val data')
+    value=next(iter(values),None)
+    if value not in (None,VISUAL_GEOMETRY_CONTRACT):raise ValueError('Unknown visual label version')
+    return value
 COLORS = ('white', '#2864b4', '#26946c', '#df7832', '#b49ac7')
 BOUNDARY_CONTRACT = 'semantic-occupancy-boundary-pair-v2'
 SEMANTIC_CHANNELS = 8
@@ -112,12 +172,13 @@ def action_is_legal(tree, boxes, viewport, edit):
     return True
 
 
-def annotate(browser, tree):
+def annotate(browser, tree, visual_boxes=False):
     """Visible primitives and painted regions, never invisible DOM wrappers.
 
     These labels are observable appearance categories, NOT semantic DOM roles.
     A control's descendants are suppressed to avoid double-counting its text.
     """
+    if visual_boxes:tree['visual_geometry_contract']=VISUAL_GEOMETRY_CONTRACT
     labels = browser.page.evaluate('''() => Object.fromEntries(
       [...document.querySelectorAll('[data-fd-id]')].map(e=>{
         const id=e.getAttribute('data-fd-id'), s=getComputedStyle(e);
@@ -133,6 +194,7 @@ def annotate(browser, tree):
         return [id,!e.matches('body,html')&&(painted||border)?4:0];
       }))''')
     for node in tree['nodes']: node['visual_class'] = labels.get(node['id'], 0)
+    refresh_visual_geometry(browser,tree)
     return tree
 
 
@@ -142,6 +204,15 @@ def elements(tree, boxes, viewport, clip_boxes=None):
     for node in tree['nodes']:
         label = node.get('visual_class', 0)
         if not label: continue
+        if tree.get('visual_geometry_contract') == VISUAL_GEOMETRY_CONTRACT:
+            if 'visual_visible' not in node:raise ValueError('Missing measured visual geometry')
+            if not node['visual_visible']:continue
+            if label==1:
+                for bx in node['visual_boxes']:
+                    x1,y1,x2,y2=max(0.,bx[0]),max(0.,bx[1]),min(w,bx[2]),min(h,bx[3])
+                    if x2>x1 and y2>y1:
+                        result.append({'box':[x1,y1,x2,y2],'label':label,'owner_id':node['id']})
+                continue
         x, y, bw, bh = boxes[node['id']]
         x1, y1, x2, y2 = max(0., x), max(0., y), min(w, x+bw), min(h, y+bh)
         if clip_boxes is not None and clip_boxes.get(node['id']) is not None:
@@ -262,11 +333,14 @@ class VisualConfig:
     decoding: str = 'joint'
     training_scheme: str = 'legacy'
     observation_contract: str = 'rgb-pair-diff-v1'
+    visual_geometry_contract: str | None = None
 
     @property
     def semantic(self):return self.observation_contract=='semantic-mask-pair-diff-v1'
 
     def __post_init__(self):
+        if self.visual_geometry_contract not in (None,VISUAL_GEOMETRY_CONTRACT):
+            raise ValueError('Unknown visual geometry contract')
         if self.observation_contract not in ('rgb-pair-diff-v1','semantic-mask-pair-diff-v1'):
             raise ValueError('Unknown observation contract')
         if self.semantic and (self.mode!='abstract' or self.policy_head!='autoregressive'):

@@ -124,7 +124,8 @@ def test_parent_preserving_dataset_and_rollout(tmp_path):
     row=next(read_jsonl(rendered/'policy-train.jsonl'))
     assert 'hierarchy' not in row
     torch.set_num_threads(2)
-    net=TreePolicy(TreeConfig(size=32,hidden=16,layers=1,heads=2,token_grid=2,max_nodes=16),False)
+    net=TreePolicy(TreeConfig(size=32,hidden=16,layers=1,heads=2,token_grid=2,max_nodes=16,
+                             visual_geometry_contract=row.get('visual_geometry_contract')),False)
     # Deterministic valid edit; integration test is not a learned-policy quality test.
     index=next(i for i,n in enumerate(row['current']['nodes']) if i and n['id']!='__viewport__')
     net.predict=lambda *args:[index,'width','200px','important']

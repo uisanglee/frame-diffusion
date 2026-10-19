@@ -59,8 +59,12 @@ class TreeConfig:
     abstraction_contract: str = BOUNDARY_CONTRACT
     parent_first: bool = False
     parent_first_max_probes: int = 200
+    visual_geometry_contract: str | None = None
 
     def __post_init__(self):
+        from .visual import VISUAL_GEOMETRY_CONTRACT
+        if self.visual_geometry_contract not in (None,VISUAL_GEOMETRY_CONTRACT):
+            raise ValueError('Unknown visual geometry contract')
         if self.parent_first_max_probes<1:raise ValueError('Parent-first probe budget must be positive')
         if self.abstraction_contract!=BOUNDARY_CONTRACT:
             raise ValueError('Retrain abstract policy for occupancy+boundary inputs')
@@ -236,6 +240,9 @@ def tree_batch(rows,device,max_nodes):
 
 def batch_inputs(net,rows,device,predicted=False):
     cfg=net.cfg;targets=[];currents=[]
+    from .visual import label_contract
+    if label_contract(rows)!=cfg.visual_geometry_contract:
+        raise ValueError('Policy batch visual label version differs from checkpoint')
     for row in rows:
         if row.get('hierarchy'):raise ValueError('Flat policy data is retired; use original DOM data')
         if cfg.semantic:
@@ -361,6 +368,8 @@ def train(args):
     validate_splits(training+validation)
     if any(r['split']!='train' for r in training) or any(r['split']!='val' for r in validation): raise ValueError('Wrong split files')
     cfg=TreeConfig(**{k:getattr(args,k) for k in ('mode','size','hidden','layers','heads','max_nodes','token_grid')})
+    from .visual import label_contract
+    cfg.visual_geometry_contract=label_contract(training+validation)
     from .safe_sizes import CONTRACT as SAFE_SIZES_CONTRACT
     cfg.safe_sizes=normalizations=={SAFE_SIZES_CONTRACT}
     cfg.parent_first=getattr(args,'parent_first',False)
@@ -403,6 +412,7 @@ def train(args):
             raise ValueError('Validation uses old corruption; rerun prepare_stylesheet_policy.sh in a new output directory (reuse target assets/cache)')
     out=Path(args.out).resolve();settings={k:v for k,v in vars(args).items() if k not in ('out','steps','resume','init_checkpoint','policy_scale')}
     config=asdict(cfg)
+    if cfg.visual_geometry_contract is None:config.pop('visual_geometry_contract')
     if not cfg.parent_first:
         config.pop('parent_first');settings.pop('parent_first',None)
         config.pop('parent_first_max_probes');settings.pop('parent_first_max_probes',None)
@@ -432,6 +442,8 @@ def train(args):
                 if source not in provenance: provenance[source]=read_json(source)
                 source=provenance[source]
             if not source: raise ValueError('Missing detector training provenance')
+            if source.get('visual_geometry_contract')!=cfg.visual_geometry_contract:
+                raise ValueError('Detector target cache and policy visual label versions differ')
             parser_groups.update(source.get('parser_training_groups',[]));parser_hashes.update(source.get('parser_training_hashes',[]))
     if ck:
         groups.update(ck.get('training_groups',[]));hashes.update(ck.get('training_hashes',[]))

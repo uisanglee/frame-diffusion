@@ -286,6 +286,9 @@ def _train(args,stack):
         if not train_rows or not val_rows:raise ValueError('No legal policy train/validation rows remain')
     if is_detector:
         cfg={'contract':CONTRACT,'min_size':args.min_size,'max_size':args.max_size,'max_detections':args.max_detections}
+        from .visual import label_contract
+        geometry_contract=label_contract(train_rows+val_rows)
+        if geometry_contract:cfg['visual_geometry_contract']=geometry_contract
         if cfg['min_size']<32 or cfg['max_size']<cfg['min_size'] or cfg['max_detections']<1:raise ValueError('Invalid detector dimensions')
         kind='visual-detector-v1'
     else:
@@ -298,6 +301,10 @@ def _train(args,stack):
                                 observation_contract=('semantic-mask-pair-diff-v1' if args.mode=='abstract' and
                                     getattr(args,'policy_head','flat')=='autoregressive' else 'rgb-pair-diff-v1'),
                                 training_scheme='balanced-v1' if getattr(args,'balanced_policy',False) else 'legacy'))
+        from .visual import label_contract
+        geometry_contract=label_contract(train_rows+val_rows)
+        if geometry_contract:cfg['visual_geometry_contract']=geometry_contract
+        else:cfg.pop('visual_geometry_contract')
         if cfg['policy_head']=='autoregressive':
             raise ValueError('Delta/gain/set-loss training retired; use visual-tree-prepare and visual-tree-train')
         kind='visual-policy-v3'
@@ -318,6 +325,7 @@ def _train(args,stack):
                                                   'visual-policy-v6-semantic','visual-policy-v7-improvement',
                                                   'visual-policy-v8-tree-path'):
             checkpoint_config=asdict(VisualConfig(**checkpoint_config))
+            if checkpoint_config.get('visual_geometry_contract') is None:checkpoint_config.pop('visual_geometry_contract')
         if ck.get('kind')==kind and checkpoint_config==cfg:pass
         elif (args.init_checkpoint and not is_detector and ck.get('kind')=='visual-policy-v1' and
               cfg['policy_head']=='flat' and not cfg['numeric_only'] and cfg['decoding']=='joint' and
@@ -543,6 +551,9 @@ def cache_targets(args):
     if lazy:
         model=None;ck=torch.load(args.checkpoint,map_location='cpu',weights_only=True)
     else:model,ck=load_detector(args.checkpoint,device)
+    from .visual import label_contract
+    if label_contract(rows)!=ck.get('config',{}).get('visual_geometry_contract'):
+        raise ValueError('Detector and target visual label versions differ')
     out=Path(args.out).resolve();guard_run(out,{'kind':'visual-cache-v1','data':digest(args.data),
         'checkpoint':digest(args.checkpoint),'threshold':args.threshold,'size':args.size},args.resume)
     provenance=out/'parser-provenance.json';parser_sha=digest(args.checkpoint)
@@ -552,7 +563,9 @@ def cache_targets(args):
         if any(config.get(k)!=v for k,v in dict(kind='visual-cache-v1',checkpoint=parser_sha,
                                               threshold=args.threshold,size=args.size).items()):
             raise ValueError('Reuse cache detector/threshold/size mismatch')
-    write_json(provenance,{'parser_sha':parser_sha,'parser_training_groups':ck['training_groups'],'parser_training_hashes':ck['training_hashes']})
+    write_json(provenance,{'parser_sha':parser_sha,'parser_training_groups':ck['training_groups'],
+                          'parser_training_hashes':ck['training_hashes'],
+                          'visual_geometry_contract':ck.get('config',{}).get('visual_geometry_contract')})
     seen={};result=[]
     for r in rows:
         if r['split']!='train' and (r['group'] in ck['training_groups'] or r['source_sha'] in ck['training_hashes']):
@@ -588,6 +601,9 @@ def evaluate_detector(args):
     device=select_device(args.device)
     if device=='cpu':torch.set_num_threads(args.cpu_threads)
     net,ck=load_detector(args.checkpoint,device);rows=list(read_jsonl(args.data))
+    from .visual import label_contract
+    if label_contract(rows)!=ck.get('config',{}).get('visual_geometry_contract'):
+        raise ValueError('Detector and evaluation visual label versions differ; use matching data/checkpoint')
     if args.limit:rows=rows[:args.limit]
     if not rows:raise ValueError('No detector evaluation samples')
     # Check the full selected manifest before producing any evaluation artifacts.
@@ -611,6 +627,7 @@ def evaluate_detector(args):
             print({'detector_diagnostics':index+1,'total':len(rows)},flush=True)
     primary=buckets[args.threshold]
     report={**primary.report(),'threshold':args.threshold,'records':primary.records,
+            'visual_geometry_contract':ck.get('config',{}).get('visual_geometry_contract'),
             'threshold_sweep':{str(t):bucket.report() for t,bucket in buckets.items()},
             'checkpoint':str(args.checkpoint),'data':str(args.data),
             'note':'Class-aware maximum-cardinality one-to-one IoU50 matching, not COCO AP. '
