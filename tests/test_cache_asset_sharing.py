@@ -51,14 +51,16 @@ def test_bad_checksum_prevents_cleanup(tmp_path):
     assert not (tmp_path/'store').exists()
 
 
-def test_committed_nested_staging_paths_are_hash_verified(tmp_path):
+@pytest.mark.parametrize('contract', ['lazy-webui-train-view-cache-v1',
+                                    'lazy-webui-train-view-cache-v2-verified'])
+def test_committed_nested_staging_paths_are_hash_verified(tmp_path, contract):
     root=tmp_path/'lazy-train-views';key='a'*64
     entry=root/key;folder=entry/'labels/normalized-pages/train'/('b'*64)
     image,record=fixture(folder,b'same')
     stale=root/('.'+key+'.random_123')/image.relative_to(entry)
     value=json.loads(record.read_text());sha=next(iter(value['assets'].values()))
     value['assets']={str(stale):sha};record.write_text(json.dumps(value))
-    (entry/'result.json').write_text(json.dumps({'contract':'lazy-webui-train-view-cache-v2-verified',
+    (entry/'result.json').write_text(json.dumps({'contract':contract,
                                                'result':{},'assets':{str(image):sha}}))
     other,_=fixture(tmp_path/'normalized-pages',b'same')
     report=module().run([root,other.parent],tmp_path/'store',True)
@@ -70,6 +72,19 @@ def test_committed_nested_staging_paths_are_hash_verified(tmp_path):
     assert module().run([root],tmp_path/'store')['errors']
     with pytest.raises(ValueError,match='audit'):
         module().run([root],tmp_path/'store',True)
+
+
+def test_v1_without_top_level_hashes_uses_nested_verified_record(tmp_path):
+    entry=tmp_path/'lazy'/('a'*64)
+    image,record=fixture(entry/'labels',b'verified')
+    value=json.loads(record.read_text())
+    stale=entry.parent/('.'+entry.name+'.old')/'labels/after.png'
+    value['assets']={str(stale):hashlib.sha256(b'verified').hexdigest()}
+    record.write_text(json.dumps(value))
+    (entry/'result.json').write_text(json.dumps({'contract':'lazy-webui-train-view-cache-v1',
+                                               'result':{'target_image':str(image)}}))
+    report=module().run([entry.parent],tmp_path/'store')
+    assert not report['errors'] and len(report['resolved_staging_paths'])==1
 
 
 def test_staging_mapping_requires_matching_completed_entry(tmp_path):

@@ -16,6 +16,12 @@ from pathlib import Path
 import tempfile
 
 
+# Recognition for storage auditing only, not permission to load old training
+# caches as current ones. Every eligible asset still requires its saved hash.
+CACHE_CONTRACTS = {'lazy-webui-train-view-cache-v1',
+                   'lazy-webui-train-view-cache-v2-verified'}
+
+
 def digest(path):
     h=hashlib.sha256()
     with path.open('rb') as f:
@@ -35,7 +41,7 @@ def committed_asset(record, path):
         if not re.fullmatch(r'[0-9a-f]{64}',entry.name):continue
         completion=entry/'result.json'
         if not completion.is_file():continue
-        if json.loads(completion.read_text()).get('contract')!='lazy-webui-train-view-cache-v2-verified':continue
+        if json.loads(completion.read_text()).get('contract') not in CACHE_CONTRACTS:continue
         for index,part in enumerate(path.parts):
             if not re.fullmatch(r'\.'+entry.name+r'\.[A-Za-z0-9_-]+',part):continue
             suffix=Path(*path.parts[index+1:])
@@ -57,7 +63,7 @@ def run(roots, store, apply=False):
                     if not isinstance(assets,dict):continue
                     # Only successful normalized/lazy completion records.
                     if not (('row' in value and 'page' in value) or
-                            value.get('contract')=='lazy-webui-train-view-cache-v2-verified'):continue
+                            value.get('contract') in CACHE_CONTRACTS):continue
                     records+=1
                     for filename,sha in assets.items():
                         path=Path(filename)
