@@ -71,6 +71,9 @@ def add_parsers(sub):
         for k,v in [('steps',10000),('batch-size',2),('accumulation',4),('seed',42),('cpu-threads',4),
                     ('eval-every',500),('log-every',50),('val-samples',32)]:p.add_argument('--'+k,type=int,default=v)
         if name.endswith('detector'):
+            p.add_argument('--render-workers',type=int,default=2)
+            p.add_argument('--render-prefetch',type=int,default=4)
+            p.add_argument('--render-timeout',type=float,default=900.)
             for k,v in [('min-size',800),('max-size',1600),('max-detections',256)]:p.add_argument('--'+k,type=int,default=v)
             p.add_argument('--metric-threshold',type=float,default=.4,
                            help='Confidence threshold for checkpoint-time IoU50 validation metrics')
@@ -105,6 +108,9 @@ def add_parsers(sub):
     for k in ('data','checkpoint','out'):p.add_argument('--'+k,required=True)
     p.add_argument('--device',default='auto');p.add_argument('--threshold',type=float,default=.4)
     p.add_argument('--limit',type=int,default=0);p.add_argument('--cpu-threads',type=int,default=4)
+    p.add_argument('--thresholds',type=float,nargs='+',default=[.3,.4,.5,.6,.7],help='Validation confidence sweep; inference runs once per image')
+    p.add_argument('--visualize-dir',help='Save annotated predictions, missed targets and per-box JSON')
+    p.add_argument('--visualize-limit',type=int,default=30,help='First N evaluated views to visualize at --threshold')
     p=sub.add_parser('visual-evaluate',help='Paired actual screenshot vs one-shot abstraction greedy rollouts')
     p.add_argument('--decoding',choices=['joint','aggregate'],help='Override flat decoding for a paired ablation')
     for k in ('data','abstract-checkpoint','detector-checkpoint','out'):p.add_argument('--'+k,required=True)

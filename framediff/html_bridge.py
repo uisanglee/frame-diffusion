@@ -24,7 +24,7 @@ def embed_placeholder(html, path=None):
 
 
 class HtmlBrowser(Browser):
-    def stable_capture(self, target_ids=None, timeout_ms=5000, interval_ms=150):
+    def stable_capture(self, target_ids=None, timeout_ms=None, interval_ms=150):
         """Bounded readiness and three consecutive equal pixel/target-box samples.
 
         Only used by normalization QA; does not add capture cost to policy steps.
@@ -32,7 +32,12 @@ class HtmlBrowser(Browser):
         """
         import time
         import io
+        import os
         from PIL import Image
+        if timeout_ms is None:
+            timeout_ms=float(os.environ.get('TUIDE_STABILITY_TIMEOUT_MS','30000'))
+        if not math.isfinite(timeout_ms) or timeout_ms<=0 or interval_ms<0:
+            raise ValueError('Invalid render stabilization timeout/interval')
         started=time.monotonic()
         resources=self.page.evaluate('''async timeout => {
           const ready=Promise.all([document.fonts.ready,...[...document.images].map(async im=>{
@@ -45,10 +50,15 @@ class HtmlBrowser(Browser):
         }''',timeout_ms)
         if not resources:
             raise ValueError('Render stabilization timed out waiting for fonts/images')
-        previous=None;equal=0;samples=0
+        previous=None;equal=0;samples=0;changes=0
         while (time.monotonic()-started)*1000<timeout_ms:
             remaining=max(1,int(timeout_ms-(time.monotonic()-started)*1000))
-            png=self.page.screenshot(animations='disabled',caret='hide',timeout=remaining)
+            from playwright.sync_api import TimeoutError as CaptureTimeout
+            try:
+                png=self.page.screenshot(animations='disabled',caret='hide',timeout=remaining)
+            except CaptureTimeout as exc:
+                raise CaptureTimeout(f'Render capture deadline exceeded: samples={samples}, '
+                                     f'changes={changes}, budget_ms={timeout_ms}; {exc}') from exc
             boxes=self.page.evaluate('''ids=>[...document.querySelectorAll('[data-fd-id]')]
               .filter(e=>ids===null||ids.includes(e.getAttribute('data-fd-id'))).map(e=>{
                 const r=e.getBoundingClientRect();return [e.getAttribute('data-fd-id'),r.x,r.y,r.width,r.height];})''',
@@ -56,13 +66,16 @@ class HtmlBrowser(Browser):
             with Image.open(io.BytesIO(png)) as im:
                 pixels=(im.size,im.convert('RGB').tobytes())
             current=(pixels,boxes);samples+=1
+            if previous is not None and current!=previous:changes+=1
             equal=equal+1 if current==previous else 1
             if equal>=3:
                 return png,dict(samples=samples,consecutive_stable=equal,
                     resources_ready=True,seconds=time.monotonic()-started)
             previous=current
             self.page.wait_for_timeout(interval_ms)
-        raise ValueError('Render stabilization timed out: pixels/target boxes keep changing')
+        reason='pixels/target boxes keep changing' if changes else 'insufficient completed captures'
+        raise ValueError(f'Render stabilization timed out: {reason}; samples={samples}, '
+                         f'changes={changes}, budget_ms={timeout_ms}')
 
     def load(self, html, viewport):
         from .explicit_html import reject_flat_html

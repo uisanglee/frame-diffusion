@@ -15,7 +15,7 @@ import random
 import time
 import tempfile
 from importlib.metadata import version
-from collections import deque
+from collections import deque, Counter
 from concurrent.futures import ProcessPoolExecutor, TimeoutError as FutureTimeoutError
 from functools import lru_cache
 from multiprocessing.util import Finalize
@@ -33,6 +33,16 @@ SAMPLING_CONTRACT = 'property-first-owner-uniform-v1'
 INSPECTION_LOGIC_VERSION = 'visible-candidates-v2-diagnostics-four-probes'
 PROBES_PER_SITE = 4
 ABSTRACTION_EPS = 1e-6
+
+
+class OnlineGenerationError(RuntimeError):
+    """Structured, pickle-safe exhausted page attempts, including failed views."""
+    def __init__(self,index,errors):
+        self.index=index;self.errors=errors
+        super().__init__(index,errors)
+
+    def __str__(self):
+        return f'Online sample {self.index} failed after {len(self.errors)} attempts: {self.errors}'
 
 
 def mutation_sites(state):
@@ -507,11 +517,12 @@ class OnlineSampler:
                     if descriptor.get('lazy_detector'):result['lazy_detector']=descriptor['lazy_detector']
                 return result
             except Exception as exc:
-                errors.append({'page':target['id'],'error':str(exc)})
+                errors.append({'page':target['id'],'view':target.get('view','unknown'),
+                               'error_type':type(exc).__name__,'error':str(exc)})
                 if self.browser is not None:
                     try: self.close()
                     except Exception: self.browser=None
-        raise RuntimeError(f'Online sample {index} failed after {self.attempts} attempts: {errors}')
+        raise OnlineGenerationError(index,errors)
 
 
 _sampler=None
@@ -520,7 +531,10 @@ _sampler=None
 def _initialize(targets,mode,seed,max_noise,attempts,parent_first,stop):
     global _sampler
     import torch
+    from .browser import enable_worker_browser,close_worker_browser
     torch.set_num_threads(1)  # No CUDA/model/detector in workers.
+    enable_worker_browser()
+    Finalize(None,close_worker_browser,exitpriority=8)
     _sampler=OnlineSampler(targets,mode,seed,max_noise,attempts,stop,parent_first)
     Finalize(None,_sampler.view_cache.close,exitpriority=9)
     Finalize(None,_sampler.close,exitpriority=10)
@@ -536,7 +550,13 @@ class OnlineStream:
             raise ValueError('Invalid online stream configuration')
         self.args=(targets,mode,seed,max_noise,attempts,parent_first)
         self.workers=workers;self.prefetch=prefetch;self.timeout=timeout;self.cursor=start;self.next_index=start
-        self.pending=deque();self.pool=None;self.timeout_skips=0
+        self.pending=deque();self.pool=None;self.timeout_skips=0;self.generation_skips=0
+        self.consecutive_generation_skips=0
+        self.timeout_retries=0;self.retrying_index=None;self.consecutive_timeout_skips=0
+        self.failure_views=Counter();self.accepted_views=Counter();self.teacher_fields=Counter()
+
+    def _record_failures(self,errors):
+        for error in errors:self.failure_views[error.get('view','unknown')]+=1
 
     def __enter__(self):
         self._start_pool();return self
@@ -551,12 +571,11 @@ class OnlineStream:
         if self.pool is None:return
         self.stop.set()
         for future in self.pending:future.cancel()
-        processes=list(getattr(self.pool,'_processes',{}).values()) if force else []
-        self.pool.shutdown(wait=not force,cancel_futures=True)
+        processes=list((getattr(self.pool,'_processes',None) or {}).values()) if force else []
         if force:
-            for process in processes:
-                if process.is_alive():process.terminate()
-            for process in processes:process.join(timeout=5)
+            from .worker_cleanup import stop_executor
+            stop_executor(self.pool,processes)
+        else:self.pool.shutdown(wait=True,cancel_futures=True)
         self.pool=None;self.pending.clear()
 
     def _fill(self):
@@ -569,16 +588,40 @@ class OnlineStream:
             if not self.pool: raise RuntimeError('Online stream is not open')
             try: row=self.pending[0].result(timeout=self.timeout)
             except FutureTimeoutError:
+                if self.retrying_index!=self.cursor:
+                    self.retrying_index=self.cursor;self.timeout_retries+=1
+                    print({'online_timeout_retry':self.cursor,'timeout_s':self.timeout,
+                           'action':'restart_worker_pool_same_sample'},flush=True)
+                    self._stop_pool(force=True);self._start_pool()
+                    continue
                 skipped=self.cursor
-                self.timeout_skips+=1
+                self.timeout_skips+=1;self.consecutive_timeout_skips+=1
                 print({'online_timeout_skip':skipped,'timeout_s':self.timeout,
                        'action':'restart_worker_pool'},flush=True)
                 self.cursor+=1
-                self._stop_pool(force=True);self._start_pool()
+                self._stop_pool(force=True)
+                if self.consecutive_timeout_skips>=32:
+                    raise RuntimeError('32 consecutive online timeout skips; inspect renderer/worker health')
+                self._start_pool()
                 continue
-            except Exception as exc: raise RuntimeError(f'Online producer failed/stalled at sample {self.cursor}: {exc}') from exc
+            except Exception as exc:
+                message=str(exc)
+                if isinstance(exc,OnlineGenerationError):
+                    skipped=self.cursor;self.generation_skips+=1;self.consecutive_generation_skips+=1
+                    errors=getattr(exc,'errors',[]);self._record_failures(errors)
+                    print({'online_generation_skip':skipped,'errors':errors,'error':message},flush=True)
+                    self.pending.popleft();self.cursor+=1;self._fill()
+                    if self.consecutive_generation_skips>=32:
+                        raise RuntimeError('32 consecutive online samples exhausted all page attempts; '
+                                           'inspect online_generation_skip logs for a systemic renderer failure') from exc
+                    continue
+                raise RuntimeError(f'Online producer failed/stalled at sample {self.cursor}: {exc}') from exc
             if row['online']['index']!=self.cursor: raise RuntimeError('Online sample order changed')
-            self.pending.popleft();self.cursor+=1;rows.append(row);self._fill()
+            self.retrying_index=None;self.consecutive_timeout_skips=0
+            self._record_failures(row['online'].get('errors',[]))
+            self.accepted_views[row.get('view','unknown')]+=1
+            if row.get('replacement_edit'):self.teacher_fields[row['replacement_edit'][1]]+=1
+            self.pending.popleft();self.cursor+=1;self.consecutive_generation_skips=0;rows.append(row);self._fill()
         return rows
 
     def __exit__(self,*args):

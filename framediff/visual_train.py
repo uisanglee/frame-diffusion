@@ -47,11 +47,15 @@ def detector_input(path):
 
 
 def detect(net,image,threshold=.4):
+    return detect_batch(net,[image],threshold)[0]
+
+
+def detect_batch(net,images,threshold=.4):
     device=next(net.parameters()).device
-    with torch.inference_mode():prediction=net([image.to(device)])[0]
-    return [{'box':box,'label':int(label),'score':float(score)}
+    with torch.inference_mode():predictions=net([image.to(device) for image in images])
+    return [[{'box':box,'label':int(label),'score':float(score)}
             for box,label,score in zip(prediction['boxes'].cpu().tolist(),prediction['labels'].cpu().tolist(),prediction['scores'].cpu().tolist())
-            if score>=threshold and 0<label<len(CLASSES)]
+            if score>=threshold and 0<label<len(CLASSES)] for prediction in predictions]
 
 
 def detection_losses(net,rows,device):
@@ -96,7 +100,7 @@ def policy_batch(net,rows,device,rng,prediction_probability):
     logits,components=net(batch,torch.stack(target).to(device),torch.stack(current).to(device),
                           return_components=True)
     logp=F.log_softmax(logits,dim=-1);n=batch['mask'].shape[1];losses=[];labels=[]
-    factor={'operation':[],'node':[],'property':[],'delta':[]};joint=[]
+    factor={'operation':[],'node':[],'property':[],'delta':[]}
     for i,row in enumerate(rows):
         valid=[action_index(e,n) for e in row['teacher_edits']] or [action_index(None,n)]
         illegal=[e for e in row['teacher_edits'] if not action_is_legal(
@@ -157,7 +161,9 @@ def sample_policy_rows(pools,batch_size,rng):
 def page_view_pools(rows):
     """Index once, outside the optimizer loop (O(corpus size))."""
     pages=defaultdict(list)
-    for row in rows:pages[row.get('page_id',row['id'].rsplit('/',1)[0])].append(row)
+    for row in rows:
+        page=row.get('page_id') or (row.get('id') or row['source_sha']).rsplit('/',1)[0]
+        pages[page].append(row)
     return tuple(pages[key] for key in sorted(pages))
 
 
@@ -235,26 +241,28 @@ def policy_validation_metrics(net,rows,device,rng,prediction_probability,batch_s
 
 
 def detector_quality(net,rows,device,threshold=.4):
-    from scipy.optimize import linear_sum_assignment
-    from torchvision.ops import box_iou
-    net.eval();tp=predicted=truth=small_tp=small_n=0
+    from .detector_diagnostics import Aggregate, compare
+    net.eval();bucket=Aggregate()
     for row in rows:
-        pred=detect(net,detector_input(row['image']),threshold);target=row['elements'];hits=set()
-        if pred and target:
-            overlaps=box_iou(torch.tensor([e['box'] for e in pred]),torch.tensor([e['box'] for e in target])).numpy()
-            valid=np.array([[p['label']==t['label'] for t in target] for p in pred]) & (overlaps>=.5)
-            ii,jj=linear_sum_assignment(-(valid*10+overlaps*valid))
-            hits={int(j) for i,j in zip(ii,jj) if valid[i,j]}
-        small={i for i,e in enumerate(target) if (e['box'][2]-e['box'][0])*(e['box'][3]-e['box'][1])<32**2}
-        tp+=len(hits);predicted+=len(pred);truth+=len(target);small_tp+=len(hits&small);small_n+=len(small)
-    return {'detector_precision_iou50':tp/predicted if predicted else 0.,
-            'detector_recall_iou50':tp/truth if truth else None,
-            'detector_small_recall_iou50':small_tp/small_n if small_n else None,
-            'detector_predictions':predicted,'detector_targets':truth,'detector_small_n':small_n,
-            'detector_threshold':threshold}
+        pred=detect(net,detector_input(row['image']),threshold)
+        target=row['elements']
+        bucket.add(row,pred,target,compare(pred,target))
+    report=bucket.report()
+    return {'detector_precision_iou50':report['precision_iou50'],
+            'detector_recall_iou50':report['recall_iou50'],
+            'detector_small_recall_iou50':report['small_recall_iou50'],
+            'detector_predictions':report['predictions'],'detector_targets':report['targets'],
+            'detector_small_n':report['small_n'],'detector_threshold':threshold,
+            'detector_by_class':report['by_class'],'detector_by_view':report['by_view'],
+            'detector_by_device':report['by_device'],'detector_prediction_errors':report['prediction_errors']}
 
 
 def train(args):
+    with contextlib.ExitStack() as stack:
+        return _train(args,stack)
+
+
+def _train(args,stack):
     patience=args.early_stop_patience;min_delta=args.early_stop_min_delta
     if patience<0 or not math_isfinite(min_delta) or min_delta<0:
         raise ValueError('Early-stop patience and min-delta must be finite and nonnegative')
@@ -298,7 +306,8 @@ def train(args):
     if args.resume and args.init_checkpoint:raise ValueError('Choose resume or init-checkpoint')
     data_signature={'train':digest(args.train),'val':digest(args.val)}
     out=Path(args.out).resolve()
-    run_settings={k:v for k,v in vars(args).items() if k not in ('out','resume','steps','init_checkpoint')}
+    run_settings={k:v for k,v in vars(args).items() if k not in
+                  ('out','resume','steps','init_checkpoint','render_workers','render_prefetch','render_timeout')}
     run_settings['validation_sampling']='page-round-robin-v1'
     guard_run(out,{'kind':kind,'config':cfg,'data':data_signature,'settings':run_settings},bool(args.resume))
     ck=torch.load(args.resume or args.init_checkpoint,map_location='cpu',weights_only=True) if args.resume or args.init_checkpoint else None
@@ -353,7 +362,8 @@ def train(args):
                   cfg['training_scheme']=='balanced-v1' else None)
     view_pools=page_view_pools(train_rows)
     from .lazy_webui import TrainViewCache,portable_images
-    lazy_cache=TrainViewCache()
+    lazy_cache=TrainViewCache(cache_dir=Path(args.train).resolve().parent/'.lazy-detector-cache')
+    stack.callback(lazy_cache.close)
     rng=random.Random(args.seed);start=0;best=float('inf')
     early={'reference_loss':float('inf'),'bad_validations':0,'stopped':False}
     if args.resume:
@@ -368,12 +378,18 @@ def train(args):
         'torch':str(torch.__version__)})
     def amp():return torch.autocast('cuda',dtype=torch.bfloat16) if device.startswith('cuda') and args.bf16 and not is_detector else contextlib.nullcontext()
     started=time.perf_counter()
+    render_stream=None
+    if is_detector and any(row.get('lazy_contract') for row in train_rows) and start<args.steps and not early['stopped']:
+        from .detector_stream import DetectorStream
+        render_stream=stack.enter_context(DetectorStream(view_pools,rng,args.batch_size,
+            Path(args.train).resolve().parent/'.lazy-detector-cache',out/'lazy-rejections.jsonl',
+            getattr(args,'render_workers',2),getattr(args,'render_prefetch',4),getattr(args,'render_timeout',900.)))
     for step in range(start+1,args.steps+1):
         net.train();opt.zero_grad(set_to_none=True);total=0.;step_parts={}
         for _ in range(args.accumulation):
-            batch=(sample_policy_rows(policy_pools,args.batch_size,rng) if policy_pools else
+            batch=render_stream.take() if render_stream else (sample_policy_rows(policy_pools,args.batch_size,rng) if policy_pools else
                    sample_page_views(view_pools,args.batch_size,rng))
-            if is_detector:
+            if is_detector and render_stream is None:
                 materialized=[]
                 for row in batch:
                     if row.get('lazy_contract'):
@@ -565,44 +581,44 @@ def cache_targets(args):
 
 
 def evaluate_detector(args):
-    from scipy.optimize import linear_sum_assignment
-    from torchvision.ops import box_iou
+    from .detector_diagnostics import Aggregate, compare, visualize
+    thresholds=sorted(set([args.threshold]+list(getattr(args,'thresholds',[.3,.4,.5,.6,.7]))))
+    if any(not 0 <= t <= 1 for t in thresholds):raise ValueError('thresholds must be in [0,1]')
+    if args.limit < 0 or getattr(args,'visualize_limit',30) < 0:raise ValueError('limits must be nonnegative')
     device=select_device(args.device)
     if device=='cpu':torch.set_num_threads(args.cpu_threads)
     net,ck=load_detector(args.checkpoint,device);rows=list(read_jsonl(args.data))
     if args.limit:rows=rows[:args.limit]
     if not rows:raise ValueError('No detector evaluation samples')
-    tp=predicted=truth=small_tp=small_n=0;results=[];view_counts=defaultdict(lambda:[0,0,0,0,0,0])
-    for r in rows:
-        if r['group'] in ck['training_groups'] or r['source_sha'] in ck['training_hashes']:raise ValueError('Detector evaluation leakage')
-        pred=detect(net,detector_input(r['image']),args.threshold);target=r['elements']
-        hits=set();count=0
-        if pred and target:
-            overlaps=box_iou(torch.tensor([e['box'] for e in pred]),torch.tensor([e['box'] for e in target])).numpy()
-            valid=np.array([[p['label']==t['label'] for t in target] for p in pred]) & (overlaps>=.5)
-            # Maximize number of threshold-valid, class-matched pairs first.
-            ii,jj=linear_sum_assignment(-(valid*10+overlaps*valid))
-            hits={int(j) for i,j in zip(ii,jj) if valid[i,j]};count=len(hits)
-        small={i for i,e in enumerate(target) if (e['box'][2]-e['box'][0])*(e['box'][3]-e['box'][1])<32**2}
-        tp+=count;predicted+=len(pred);truth+=len(target);small_tp+=len(hits&small);small_n+=len(small)
-        view=r.get('view','legacy');bucket=view_counts[view]
-        for i,value in enumerate((count,len(pred),len(target),len(hits&small),len(small),1)):bucket[i]+=value
-        results.append({'id':r['id'],'page_id':r.get('page_id',r['id'].rsplit('/',1)[0]),'view':view,
-            'matched_iou50':count,'predictions':len(pred),'targets':len(target),'small_targets':len(small)})
-    def metrics(values):
-        mt,pr,tr,sm,st,n=values
-        return {'n':n,'precision_iou50':mt/pr if pr else 0.,'recall_iou50':mt/tr if tr else None,
-                'small_recall_iou50':sm/st if st else None,'small_n':st}
-    page_counts=defaultdict(lambda:[0,0,0])
-    for row in results:
-        bucket=page_counts[row['page_id']]
-        for i,key in enumerate(('matched_iou50','predictions','targets')):bucket[i]+=row[key]
-    report={'n':len(rows),'precision_iou50':tp/predicted if predicted else 0.,'recall_iou50':tp/truth if truth else None,
-        'small_recall_iou50':small_tp/small_n if small_n else None,'small_n':small_n,'threshold':args.threshold,
-        'unique_pages':len({r['page_id'] for r in results}),
-        'macro_page':{
-            'precision_iou50':sum(m/p if p else 0. for m,p,_ in page_counts.values())/len(page_counts),
-            'recall_iou50':sum(m/t if t else 0. for m,_,t in page_counts.values())/len(page_counts)},
-        'by_view':{view:metrics(values) for view,values in sorted(view_counts.items())},
-        'note':'Class-aware matching at IoU 0.5, not COCO AP; n counts page-view observations','records':results}
-    write_json(args.out,report);return report
+    # Check the full selected manifest before producing any evaluation artifacts.
+    for row in rows:
+        if row['group'] in ck['training_groups'] or row['source_sha'] in ck['training_hashes']:
+            raise ValueError('Detector evaluation leakage')
+    # Do not silently truncate a requested low-score sweep at torchvision's internal floor.
+    net.roi_heads.score_thresh=min(net.roi_heads.score_thresh,min(thresholds))
+    buckets={t:Aggregate() for t in thresholds}
+    for index,row in enumerate(rows):
+        predictions=detect(net,detector_input(row['image']),min(thresholds))
+        for threshold,bucket in buckets.items():
+            pred=[e for e in predictions if e['score']>=threshold]
+            detail=compare(pred,row['elements'])
+            bucket.add(row,pred,row['elements'],detail)
+            if threshold==args.threshold and getattr(args,'visualize_dir',None) and index<getattr(args,'visualize_limit',30):
+                path=Path(args.visualize_dir)/f'{index:06d}.png'
+                visualize(path,row['image'],pred,row['elements'],detail)
+                bucket.records[-1]['visualization']=str(path)
+        if (index+1)%50==0 or index+1==len(rows):
+            print({'detector_diagnostics':index+1,'total':len(rows)},flush=True)
+    primary=buckets[args.threshold]
+    report={**primary.report(),'threshold':args.threshold,'records':primary.records,
+            'threshold_sweep':{str(t):bucket.report() for t,bucket in buckets.items()},
+            'checkpoint':str(args.checkpoint),'data':str(args.data),
+            'note':'Class-aware maximum-cardinality one-to-one IoU50 matching, not COCO AP. '
+                   'Small means original-image box area < 32^2. Sweep uses the same post-NMS predictions '
+                   'and checkpoint max_detections cap. Tune thresholds on validation, not test.',
+            'error_rules':{'duplicate':'Unmatched prediction with same-class IoU >= 0.5',
+                           'class_confusion':'Otherwise, different-class IoU >= 0.5',
+                           'localization':'Otherwise, same-class 0.1 <= IoU < 0.5',
+                           'unmatched':'None of the above; geometric heuristic, not a proven cause'}}
+    write_json(args.out,report)
+    return report

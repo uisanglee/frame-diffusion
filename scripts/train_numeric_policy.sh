@@ -60,12 +60,16 @@ for head in ${POLICY_HEADS:-replacement}; do
     [[ "$mode" == screenshot || "$mode" == abstract ]] || { echo "Invalid POLICY_MODES item: $mode" >&2; exit 2; }
     label=raw
     [[ "$mode" == abstract ]] && label=abstract
-    for stage in 1 2; do
+    stages=(1)
+    [[ "$mode" == abstract ]] && stages+=(2)
+    for stage in "${stages[@]}"; do
       output="$policy_run/$head/$label-stage$stage"
       train="$rendered/policy-train.jsonl"
       val="$rendered/policy-val.jsonl"
       condition=()
       steps=${POLICY_STAGE1_STEPS:-30000}
+      # Keep the stage1 path so existing screenshot checkpoints resume in place.
+      [[ "$mode" == screenshot ]] && steps=${POLICY_SCREENSHOT_STEPS:-$steps}
       lr=${POLICY_LR:-0.0001}
       options=()
       if [[ "$stage" == 2 ]]; then
@@ -77,13 +81,14 @@ for head in ${POLICY_HEADS:-replacement}; do
       fi
       if [[ -f "$output/last.pt" ]]; then options=(--resume "$output/last.pt"); fi
       python -m framediff visual-tree-train --train "$train" --val "$val" --out "$output" \
-        --mode "$mode" --device "${DEVICE:-cuda}" "${owner_options[@]}" "${scale_options[@]}" \
-        --steps "$steps" --lr "$lr" "${condition[@]}" "${online[@]}" \
+        --mode "$mode" --device "${DEVICE:-cuda}" ${owner_options[@]+"${owner_options[@]}"} ${scale_options[@]+"${scale_options[@]}"} \
+        --steps "$steps" --lr "$lr" ${condition[@]+"${condition[@]}"} ${online[@]+"${online[@]}"} \
         --batch-size "${BATCH_SIZE:-2}" --accumulation "${ACCUMULATION:-4}" \
         --seed "${SEED:-42}" \
         --val-samples "${VAL_SAMPLES:-2000}" --eval-every "${EVAL_EVERY:-500}" \
         --policy-metric-samples "${POLICY_METRIC_SAMPLES:-128}" \
-        --early-stop-patience "${EARLY_STOP_PATIENCE:-10}" --bf16 "${options[@]}"
+        --early-stop-patience "${EARLY_STOP_PATIENCE:-10}" \
+        --early-stop-min-delta "${EARLY_STOP_MIN_DELTA:-0}" --bf16 ${options[@]+"${options[@]}"}
     done
   done
 done

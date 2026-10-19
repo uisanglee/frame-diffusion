@@ -71,7 +71,7 @@ pick_checkpoint() {
   exit 2
 }
 raw_checkpoint=$(pick_checkpoint "${RAW_CHECKPOINT:-}" \
-  "$train_root/replacement/raw-stage2/best.pt" "$train_root/policy-raw/best.pt" "$train_root/raw-stage2/best.pt")
+  "$train_root/replacement/raw-stage1/best.pt" "$train_root/replacement/raw-stage2/best.pt" "$train_root/policy-raw/best.pt" "$train_root/raw-stage2/best.pt")
 abstract_checkpoint=$(pick_checkpoint "${ABSTRACT_CHECKPOINT:-}" \
   "$train_root/replacement/abstract-stage2/best.pt" "$train_root/policy-abstract/best.pt" "$train_root/abstract-stage2/best.pt")
 detector_checkpoint=$(pick_checkpoint "${DETECTOR_CHECKPOINT:-}" "$train_root/detector/best.pt")

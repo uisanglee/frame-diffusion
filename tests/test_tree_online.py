@@ -192,12 +192,55 @@ def test_timeout_skips_index_and_restarts_pool(monkeypatch,capsys):
     def stop(force=False):
         stopped.append(force);stream.pool=None;stream.pending.clear()
     def start():
-        stream.pool=object();stream.pending=deque([Future({'online':{'index':1}})])
+        stream.pool=object()
+        stream.pending=deque([Future(timeout=True) if stream.cursor==0 else Future({'online':{'index':1}})])
     monkeypatch.setattr(stream,'_stop_pool',stop);monkeypatch.setattr(stream,'_start_pool',start)
     monkeypatch.setattr(stream,'_fill',lambda:None)
     assert stream.take(1)==[{'online':{'index':1}}]
-    assert stream.cursor==2 and stream.timeout_skips==1 and stopped==[True]
+    assert stream.cursor==2 and stream.timeout_skips==1 and stopped==[True,True]
+    assert stream.timeout_retries==1
     assert "'online_timeout_skip': 0" in capsys.readouterr().out
+
+
+def test_exhausted_generation_skips_index_without_restarting(monkeypatch,capsys):
+    from framediff.tree_online import OnlineGenerationError
+    class Future:
+        def __init__(self,value=None,error=None):self.value=value;self.error=error
+        def result(self,timeout=None):
+            if self.error:raise self.error
+            return self.value
+    stream=OnlineStream([], 'screenshot',workers=1,prefetch=2,timeout=1,start=4)
+    stream.pool=object();stream.stop=object();stream.pending=deque([
+        Future(error=OnlineGenerationError(4,[{'view':'mobile','error':'capture timeout'}])),
+        Future({'online':{'index':5}})])
+    monkeypatch.setattr(stream,'_fill',lambda:None)
+    assert stream.take(1)==[{'online':{'index':5}}]
+    assert stream.cursor==6 and stream.generation_skips==1 and stream.consecutive_generation_skips==0
+    assert stream.failure_views=={'mobile':1}
+    assert "'online_generation_skip': 4" in capsys.readouterr().out
+
+
+def test_generation_error_retains_diagnostics_across_worker_boundary():
+    import pickle
+    from framediff.tree_online import OnlineGenerationError
+    error=OnlineGenerationError(7,[{'page':'p/mobile','view':'mobile','error':'timeout'}])
+    restored=pickle.loads(pickle.dumps(error))
+    assert restored.index==7 and restored.errors==error.errors
+    assert str(restored)==str(error)
+
+
+def test_timeout_retry_preserves_sample_index(monkeypatch):
+    class Future:
+        def result(self,timeout=None):raise FutureTimeoutError()
+    class Good:
+        def result(self,timeout=None):return {'online':{'index':4}}
+    stream=OnlineStream([], 'screenshot',workers=1,prefetch=1,timeout=1,start=4)
+    stream.pool=object();stream.pending=deque([Future()])
+    monkeypatch.setattr(stream,'_stop_pool',lambda force=False:None)
+    monkeypatch.setattr(stream,'_start_pool',lambda:setattr(stream,'pending',deque([Good()])))
+    monkeypatch.setattr(stream,'_fill',lambda:None)
+    assert stream.take(1)==[{'online':{'index':4}}]
+    assert stream.timeout_retries==1 and stream.timeout_skips==0 and stream.cursor==5
 
 
 @pytest.mark.browser

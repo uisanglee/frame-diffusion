@@ -105,6 +105,35 @@ def browser_task(task):
         return result
 
 
+def stalled_browser_task(folder):
+    from pathlib import Path
+    with Browser() as lease:
+        lease.page.set_content('<div>timeout cleanup test</div>')
+        Path(folder,'children.json').write_text(json.dumps(descendants(os.getpid())))
+        time.sleep(60)
+
+
+def test_online_force_stop_reaps_stalled_browser_tree(tmp_path):
+    import multiprocessing as mp
+    from concurrent.futures import ProcessPoolExecutor
+    from collections import deque
+    from framediff.tree_online import OnlineStream
+    context=mp.get_context('spawn')
+    stream=OnlineStream([], 'screenshot',workers=1,prefetch=1)
+    stream.stop=context.Event()
+    stream.pool=ProcessPoolExecutor(1,mp_context=context)
+    stream.pending=deque([stream.pool.submit(stalled_browser_task,str(tmp_path))])
+    path=tmp_path/'children.json'
+    try:
+        deadline=time.monotonic()+25
+        while not path.exists() and time.monotonic()<deadline:time.sleep(.05)
+        assert path.exists(),'Browser worker did not initialize'
+        tracked={int(pid):cmd for pid,cmd in json.loads(path.read_text()).items()}
+        assert tracked
+    finally:stream._stop_pool(force=True)
+    assert_processes_gone(tracked)
+
+
 @pytest.mark.parametrize('workers', [1, 2])
 @pytest.mark.parametrize('failure', [False, True])
 def test_real_workers_leave_no_browser_processes(tmp_path, workers, failure):

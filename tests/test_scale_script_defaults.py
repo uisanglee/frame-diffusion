@@ -71,3 +71,47 @@ def test_explicit_overrides_are_preserved(tmp_path):
         assert args[args.index('--inference-batch-size')+1]=='2'
         assert args[args.index('--repeats')+1]=='1'
         assert 'tuide-m-abstract' in args[args.index('--abstract-checkpoint')+1]
+
+
+def test_screenshot_all_skips_detector_and_evaluates_single_stage(tmp_path):
+    calls=run_script(tmp_path,dict(POLICY_MODES='screenshot'))
+    assert len(calls)==3  # one policy run and own/common rollout
+    assert calls[0]['args'][0]=='policy-fixture'
+    for call in calls[1:]:
+        args=call['args']
+        assert args[args.index('--raw-checkpoint')+1].endswith('/replacement/raw-stage1/best.pt')
+        assert '--detector-checkpoint' not in args
+
+
+def test_numeric_policy_single_screenshot_and_two_abstract_stages(tmp_path):
+    binary=tmp_path/'bin';binary.mkdir()
+    stub=binary/'python'
+    stub.write_text(f'#!{sys.executable}\n'+'''import json,os,sys
+with open(os.environ['TEST_LOG'],'a') as f:
+    f.write(json.dumps(sys.argv[1:])+'\\n')
+''')
+    stub.chmod(0o755)
+    shared=tmp_path/'shared'
+    for split in ('train','val'):
+        folder=shared/f'predicted-{split}';folder.mkdir(parents=True)
+        (folder/'data.jsonl').write_text('{}\n')
+    detector=tmp_path/'detector.pt';detector.touch()
+    output=tmp_path/'policy'
+    resume=output/'replacement/raw-stage1/last.pt';resume.parent.mkdir(parents=True);resume.touch()
+    env=dict(os.environ,PATH=str(binary)+os.pathsep+os.environ['PATH'],
+             TEST_LOG=str(tmp_path/'calls.jsonl'),POLICY_MODES='screenshot abstract',
+             POLICY_HEADS='replacement',POLICY_RUN_DIR=str(output),PREPARE_DATA='0',
+             POLICY_STAGE1_STEPS='100',POLICY_STAGE2_STEPS='50',POLICY_SCREENSHOT_STEPS='120',
+             EARLY_STOP_MIN_DELTA='0.003')
+    script=Path(__file__).resolve().parents[1]/'scripts/train_numeric_policy.sh'
+    result=subprocess.run(['bash',str(script),str(tmp_path/'data'),str(detector),str(shared)],
+                          env=env,capture_output=True,text=True)
+    assert result.returncode==0,result.stderr
+    calls=[json.loads(line) for line in (tmp_path/'calls.jsonl').read_text().splitlines()]
+    assert len(calls)==3
+    assert [Path(c[c.index('--out')+1]).name for c in calls]==['raw-stage1','abstract-stage1','abstract-stage2']
+    assert [c[c.index('--steps')+1] for c in calls]==['120','100','50']
+    assert calls[0][calls[0].index('--resume')+1]==str(resume)
+    assert '--predicted-targets' not in calls[0] and '--init-checkpoint' not in calls[0]
+    assert '--predicted-targets' in calls[2] and '--init-checkpoint' in calls[2]
+    assert all(c[c.index('--early-stop-min-delta')+1]=='0.003' for c in calls)

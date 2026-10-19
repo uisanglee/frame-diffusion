@@ -80,6 +80,103 @@ def test_lazy_preparation_does_not_render_train(tmp_path):
     assert row['normalization_contract']
 
 
+def test_lazy_cache_invalidates_when_preparation_changes(tmp_path,monkeypatch):
+    import framediff.lazy_webui as lazy
+    row=lazy_descriptor(tmp_path);cache=lazy.TrainViewCache()
+    before=cache._key(row,True)
+    monkeypatch.setattr(lazy,'preparation_fingerprint',lambda:{'version':'changed'})
+    assert cache._key(row,True)!=before
+
+
+def test_stream_only_changes_do_not_invalidate_preparation(monkeypatch):
+    from framediff.lazy_webui import preparation_fingerprint
+    original=Path.read_text
+    preparation_fingerprint.cache_clear()
+    before=preparation_fingerprint()
+    def altered(path,*args,**kwargs):
+        text=original(path,*args,**kwargs)
+        return text.replace('self.timeout_skips=0','self.timeout_skips=42') if path.name=='tree_online.py' else text
+    try:
+        monkeypatch.setattr(Path,'read_text',altered)
+        preparation_fingerprint.cache_clear()
+        assert preparation_fingerprint()==before
+    finally:preparation_fingerprint.cache_clear()
+
+
+@pytest.mark.browser
+def test_corrupt_lazy_cache_is_rebuilt(tmp_path):
+    from framediff.lazy_webui import TrainViewCache
+    row=lazy_descriptor(tmp_path);root=tmp_path/'persistent'
+    cache=TrainViewCache(cache_dir=root)
+    try:first=cache.get(row,policy=True)
+    finally:cache.close()
+    stale=root/f'.{cache._key(row,True)}.interrupted';stale.mkdir()
+    (stale/'partial').write_text('interrupted writer')
+    Path(first['target_image']).write_bytes(b'corrupt')
+    cache=TrainViewCache(cache_dir=root)
+    try:
+        second=cache.get(row,policy=True)
+        assert Path(second['target_image']).read_bytes().startswith(b'\x89PNG')
+        assert not stale.exists()
+    finally:cache.close()
+
+
+def shared_lazy_cache_task(task):
+    import framediff.visual_data as data
+    from framediff.lazy_webui import TrainViewCache
+    row,root,markers=task
+    original=data._render_page
+    def counted(*args,**kwargs):
+        Path(markers,f'{os.getpid()}.render').touch()
+        return original(*args,**kwargs)
+    data._render_page=counted
+    cache=TrainViewCache(cache_dir=root)
+    try:return cache.get(row,policy=True)['target_image']
+    finally:cache.close();data._render_page=original
+
+
+@pytest.mark.browser
+def test_concurrent_lazy_cache_materializes_once(tmp_path):
+    from framediff.preparation_workers import page_map
+    row=lazy_descriptor(tmp_path);root=tmp_path/'shared'
+    task=(row,str(root),str(tmp_path))
+    results=list(page_map(shared_lazy_cache_task,[task,task],2))
+    assert results[0]==results[1]
+    assert len(list(tmp_path.glob('*.render')))==1
+
+
+def test_detector_prefetch_resume_preserves_consumed_rng(tmp_path):
+    from framediff.detector_stream import DetectorStream
+    from framediff.visual_train import page_view_pools
+    pools=page_view_pools([{'id':f'p{i}/v{v}','page_id':f'p{i}'} for i in range(4) for v in range(2)])
+    rng=random.Random(42)
+    with DetectorStream(pools,rng,2,tmp_path/'cache',tmp_path/'errors',workers=2,prefetch=4) as stream:
+        stream.take();saved=rng.getstate()
+        expected=stream.take();final=rng.getstate()
+    resumed=random.Random();resumed.setstate(saved)
+    with DetectorStream(pools,resumed,2,tmp_path/'cache',tmp_path/'errors',workers=1,prefetch=1) as stream:
+        assert stream.take()==expected
+    assert resumed.getstate()==final
+
+
+@pytest.mark.browser
+def test_lazy_online_worker_reuses_browser_across_cache_hits(tmp_path):
+    from framediff.browser import enable_worker_browser,close_worker_browser
+    from framediff.tree_online import OnlineSampler,target_pool
+    row=lazy_descriptor(tmp_path)
+    enable_worker_browser()
+    sampler=OnlineSampler(target_pool([row],cache_dir=tmp_path/'cache'),'screenshot',max_noise=1)
+    try:
+        first=sampler.generate(0)
+        browser=sampler.browser.browser
+        second=sampler.generate(1)
+        assert sampler.browser.browser is browser and browser.is_connected()
+        assert first['replacement_edit'] and second['replacement_edit']
+    finally:
+        sampler.close();sampler.view_cache.close();close_worker_browser()
+    assert not browser.is_connected()
+
+
 @pytest.mark.browser
 def test_lazy_policy_disk_cache_survives_process_cache(tmp_path,monkeypatch):
     from framediff.lazy_webui import TrainViewCache

@@ -441,12 +441,15 @@ def train(args):
     net=TreePolicy(cfg,not args.no_pretrained and ck is None).to(device)
     lazy_detector=None
     if args.predicted_targets and any(r.get('lazy_detector') for r in training):
-        from .visual_train import load_detector,detect,detector_input
+        from .visual_train import load_detector
+        from .detector_cache import TargetPredictionCache
         configs={tuple(sorted(r['lazy_detector'].items())) for r in training if r.get('lazy_detector')}
         if len(configs)!=1:raise ValueError('Mixed lazy detector configurations')
         lazy_config=dict(next(iter(configs)))
         if digest(lazy_config['checkpoint'])!=lazy_config['sha']:raise ValueError('Lazy detector checkpoint changed')
         lazy_detector,_=load_detector(lazy_config['checkpoint'],device)
+        prediction_cache=TargetPredictionCache(Path(args.train).resolve().parent/'.target-predictions',
+                                              lazy_config['sha'],lazy_config['threshold'])
     optimizer=torch.optim.AdamW(net.parameters(),lr=args.lr,weight_decay=.01)
     rng=random.Random(args.seed);start=0;best=float('inf');early={'reference_loss':float('inf'),'bad_validations':0,'stopped':False}
     if ck: net.load_state_dict(ck['model'])
@@ -493,8 +496,8 @@ def train(args):
                 wait_start=time.perf_counter()
                 rows=stream.take(args.batch_size) if stream else [rng.choice(training) for _ in range(args.batch_size)]
                 if lazy_detector is not None:
-                    for row in rows:
-                        row['lazy_predicted_elements']=detect(lazy_detector,detector_input(row['target_image']),lazy_config['threshold'])
+                    predictions=prediction_cache.predict(lazy_detector,[row['target_image'] for row in rows])
+                    for row,prediction in zip(rows,predictions):row['lazy_predicted_elements']=prediction
                 wait_seconds+=time.perf_counter()-wait_start
                 if stream:
                     for row in rows:
@@ -518,10 +521,18 @@ def train(args):
                          'examples_seen':step*args.batch_size*args.accumulation,
                          'examples_per_second':session_examples/max(elapsed,1e-9)}
                 if device.startswith('cuda'):metrics['peak_cuda_bytes']=torch.cuda.max_memory_allocated(device)
+                if lazy_detector is not None:
+                    metrics.update(target_prediction_cache_hits=prediction_cache.hits,
+                                   target_prediction_cache_misses=prediction_cache.misses)
                 if stream:
                     metrics.update(online_corruption_contract=expected_corruption,
                         online_sampling_contract=sampling_contract,
                         online_samples=stream.cursor,online_timeout_skips=stream.timeout_skips,
+                        online_generation_skips=stream.generation_skips,
+                        online_timeout_retries=stream.timeout_retries,
+                        online_failed_attempts_by_view=dict(stream.failure_views),
+                        online_accepted_by_view=dict(stream.accepted_views),
+                        online_teacher_field_counts=dict(stream.teacher_fields),
                         data_wait_s=wait_seconds,
                         producer_seconds=producer_seconds,online_retries=retry_count,
                         online_teacher_remove_rate=remove_count/max(1,sample_count),

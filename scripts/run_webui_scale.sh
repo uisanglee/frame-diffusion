@@ -45,13 +45,19 @@ stage=${STAGE:-all}
 case "$stage" in all|detector|policy|evaluate) ;; *) echo 'STAGE must be all, detector, policy, or evaluate' >&2; exit 2;; esac
 device=${DEVICE:-cuda}
 detector="$output/detector/best.pt"
-if [[ "$stage" == all || "$stage" == detector ]]; then
+needs_detector=0
+for mode in $POLICY_MODES; do
+  case "$mode" in abstract) needs_detector=1;; screenshot) ;; *) echo 'Invalid POLICY_MODES' >&2; exit 2;; esac
+done
+if [[ "$stage" == detector || ( "$stage" == all && "$needs_detector" == 1 ) ]]; then
   options=()
   if [[ -f "$output/detector/last.pt" ]]; then options=(--resume "$output/detector/last.pt"); fi
   python -m framediff visual-train-detector \
     --train "$base/rendered/detector-train.jsonl" --val "$base/rendered/detector-val.jsonl" \
     --out "$output/detector" --device "$device" --seed "${SEED:-42}" \
     --steps "${DETECTOR_STEPS:-20000}" --lr "${DETECTOR_LR:-0.0001}" \
+    --render-workers "${DETECTOR_RENDER_WORKERS:-2}" --render-prefetch "${DETECTOR_RENDER_PREFETCH:-4}" \
+    --render-timeout "${DETECTOR_RENDER_TIMEOUT:-900}" \
     --batch-size "${BATCH_SIZE:-2}" --accumulation "${ACCUMULATION:-4}" \
     --val-samples "${VAL_SAMPLES:-2000}" --eval-every "${EVAL_EVERY:-500}" \
     --early-stop-patience "${EARLY_STOP_PATIENCE:-10}" \
@@ -65,11 +71,13 @@ if [[ "$stage" == all || "$stage" == detector ]]; then
   done
 fi
 if [[ "$stage" == all || "$stage" == policy ]]; then
+  if [[ "$needs_detector" == 1 ]]; then
   for split in train val; do
     python -m framediff visual-cache-targets --data "$base/css/policy-$split.jsonl" \
       --checkpoint "$detector" --out "$output/shared/predicted-$split" \
       --device "$device" --size "${IMAGE_SIZE:-384}" --resume
   done
+  fi
   for mode in ${POLICY_MODES:-abstract screenshot}; do
     POLICY_MODES="$mode" bash scripts/train_tuide_scale.sh "${POLICY_SCALE:-s}" \
       "$base/css" "$detector" "$output/shared" "$output/tuide-${POLICY_SCALE:-s}-$mode"
@@ -77,15 +85,18 @@ if [[ "$stage" == all || "$stage" == policy ]]; then
 fi
 if [[ "$stage" == all || "$stage" == evaluate ]]; then
   for mode in ${POLICY_MODES:-abstract screenshot}; do
-    label=abstract;flag=--abstract-checkpoint
-    if [[ "$mode" == screenshot ]]; then label=raw;flag=--raw-checkpoint; fi
-    checkpoint="$output/tuide-${POLICY_SCALE:-s}-$mode/replacement/$label-stage2/best.pt"
+    label=abstract;flag=--abstract-checkpoint;policy_stage=2
+    detector_options=(--detector-checkpoint "$detector")
+    if [[ "$mode" == screenshot ]]; then
+      label=raw;flag=--raw-checkpoint;policy_stage=1;detector_options=()
+    fi
+    checkpoint="$output/tuide-${POLICY_SCALE:-s}-$mode/replacement/$label-stage$policy_stage/best.pt"
     for population in own common; do
       testbase=$base
       [[ "$population" == common ]] && testbase="$data/$common"
       python -m framediff visual-test-rollout --data "$testbase/css/policy-test.jsonl" \
         --pages "$testbase/css/pages-test.jsonl" "$flag" "$checkpoint" \
-        --detector-checkpoint "$detector" --out "$output/eval-${POLICY_SCALE:-s}-$mode-$population" \
+        ${detector_options[@]+"${detector_options[@]}"} --out "$output/eval-${POLICY_SCALE:-s}-$mode-$population" \
         --device "$device" --steps "$REPAIR_STEPS" --repeats "$REPEATS" \
         --workers "${ROLLOUT_WORKERS:-4}" --inference-batch-size "${ROLLOUT_BATCH_SIZE:-4}" \
         --batch-wait-ms "${ROLLOUT_BATCH_WAIT_MS:-10}" --resume
