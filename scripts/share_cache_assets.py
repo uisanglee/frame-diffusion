@@ -14,6 +14,7 @@ import os
 import re
 from pathlib import Path
 import tempfile
+import time
 
 
 # Recognition for storage auditing only, not permission to load old training
@@ -112,21 +113,111 @@ def run(roots, store, apply=False):
     return report
 
 
+def diagnostic_cleanup(roots, apply=False, min_age_hours=24, journal=None):
+    """Remove only known diagnostics, never whole failed/staging directories."""
+    protected=set();errors=[];files=set()
+    def references(value,origin):
+        if isinstance(value,dict):
+            for key,item in value.items():references(key,origin);references(item,origin)
+        elif isinstance(value,list):
+            for item in value:references(item,origin)
+        elif isinstance(value,str) and len(value)<4096 and '\x00' not in value:
+            if value.startswith('/'):
+                path=Path(value)
+                protected.add(str(path))
+                protected.add(str(committed_asset(origin,path)))
+            elif value.lower().endswith(('.png','.html','.jpg','.webp')) and '://' not in value:
+                protected.add(os.path.abspath(origin.parent/value))
+                protected.add(os.path.abspath(value))
+    # Include manifests AND completion metadata, not only current train rows.
+    for root in roots:
+        for path in root.rglob('*'):
+            if path.is_symlink() or not path.is_file():continue
+            files.add(path)
+            if path.suffix not in ('.json','.jsonl'):continue
+            try:
+                with path.open() as stream:
+                    if path.suffix=='.jsonl':
+                        for line in stream:
+                            if line.strip():references(json.loads(line),path)
+                    else:references(json.load(stream),path)
+            except (OSError,ValueError,TypeError) as exc:
+                errors.append({'record':str(path),'error':str(exc)})
+    candidates=[];blocked=0;young=0;unclassified=0
+    now=time.time()
+    for path in sorted(files):
+        # Restrict to the known normalized page layout. Preserve every JSON,
+        # normalized.html, initial.*, after.png and all source/rendered assets.
+        folder=next((p for p in path.parents if p.parent.name in ('train','val','test')
+                     and p.parent.parent.name=='normalized-pages'
+                     and re.fullmatch('[0-9a-f]{64}',p.name)),None)
+        if folder is None:continue
+        rel=path.relative_to(folder)
+        reason=None
+        if len(rel.parts)==1 and path.name in ('before.png','reloaded.png'):
+            reason='normalization_diagnostic'
+        elif len(rel.parts)==2 and rel.parts[0] in ('scroll-before','scroll-after') and re.fullmatch(r'\d+\.png',path.name):
+            reason='scroll_diagnostic'
+        elif path.name=='rejected.html' and path.parent==folder:
+            try:
+                failed=json.loads((folder/'report.json').read_text()).get('accepted') is False
+            except (OSError,ValueError):failed=False
+            if failed and not (folder/'record.json').exists() and not (folder/'normalization.json').exists():
+                reason='failed_normalization_candidate'
+        if reason is None:
+            unclassified+=1;continue
+        if str(path) in protected:
+            blocked+=1;continue
+        st=path.stat()
+        if now-st.st_mtime<min_age_hours*3600:
+            young+=1;continue
+        candidates.append({'path':str(path),'reason':reason,'size':st.st_size,
+                           'device':st.st_dev,'inode':st.st_ino,'nlink':st.st_nlink,
+                           'blocks':st.st_blocks,'sha256':digest(path)})
+    by_inode=defaultdict(list)
+    for c in candidates:by_inode[c['device'],c['inode']].append(c)
+    reclaim=sum(group[0]['blocks']*512 for group in by_inode.values() if len(group)==group[0]['nlink'])
+    report={'mode':'diagnostic_cleanup','errors':errors,'candidates':candidates,
+            'candidate_count':len(candidates),'referenced_preserved':blocked,'recent_preserved':young,
+            'unclassified_preserved':unclassified,'logical_bytes':sum(c['size'] for c in candidates),
+            'estimated_reclaimable_bytes':reclaim,'applied':False}
+    if apply and not errors:
+        # Validate the entire plan before deleting any file. Writers must stop.
+        for c in candidates:
+            p=Path(c['path']);st=p.stat()
+            if p.is_symlink() or (st.st_dev,st.st_ino)!=(c['device'],c['inode']) or digest(p)!=c['sha256']:
+                raise ValueError(f'Diagnostic changed during audit: {p}')
+        if journal is not None:
+            journal.parent.mkdir(parents=True,exist_ok=True)
+            journal.write_text(json.dumps(report,ensure_ascii=False,indent=2))
+        for c in candidates:Path(c['path']).unlink()
+        report['applied']=True
+    return report
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--roots',nargs='+',required=True)
     parser.add_argument('--store',required=True)
     parser.add_argument('--report',required=True)
     parser.add_argument('--apply',action='store_true')
+    parser.add_argument('--cleanup-diagnostics',action='store_true')
+    parser.add_argument('--min-age-hours',type=float,default=24)
     args=parser.parse_args()
+    if args.min_age_hours<0:parser.error('min-age-hours must be nonnegative')
     roots=[Path(p).resolve() for p in args.roots]
     if any(not p.is_dir() for p in roots):parser.error('All roots must be existing cache directories')
-    report=run(roots,Path(args.store).resolve(),args.apply)
+    report=(diagnostic_cleanup(roots,args.apply,args.min_age_hours,Path(args.report)) if args.cleanup_diagnostics
+            else run(roots,Path(args.store).resolve(),args.apply))
     target=Path(args.report);target.parent.mkdir(parents=True,exist_ok=True)
     target.write_text(json.dumps(report,ensure_ascii=False,indent=2))
-    print(json.dumps({k:v for k,v in report.items() if k not in ('duplicate_groups','resolved_staging_paths')},ensure_ascii=False))
-    print(f'Resolved staging paths: {len(report["resolved_staging_paths"])}')
-    print(f'Duplicate groups: {len(report["duplicate_groups"])}. Report: {target}')
+    print(json.dumps({k:v for k,v in report.items() if k not in ('duplicate_groups','resolved_staging_paths','candidates')},ensure_ascii=False))
+    print(f'Report: {target}')
+    if args.cleanup_diagnostics:
+        if args.apply and report['errors']:raise SystemExit('Cleanup blocked: metadata errors; inspect report')
+    else:
+        print(f'Resolved staging paths: {len(report["resolved_staging_paths"])}')
+        print(f'Duplicate groups: {len(report["duplicate_groups"])}')
 
 
 if __name__=='__main__':main()

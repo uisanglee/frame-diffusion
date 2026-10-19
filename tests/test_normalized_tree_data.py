@@ -70,6 +70,14 @@ def test_normalize_then_corrupt_and_resume(tmp_path, monkeypatch, workers):
                          max_css_owners=64,observation_size=96,max_pixel_mae=.01,max_box_error=1.)
     args.workers=workers
     prepare(args)
+    # Remove real scroll diagnostics, then exercise the original downstream
+    # normalization resume, online corruption and fixed evaluation checks.
+    import importlib.util
+    from pathlib import Path
+    spec=importlib.util.spec_from_file_location('cleanup',Path(__file__).resolve().parents[1]/'scripts/share_cache_assets.py')
+    cleanup=importlib.util.module_from_spec(spec);spec.loader.exec_module(cleanup)
+    cleaned=cleanup.diagnostic_cleanup([out],apply=True,min_age_hours=0)
+    assert cleaned['applied'] and not cleaned['errors'] and cleaned['candidate_count']>0
     row=list(read_jsonl(out/'policy-train.jsonl'))[0]
     assert row['normalization_contract']==CONTRACT
     assert row['symbolic_distance']>0

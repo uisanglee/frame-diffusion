@@ -95,3 +95,46 @@ def test_staging_mapping_requires_matching_completed_entry(tmp_path):
     record.write_text(json.dumps(value))
     (entry/'result.json').write_text(json.dumps({'contract':'lazy-webui-train-view-cache-v2-verified'}))
     assert module().run([root],tmp_path/'store')['errors']
+
+
+def test_diagnostic_cleanup_preserves_inputs_and_reports(tmp_path):
+    root=tmp_path/'dataset'
+    folder=root/'normalized-pages/train'/('a'*64);folder.mkdir(parents=True)
+    keep=['normalized.html','initial.html','initial.png','after.png','report.json','record.json']
+    for name in keep:(folder/name).write_text('{}' if name.endswith('.json') else 'input')
+    (folder/'before.png').write_bytes(b'diagnostic')
+    scroll=folder/'scroll-before';scroll.mkdir()
+    (scroll/'0.png').write_bytes(b'zero')
+    (scroll/'1.png').write_bytes(b'one')
+    (root/'policy-val.jsonl').write_text(json.dumps({'target_image':str(scroll/'1.png')})+'\n')
+    rejected=root/'normalized-pages/test'/('b'*64);rejected.mkdir(parents=True)
+    (rejected/'report.json').write_text('{"accepted":false}')
+    (rejected/'rejected.html').write_text('failed')
+    before={name:(folder/name).read_bytes() for name in keep}
+    audit=module().diagnostic_cleanup([root],min_age_hours=0)
+    assert audit['candidate_count']==3 and audit['referenced_preserved']==1
+    assert (folder/'before.png').exists()  # dry run
+    result=module().diagnostic_cleanup([root],apply=True,min_age_hours=0)
+    assert result['applied'] and not result['errors']
+    assert not (folder/'before.png').exists() and not (scroll/'0.png').exists()
+    assert not (rejected/'rejected.html').exists() and (rejected/'report.json').exists()
+    assert (scroll/'1.png').exists()
+    assert all((folder/name).read_bytes()==value for name,value in before.items())
+    assert module().diagnostic_cleanup([root],min_age_hours=0)['candidate_count']==0
+
+
+def test_cleanup_blocks_on_unreadable_metadata_and_honors_age(tmp_path):
+    folder=tmp_path/'normalized-pages/val'/('a'*64);folder.mkdir(parents=True)
+    image=folder/'before.png';image.write_bytes(b'png')
+    assert module().diagnostic_cleanup([tmp_path])['recent_preserved']==1
+    bad=tmp_path/'policy-train.jsonl';bad.write_text('broken json')
+    report=module().diagnostic_cleanup([tmp_path],True,0)
+    assert report['errors'] and not report['applied'] and image.exists()
+
+
+def test_cleanup_counts_external_hardlinks_as_no_reclaim(tmp_path):
+    root=tmp_path/'dataset';folder=root/'normalized-pages/train'/('a'*64);folder.mkdir(parents=True)
+    image=folder/'before.png';image.write_bytes(b'png')
+    os.link(image,tmp_path/'outside.png')
+    report=module().diagnostic_cleanup([root],min_age_hours=0)
+    assert report['candidate_count']==1 and report['estimated_reclaimable_bytes']==0
