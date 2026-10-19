@@ -35,20 +35,56 @@ def test_detector_relabel_script_exports_independent_assets_and_resumes(tmp_path
         folder=source/'10/rendered';folder.mkdir(parents=True,exist_ok=True)
         write_jsonl(folder/f'detector-{split}.jsonl',[dict(id=split,group=split,split=split,
                      source_sha=split,image=str(png),viewport=[320,200],elements=[])])
+    train_path = source/'10/rendered/detector-train.jsonl'
+    write_jsonl(train_path, list(read_jsonl(train_path)) + [dict(id='broken', image=str(tmp_path/'missing.png'))])
     script=Path(__file__).resolve().parents[1]/'scripts/relabel_detector_data.py'
     command=[sys.executable,str(script),'--data',str(source),'--out',str(out),'--sizes','10','--workers','1']
     subprocess.run(command,check=True,capture_output=True,text=True)
     assert (out/'READY').is_file()
+    assert json.loads((out/'summary.json').read_text())['failed'] == 1
+    assert list(read_jsonl(out/'rejections.jsonl'))[0]['id'] == 'broken'
     for split in ('train','val','test'):
         row=list(read_jsonl(out/f'10/rendered/detector-{split}.jsonl'))[0]
         assert row['detector_label_contract']==DETECTOR_LABEL_CONTRACT and len(row['elements'])==2
         assert Path(row['image']).is_relative_to(out) and Path(row['audit_html']).is_relative_to(out)
         assert row['reused_pixels']
     before=(out/'10/rendered/detector-train.jsonl').read_bytes()
+    legacy = json.loads((out/'relabel-config.json').read_text())
+    legacy['code']['script'] = '5576bcf7f09aaf9ef4980ecf9f59785c7548098eb21760ac278f6a83c772de39'
+    (out/'relabel-config.json').write_text(json.dumps(legacy))
     png.unlink();html.unlink()
     subprocess.run(command,check=True,capture_output=True,text=True)
     assert (out/'10/rendered/detector-train.jsonl').read_bytes()==before
     assert json.loads((out/'relabel-config.json').read_text())['label_contract']==DETECTOR_LABEL_CONTRACT
+    (tmp_path/'missing.html').write_text('<html><body>Recovered</body></html>')
+    Image.new('RGB',(320,200),'white').save(tmp_path/'missing.png')
+    subprocess.run(command,check=True,capture_output=True,text=True)
+    assert json.loads((out/'summary.json').read_text())['failed'] == 0
+    assert len(list(read_jsonl(out/'10/rendered/detector-train.jsonl'))) == 2
+    assert (out/'rejections.jsonl').read_text() == ''
+
+
+@pytest.mark.browser
+def test_detector_relabel_lazy_single_element(tmp_path):
+    import importlib.util
+    import hashlib
+    from framediff.lazy_webui import CONTRACT
+    script = Path(__file__).resolve().parents[1]/'scripts/relabel_detector_data.py'
+    spec = importlib.util.spec_from_file_location('relabel', script)
+    module = importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    html = tmp_path/'one.html'
+    html.write_text('<html><body><p>One text</p></body></html>')
+    row = {'id': 'one/clean', 'lazy_contract': CONTRACT,
+           'lazy_source': {'id': 'one', 'group': 'one', 'split': 'train', 'html': str(html),
+                           'source_sha': hashlib.sha256(html.read_bytes()).hexdigest(), 'viewport': [320,200]},
+           'lazy_settings': {'seed':42, 'max_nodes':512, 'abstract_size':384, 'min_elements':3,
+                             'max_source_mae':1., 'resume':True, 'clean_only':True, 'lazy_train':False}}
+    result, error = module.process_checked((row, str(tmp_path/'out')))
+    assert error is None, error
+    assert len(result['elements']) == 1
+    assert row['lazy_settings']['min_elements'] == 3
+    current = {'inputs': {}, 'code': {'script':'new', 'visual':'same'}}
+    assert not module.compatible_config({'inputs': {}, 'code': {'script':'unknown', 'visual':'same'}}, current)
 
 
 def test_prefetched_detector_pixels_targets_loss_and_gradients_match(tmp_path):

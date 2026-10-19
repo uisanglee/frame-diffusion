@@ -5,6 +5,7 @@ import json
 import multiprocessing as mp
 import os
 import sys
+import traceback
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -12,6 +13,27 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from framediff.ir import read_jsonl
 from framediff.visual import CONTRACT, VISUAL_GEOMETRY_CONTRACT, DETECTOR_LABEL_CONTRACT
+
+LEGACY_SCRIPT_SHA = '5576bcf7f09aaf9ef4980ecf9f59785c7548098eb21760ac278f6a83c772de39'
+
+
+def compatible_config(saved, current):
+    if saved == current:
+        return True
+    # Only migrate the known previous script; inputs and label code must match.
+    migrated = {**saved, 'code': {**saved.get('code', {})}}
+    if migrated['code'].get('script') != LEGACY_SCRIPT_SHA:
+        return False
+    migrated['code']['script'] = current['code']['script']
+    return migrated == current
+
+
+def process_checked(task):
+    try:
+        return process(task), None
+    except Exception as exc:
+        return None, {'id': task[0]['id'], 'error_type': type(exc).__name__,
+                      'error': str(exc), 'traceback': traceback.format_exc()}
 
 
 def initialize():
@@ -40,6 +62,7 @@ def process(task):
     if row.get('lazy_contract'):
         source = dict(row)
         source['lazy_settings'] = {**row['lazy_settings'],
+            'min_elements': 0,
             'visual_geometry_contract': VISUAL_GEOMETRY_CONTRACT,
             'detector_label_contract': DETECTOR_LABEL_CONTRACT}
         cache = TrainViewCache()
@@ -118,11 +141,12 @@ def main():
                   ('script', Path(__file__)),
                   ('visual', Path(__file__).resolve().parents[1] / 'framediff/visual.py')]}}
     config_path = out / 'relabel-config.json'
-    if config_path.exists() and json.loads(config_path.read_text()) != config:
+    if config_path.exists() and not compatible_config(json.loads(config_path.read_text()), config):
         raise ValueError('Source/code changed; choose a new output root')
     config_path.write_text(json.dumps(config, indent=2))
     (out / 'READY').unlink(missing_ok=True)
     completed = {}
+    failures = {}
     keys = list(unique)
     with ProcessPoolExecutor(args.workers, mp_context=mp.get_context('spawn'), initializer=initialize) as pool:
         try:
@@ -133,15 +157,25 @@ def main():
             while cursor < len(keys) or pending:
                 while cursor < len(keys) and len(pending) < args.workers * 2:
                     key = keys[cursor]; cursor += 1
-                    pending.append((key, pool.submit(process, (unique[key], str(out)))))
+                    pending.append((key, pool.submit(process_checked, (unique[key], str(out)))))
                 key, future = pending.popleft()
-                completed[key] = future.result()
-                if len(completed) % 50 == 0 or len(completed) == len(keys):
-                    print(f'Relabel [{len(completed)}/{len(keys)}]', flush=True)
+                result, error = future.result()
+                if error is None:
+                    completed[key] = result
+                else:
+                    error['split'] = key[0]
+                    failures[key] = error
+                    with (out / 'failure-attempts.jsonl').open('a') as file:
+                        file.write(json.dumps(error, ensure_ascii=False) + '\n')
+                    print(f'Relabel failure: {key}: {error["error"]}', flush=True)
+                count = len(completed) + len(failures)
+                if count % 50 == 0 or count == len(keys):
+                    print(f'Relabel [{count}/{len(keys)}], kept={len(completed)}, failures={len(failures)}', flush=True)
         except BaseException:
             from framediff.preparation_workers import stop_executor
             stop_executor(pool, list((getattr(pool, '_processes', None) or {}).values()))
             raise
+    summary = {'requested': len(keys), 'kept': len(completed), 'failed': len(failures), 'splits': {}}
     for (size, split), selected in selections.items():
         folder = out / str(size) / 'rendered'
         folder.mkdir(parents=True, exist_ok=True)
@@ -149,9 +183,17 @@ def main():
         temp = path.with_suffix('.tmp')
         with temp.open('w') as file:
             for key in selected:
-                file.write(json.dumps(completed[key], ensure_ascii=False) + '\n')
+                if key in completed:
+                    file.write(json.dumps(completed[key], ensure_ascii=False) + '\n')
         os.replace(temp, path)
-    (out / 'READY').write_text('Detector relabeling complete\n')
+        summary['splits'][f'{size}/{split}'] = {'requested': len(selected),
+            'kept': sum(key in completed for key in selected),
+            'failed': sum(key in failures for key in selected)}
+    (out / 'rejections.jsonl').write_text(''.join(json.dumps(e, ensure_ascii=False) + '\n' for e in failures.values()))
+    (out / 'summary.json').write_text(json.dumps(summary, ensure_ascii=False, indent=2))
+    if any(not s['kept'] for s in summary['splits'].values()):
+        raise RuntimeError('An output split is empty; inspect summary.json. READY not written.')
+    (out / 'READY').write_text(f'Detector relabeling complete; failed={len(failures)}. See summary.json\n')
     print(f'Complete: {out}. Original policy/raw assets have NOT been deleted.', flush=True)
 
 
