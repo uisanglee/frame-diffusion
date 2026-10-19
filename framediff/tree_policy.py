@@ -442,7 +442,7 @@ def train(args):
     lazy_detector=None
     if args.predicted_targets and any(r.get('lazy_detector') for r in training):
         from .visual_train import load_detector
-        from .detector_cache import TargetPredictionCache
+        from .detector_support import TargetPredictionCache
         configs={tuple(sorted(r['lazy_detector'].items())) for r in training if r.get('lazy_detector')}
         if len(configs)!=1:raise ValueError('Mixed lazy detector configurations')
         lazy_config=dict(next(iter(configs)))

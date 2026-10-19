@@ -1,6 +1,5 @@
 """Frozen held-out WebUI CSS-corruption rollouts with inspectable artifacts."""
 import copy
-import io
 import shutil
 import statistics
 import time
@@ -18,7 +17,7 @@ from .preparation_workers import write_json, write_jsonl
 from .metrics import box_metrics
 from .train import select_device
 from .visual import load_policy
-from .visual_experiment import rollout, sync
+from .visual_experiment import rollout
 from .visual_train import load_detector
 from .web_experiment import digest, guard_run, signature
 

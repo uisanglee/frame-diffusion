@@ -241,7 +241,7 @@ def policy_validation_metrics(net,rows,device,rng,prediction_probability,batch_s
 
 
 def detector_quality(net,rows,device,threshold=.4):
-    from .detector_diagnostics import Aggregate, compare
+    from .detector_support import Aggregate, compare
     net.eval();bucket=Aggregate()
     for row in rows:
         pred=detect(net,detector_input(row['image']),threshold)
@@ -380,7 +380,7 @@ def _train(args,stack):
     started=time.perf_counter()
     render_stream=None
     if is_detector and any(row.get('lazy_contract') for row in train_rows) and start<args.steps and not early['stopped']:
-        from .detector_stream import DetectorStream
+        from .detector_support import DetectorStream
         render_stream=stack.enter_context(DetectorStream(view_pools,rng,args.batch_size,
             Path(args.train).resolve().parent/'.lazy-detector-cache',out/'lazy-rejections.jsonl',
             getattr(args,'render_workers',2),getattr(args,'render_prefetch',4),getattr(args,'render_timeout',900.)))
@@ -581,7 +581,7 @@ def cache_targets(args):
 
 
 def evaluate_detector(args):
-    from .detector_diagnostics import Aggregate, compare, visualize
+    from .detector_support import Aggregate, compare, visualize
     thresholds=sorted(set([args.threshold]+list(getattr(args,'thresholds',[.3,.4,.5,.6,.7]))))
     if any(not 0 <= t <= 1 for t in thresholds):raise ValueError('thresholds must be in [0,1]')
     if args.limit < 0 or getattr(args,'visualize_limit',30) < 0:raise ValueError('limits must be nonnegative')

@@ -2,7 +2,7 @@
 from pathlib import Path
 import re
 from collections import Counter
-from .ir import read_json,read_jsonl,write_jsonl,write_json
+from .ir import read_jsonl,write_jsonl,write_json
 from .visual import NUMERIC_FIELDS,elements
 from .web_experiment import digest, guard_run
 

@@ -1,7 +1,7 @@
 import io
 from PIL import Image
 
-from framediff.detector_cache import TargetPredictionCache
+from framediff.detector_support import TargetPredictionCache
 
 
 def test_prediction_cache_batches_unique_misses_and_survives_restart(tmp_path,monkeypatch):

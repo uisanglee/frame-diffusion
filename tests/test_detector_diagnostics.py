@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from PIL import Image
 import pytest
 
-from framediff.detector_diagnostics import Aggregate, compare
+from framediff.detector_support import Aggregate, compare
 from framediff.ir import write_jsonl
 
 

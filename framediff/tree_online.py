@@ -573,7 +573,7 @@ class OnlineStream:
         for future in self.pending:future.cancel()
         processes=list((getattr(self.pool,'_processes',None) or {}).values()) if force else []
         if force:
-            from .worker_cleanup import stop_executor
+            from .preparation_workers import stop_executor
             stop_executor(self.pool,processes)
         else:self.pool.shutdown(wait=True,cancel_futures=True)
         self.pool=None;self.pending.clear()

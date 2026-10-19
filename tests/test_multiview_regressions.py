@@ -146,7 +146,7 @@ def test_concurrent_lazy_cache_materializes_once(tmp_path):
 
 
 def test_detector_prefetch_resume_preserves_consumed_rng(tmp_path):
-    from framediff.detector_stream import DetectorStream
+    from framediff.detector_support import DetectorStream
     from framediff.visual_train import page_view_pools
     pools=page_view_pools([{'id':f'p{i}/v{v}','page_id':f'p{i}'} for i in range(4) for v in range(2)])
     rng=random.Random(42)
