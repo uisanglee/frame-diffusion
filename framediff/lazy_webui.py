@@ -45,6 +45,10 @@ class TrainViewCache:
         if capacity < 1: raise ValueError('Cache capacity must be positive')
         self.capacity=capacity;self.entries=OrderedDict()
         self.cache_dir=Path(cache_dir).resolve() if cache_dir else None
+        self.legacy_cache_dir=self.cache_dir
+        shared=os.environ.get('TUIDE_SHARED_CACHE')
+        if shared and self.cache_dir is not None:
+            self.cache_dir=Path(shared).resolve()/'lazy-train-views'
         if self.cache_dir is not None:self.cache_dir.mkdir(parents=True,exist_ok=True)
 
     def close(self):
@@ -90,12 +94,44 @@ class TrainViewCache:
         with (self.cache_dir/f'{key}.lock').open('a') as lock:
             fcntl.flock(lock,fcntl.LOCK_EX)
             try:
+                if self.legacy_cache_dir and self.legacy_cache_dir!=self.cache_dir:
+                    self._import_legacy(key)
                 # A killed writer cannot run its finally block. With this key
                 # locked, its old staging directories are safe to reclaim.
                 for stale in self.cache_dir.glob(f'.{key}.*'):
                     if stale.is_dir() and not stale.is_symlink():shutil.rmtree(stale)
                 return self._get(row,policy)
             finally:fcntl.flock(lock,fcntl.LOCK_UN)
+
+    def _import_legacy(self,key):
+        """Import a verified completed entry under the destination key lock."""
+        destination=self.cache_dir/key
+        if destination.exists():return
+        source=self.legacy_cache_dir/key
+        if self._load_disk(source) is None:return
+        stage=Path(tempfile.mkdtemp(prefix=f'.{key}.',dir=self.cache_dir))
+        def relocate(value):
+            if isinstance(value,dict):return {relocate(k):relocate(v) for k,v in value.items()}
+            if isinstance(value,list):return [relocate(v) for v in value]
+            return self._relocate(value,source,destination)
+        try:
+            # Non-JSON files are immutable committed artifacts. Metadata must
+            # be separate because its paths change; never edit linked JSON.
+            for path in source.rglob('*'):
+                target=stage/path.relative_to(source)
+                if path.is_symlink():raise ValueError(f'Symlink in legacy cache: {path}')
+                if path.is_dir():target.mkdir(parents=True,exist_ok=True)
+                elif path.is_file():
+                    target.parent.mkdir(parents=True,exist_ok=True)
+                    if path.suffix=='.json':
+                        target.write_text(json.dumps(relocate(json.loads(path.read_text()))))
+                    else:os.link(path,target)
+            os.rename(stage,destination)
+            if self._load_disk(destination) is None:
+                shutil.rmtree(destination)
+                raise ValueError('Imported shared cache failed validation')
+        finally:
+            if stage.exists():shutil.rmtree(stage)
 
     def _get(self, row, policy=False):
         from .visual_data import _render_page

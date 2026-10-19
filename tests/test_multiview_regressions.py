@@ -195,6 +195,31 @@ def test_lazy_policy_disk_cache_survives_process_cache(tmp_path,monkeypatch):
 
 
 @pytest.mark.browser
+def test_shared_cache_imports_existing_without_rendering(tmp_path,monkeypatch):
+    import shutil
+    from framediff.lazy_webui import TrainViewCache
+    import framediff.visual_data as data
+    row=lazy_descriptor(tmp_path);old=tmp_path/'old-cache'
+    first=TrainViewCache(cache_dir=old)
+    try:before=first.get(row,policy=True)
+    finally:first.close()
+    monkeypatch.setenv('TUIDE_SHARED_CACHE',str(tmp_path/'shared'))
+    monkeypatch.setattr(data,'_render_page',lambda *a,**k: (_ for _ in ()).throw(AssertionError('rerender')))
+    shared=TrainViewCache(cache_dir=old)
+    try:after=shared.get(row,policy=True)
+    finally:shared.close()
+    for key in ('target_html','target_image','current_html','current_image'):
+        assert os.path.samefile(before[key],after[key])
+        assert Path(after[key]).is_relative_to(tmp_path/'shared')
+    for key in ('replacement_edit','visible_candidates','target_declaration_state','current'):
+        assert before[key]==after[key]
+    shutil.rmtree(old)  # Generated test fixture only.
+    other=TrainViewCache(cache_dir=tmp_path/'another-scale-cache')
+    try:assert other.get(row,policy=True)==after
+    finally:other.close()
+
+
+@pytest.mark.browser
 def test_lazy_detector_and_policy_materialization(tmp_path,capsys):
     from framediff.lazy_webui import TrainViewCache,portable_images
     from framediff.tree_online import target_pool,OnlineSampler
