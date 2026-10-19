@@ -2,6 +2,7 @@ import io
 import random
 import pytest
 import torch
+from pathlib import Path
 from PIL import Image
 
 from framediff.detector_support import TargetPredictionCache
@@ -14,6 +15,40 @@ def detector_rows(tmp_path):
         rows.append({'id':f'p{i}/view','page_id':f'p{i}','image':str(path),
                      'elements':[] if i==0 else [{'box':[1,2,6,7],'label':1}]})
     return rows
+
+
+@pytest.mark.browser
+def test_detector_relabel_script_exports_independent_assets_and_resumes(tmp_path):
+    import subprocess
+    import sys
+    import json
+    from framediff.html_bridge import HtmlBrowser
+    from framediff.ir import write_jsonl,read_jsonl
+    from framediff.visual import DETECTOR_LABEL_CONTRACT
+    html=tmp_path/'sample.html';png=tmp_path/'sample.png'
+    html.write_text('<html><body style="margin:0">Visible text<button>OK</button></body></html>')
+    with HtmlBrowser() as browser:
+        browser.load(html.read_text(),[320,200]);pixels,_=browser.stable_capture()
+        png.write_bytes(pixels)
+    source=tmp_path/'old';out=tmp_path/'new'
+    for split in ('train','val','test'):
+        folder=source/'10/rendered';folder.mkdir(parents=True,exist_ok=True)
+        write_jsonl(folder/f'detector-{split}.jsonl',[dict(id=split,group=split,split=split,
+                     source_sha=split,image=str(png),viewport=[320,200],elements=[])])
+    script=Path(__file__).resolve().parents[1]/'scripts/relabel_detector_data.py'
+    command=[sys.executable,str(script),'--data',str(source),'--out',str(out),'--sizes','10','--workers','1']
+    subprocess.run(command,check=True,capture_output=True,text=True)
+    assert (out/'READY').is_file()
+    for split in ('train','val','test'):
+        row=list(read_jsonl(out/f'10/rendered/detector-{split}.jsonl'))[0]
+        assert row['detector_label_contract']==DETECTOR_LABEL_CONTRACT and len(row['elements'])==2
+        assert Path(row['image']).is_relative_to(out) and Path(row['audit_html']).is_relative_to(out)
+        assert row['reused_pixels']
+    before=(out/'10/rendered/detector-train.jsonl').read_bytes()
+    png.unlink();html.unlink()
+    subprocess.run(command,check=True,capture_output=True,text=True)
+    assert (out/'10/rendered/detector-train.jsonl').read_bytes()==before
+    assert json.loads((out/'relabel-config.json').read_text())['label_contract']==DETECTOR_LABEL_CONTRACT
 
 
 def test_prefetched_detector_pixels_targets_loss_and_gradients_match(tmp_path):
