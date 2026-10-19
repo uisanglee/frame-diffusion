@@ -130,6 +130,7 @@ class TrainViewCache:
         args=SimpleNamespace(**settings)
         # Old descriptors keep their original owner-box supervision.
         if not hasattr(args,'visual_geometry_contract'):args.visual_geometry_contract=None
+        if not hasattr(args,'detector_label_contract'):args.detector_label_contract=None
         index=int(hashlib.sha256(source['id'].encode()).hexdigest()[:8],16)
         try:
             rendered,error,_=_render_page((args,work/'rendered',index,source))

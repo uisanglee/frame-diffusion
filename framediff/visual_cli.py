@@ -71,6 +71,8 @@ def add_parsers(sub):
         for k,v in [('steps',10000),('batch-size',2),('accumulation',4),('seed',42),('cpu-threads',4),
                     ('eval-every',500),('log-every',50),('val-samples',32)]:p.add_argument('--'+k,type=int,default=v)
         if name.endswith('detector'):
+            p.add_argument('--loader-workers',type=int,default=2,help='CPU image decode threads; 0 disables prefetch')
+            p.add_argument('--loader-prefetch',type=int,default=2,help='Maximum prefetched image batches')
             p.add_argument('--render-workers',type=int,default=2)
             p.add_argument('--render-prefetch',type=int,default=4)
             p.add_argument('--render-timeout',type=float,default=900.)

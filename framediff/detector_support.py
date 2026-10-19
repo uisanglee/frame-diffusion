@@ -9,7 +9,7 @@ from pathlib import Path
 import multiprocessing as mp
 import random
 from collections import deque
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from multiprocessing.util import Finalize
 from collections import Counter, defaultdict
 import numpy as np
@@ -17,6 +17,61 @@ from scipy.optimize import linear_sum_assignment
 from PIL import Image, ImageDraw
 from .visual import CLASSES
 from .ir import write_json
+
+
+def prepare_detector_batch(rows, pin=False):
+    """Decode once on CPU; keep uint8 until transfer (one quarter of float32)."""
+    import io
+    import torch
+    result=[]
+    for row in rows:
+        source=row['image']
+        with Image.open(io.BytesIO(source) if isinstance(source,bytes) else source) as image:
+            pixels=torch.from_numpy(np.asarray(image.convert('RGB')).copy()).permute(2,0,1)
+        target={'boxes':torch.tensor([e['box'] for e in row['elements']],dtype=torch.float32).reshape(-1,4),
+                'labels':torch.tensor([e['label'] for e in row['elements']],dtype=torch.int64)}
+        if pin:
+            pixels=pixels.pin_memory();target={k:v.pin_memory() for k,v in target.items()}
+        result.append({**row,'_detector_pixels':pixels,'_detector_target':target})
+    return result
+
+
+class DetectorLoader:
+    """Bounded ordered CPU prefetch; only consumed batches commit sampler RNG."""
+    def __init__(self,pools,rng,batch_size,workers=2,prefetch=2,pin=False):
+        if workers<1 or prefetch<1:raise ValueError('Invalid detector loader settings')
+        self.pools=pools;self.rng=rng;self.batch_size=batch_size;self.prefetch=prefetch;self.pin=pin
+        self.planner=random.Random();self.planner.setstate(rng.getstate())
+        self.pool=ThreadPoolExecutor(workers);self.pending=deque()
+
+    def take(self):
+        from .visual_train import sample_page_views
+        while len(self.pending)<self.prefetch:
+            rows=sample_page_views(self.pools,self.batch_size,self.planner)
+            self.pending.append((self.pool.submit(prepare_detector_batch,rows,self.pin),self.planner.getstate()))
+        future,state=self.pending.popleft();batch=future.result();self.rng.setstate(state)
+        return batch
+
+    def close(self):
+        self.pool.shutdown(wait=True,cancel_futures=True)
+
+
+def detector_batches(rows,batch_size,workers=2,prefetch=2,pin=False):
+    """Finite validation stream, preserving batch boundaries and ordering."""
+    if workers<0 or prefetch<1:raise ValueError('Invalid detector loader settings')
+    batches=(rows[i:i+batch_size] for i in range(0,len(rows),batch_size))
+    if not workers:
+        yield from batches;return
+    with ThreadPoolExecutor(workers) as pool:
+        pending=deque()
+        for _ in range(prefetch):
+            batch=next(batches,None)
+            if batch is not None:pending.append(pool.submit(prepare_detector_batch,batch,pin))
+        while pending:
+            result=pending.popleft().result()
+            batch=next(batches,None)
+            if batch is not None:pending.append(pool.submit(prepare_detector_batch,batch,pin))
+            yield result
 
 
 class TargetPredictionCache:
@@ -89,7 +144,7 @@ def initialize(pools,cache_dir):
 
 
 def materialize(task):
-    rows,seeds=task;result=[];errors=[]
+    rows,seeds,decode=task;result=[];errors=[]
     from .lazy_webui import portable_images
     from .visual_train import sample_page_views
     for row,seed in zip(rows,seeds):
@@ -102,15 +157,23 @@ def materialize(task):
                 errors.append({'id':row['id'],'error':str(exc)})
                 row=sample_page_views(_pools,1,rng)[0]
         else:raise RuntimeError(f'32 lazy detector preparation failures: {errors}')
+    if decode:
+        result=prepare_detector_batch(result)
+        # Do not send shared torch storage through the process queue: workers
+        # can be terminated with prefetched results outstanding at shutdown.
+        for row in result:
+            row['_detector_pixels']=row['_detector_pixels'].numpy()
+            row['_detector_target']={k:v.numpy() for k,v in row['_detector_target'].items()}
     return result,errors
 
 
 class DetectorStream:
-    def __init__(self,pools,rng,batch_size,cache_dir,log,workers=2,prefetch=4,timeout=900):
+    def __init__(self,pools,rng,batch_size,cache_dir,log,workers=2,prefetch=4,timeout=900,decode=False):
         if min(workers,prefetch,batch_size,timeout)<=0:raise ValueError('Invalid detector prefetch settings')
         self.pools=pools;self.rng=rng;self.planner=random.Random();self.planner.setstate(rng.getstate())
         self.batch_size=batch_size;self.cache_dir=str(cache_dir);self.log=Path(log)
         self.workers=workers;self.prefetch=prefetch;self.timeout=timeout;self.pending=deque();self.pool=None
+        self.decode=decode
 
     def __enter__(self):
         self.pool=ProcessPoolExecutor(self.workers,mp_context=mp.get_context('spawn'),
@@ -122,11 +185,16 @@ class DetectorStream:
         while len(self.pending)<self.prefetch:
             rows=sample_page_views(self.pools,self.batch_size,self.planner)
             seeds=[self.planner.getrandbits(64) for _ in rows]
-            self.pending.append((self.pool.submit(materialize,(rows,seeds)),self.planner.getstate()))
+            self.pending.append((self.pool.submit(materialize,(rows,seeds,self.decode)),self.planner.getstate()))
 
     def take(self):
         future,state=self.pending[0]
         rows,errors=future.result(timeout=self.timeout)
+        if self.decode:
+            import torch
+            for row in rows:
+                row['_detector_pixels']=torch.from_numpy(row['_detector_pixels'])
+                row['_detector_target']={k:torch.from_numpy(v) for k,v in row['_detector_target'].items()}
         self.pending.popleft();self.rng.setstate(state)
         if errors:
             with self.log.open('a') as file:
@@ -136,7 +204,15 @@ class DetectorStream:
     def __exit__(self,*args):
         if self.pool is not None:
             from .preparation_workers import stop_executor
-            stop_executor(self.pool,list((getattr(self.pool,'_processes',None) or {}).values()))
+            processes=list((getattr(self.pool,'_processes',None) or {}).values())
+            manager=getattr(self.pool,'_executor_manager_thread',None)
+            stop_executor(self.pool,processes)
+            # The executor manager also reaps children. Let that concurrent
+            # cleanup finish before checking their final multiprocessing state.
+            if manager is not None:manager.join(timeout=5)
+            for process in processes:process.join(timeout=2)
+            if any(process.is_alive() for process in processes):
+                raise RuntimeError('Detector render worker did not exit after termination')
             self.pool=None
 
 
@@ -223,7 +299,19 @@ class Aggregate:
                                'recall_iou50': float(np.mean([m/t if t else 0. for m,p,t in pages.values()]))}}
 
 
-def visualize(path, image_path, pred, target, detail):
+def label_coverage(rows):
+    from .visual import DETECTOR_LABEL_CONTRACT
+    return {'pages':len(rows),
+            'full_dom_labeled_pages':sum(r.get('detector_label_contract')==DETECTOR_LABEL_CONTRACT for r in rows),
+            'unaudited_pages':sum(not r.get('label_audit') for r in rows),
+            'pseudo_content_pages':sum(r.get('label_audit',{}).get('pseudo_content_owners',0)>0 for r in rows),
+            'embedded_document_pages':sum(r.get('label_audit',{}).get('embedded_documents',0)>0 for r in rows),
+            'note':'Full DOM removes the policy owner cap; it does not guarantee exhaustive visual ground truth. '
+                   'Pseudo-element glyphs and embedded document contents are not individually labeled. '
+                   'Unmatched predictions remain in strict metrics; no automatic forgiveness.'}
+
+
+def visualize(path, image_path, pred, target, detail, label_audit=None):
     colors = {'true_positive': '#008000', 'duplicate': '#9933cc', 'class_confusion': '#e07000',
               'localization': '#0077cc', 'unmatched': '#dd2222'}
     with Image.open(image_path) as source:
@@ -233,6 +321,7 @@ def visualize(path, image_path, pred, target, detail):
     draw = ImageDraw.Draw(canvas)
     draw.text((8, 5), 'Predictions: green=TP purple=duplicate orange=class blue=location red=unmatched', fill='black')
     draw.text((image.width+8, 25), 'Targets: green=matched red=missed', fill='black')
+    draw.text((image.width+8, 45), 'DOM labels; coverage '+('audited (not exhaustive)' if label_audit else 'unverified'),fill='black')
     for item in detail['predictions']:
         e = pred[item['index']]; x1,y1,x2,y2 = e['box']; color = colors[item['kind']]
         draw.rectangle((x1,y1+80,x2,y2+80), outline=color, width=2)
@@ -243,5 +332,6 @@ def visualize(path, image_path, pred, target, detail):
         draw.text((x1+image.width,y1+80), f"{j} {CLASSES[e['label']]}", fill=color)
     path = Path(path); path.parent.mkdir(parents=True, exist_ok=True)
     canvas.save(path)
-    write_json(path.with_suffix('.json'), {'predictions': pred, 'targets': target, 'diagnostics': detail})
+    write_json(path.with_suffix('.json'), {'predictions': pred, 'targets': target, 'diagnostics': detail,
+                                        'label_audit':label_audit})
 

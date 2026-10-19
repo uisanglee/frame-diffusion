@@ -116,6 +116,48 @@ def test_visual_label_contract_rejects_mixed_versions_and_legacy_config_loads():
         label_contract([{}, {'visual_geometry_contract':VISUAL_GEOMETRY_CONTRACT}])
 
 
+@pytest.mark.browser
+def test_detector_labels_are_not_limited_by_policy_owner_budget():
+    from framediff.html_bridge import HtmlBrowser
+    from framediff.visual import detector_labels,annotate
+    from framediff.plans import dom_tree
+    from framediff.detector_support import compare
+    html='<html><body style="margin:0;font:12px/14px Arial">'+''.join(
+        f'<div style="height:14px">Visible {i}</div>' for i in range(30))+'</body></html>'
+    with HtmlBrowser() as browser:
+        dom=browser.snapshot(html,[600,500],max_nodes=4)
+        result=detector_labels(browser)
+        assert len(dom['nodes'])<=4
+        assert sum(e['label']==1 for e in result['elements'])==30
+        assert result['label_audit']['untagged_owners']>=26
+        assert any(e['owner_id'] is None for e in result['elements'])
+        tree,boxes,_=dom_tree(dom);annotate(browser,tree,visual_boxes=True)
+        limited=elements(tree,boxes,[600,500])
+        prediction=[next(e for e in result['elements'] if e['owner_id'] is None)]
+        assert not compare(prediction,limited)['matches']
+        assert compare(prediction,result['elements'])['matches']
+
+
+@pytest.mark.browser
+def test_full_detector_labels_background_body_contents_and_unsupported_audit():
+    from framediff.html_bridge import HtmlBrowser
+    from framediff.visual import detector_labels
+    html='''<html><style>.pseudo::before{content:"star"}</style>
+    <body style="margin:0;font:14px/20px Arial">Body text
+    <span style="display:contents">Contents text</span>
+    <div style="height:0;overflow:visible">Overflow text</div>
+    <div style="margin-top:30px;width:120px;height:40px;background-image:linear-gradient(red,blue)">Artwork text</div>
+    <div class="pseudo" style="height:20px"></div>
+    <div style="opacity:0">Hidden text</div>
+    <div style="position:absolute;top:1000px">Outside text</div></body></html>'''
+    with HtmlBrowser() as browser:
+        browser.snapshot(html,[600,400],max_nodes=4)
+        result=detector_labels(browser)
+        assert sum(e['label']==1 for e in result['elements'])==4
+        assert sum(e['label']==2 for e in result['elements'])==1
+        assert result['label_audit']['pseudo_content_owners']==1
+
+
 def test_validation_sampling_covers_pages_and_is_repeatable():
     from framediff.visual_train import validation_sample
     rows=[{'id':f'{page}/{state}','source_sha':str(page),'target_image':f'{page}.png'}

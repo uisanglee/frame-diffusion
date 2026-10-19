@@ -20,9 +20,10 @@ CONTRACT = 'visible-ui-v1'
 ACTION_CONTRACT = 'single-css-declaration-normalized-v3-no-padding-gap'
 CLASSES = ('background', 'text', 'image', 'control', 'painted-region')
 VISUAL_GEOMETRY_CONTRACT = 'visible-text-fragments-owner-v1'
+DETECTOR_LABEL_CONTRACT = 'full-visible-dom-v1'
 # CSS owner boxes remain untouched. Ranges measure only this owner's direct
 # text, avoiding duplicate supervision for text belonging to child owners.
-VISUAL_GEOMETRY_JS = r'''e => {
+VISUAL_GEOMETRY_JS = r'''(e, allowTextOverflow=false) => {
   let l=0,t=0,r=innerWidth,b=innerHeight;
   for(let p=e;p;p=p.parentElement){
     const s=getComputedStyle(p);
@@ -36,7 +37,7 @@ VISUAL_GEOMETRY_JS = r'''e => {
   const clip=q=>[Math.max(l,q.left),Math.max(t,q.top),Math.min(r,q.right),Math.min(b,q.bottom)];
   const valid=q=>q[2]>q[0]&&q[3]>q[1];
   const own=e.getBoundingClientRect(),visible=valid(clip(own));
-  if(!visible)return {visible:false,text_boxes:[]};
+  if(!visible&&!allowTextOverflow)return {visible:false,text_boxes:[]};
   const style=getComputedStyle(e),color=style.webkitTextFillColor||style.color;
   const transparent=color==='transparent'||/rgba\([^)]*,\s*0\s*\)$/.test(color);
   const text_boxes=[];
@@ -50,7 +51,7 @@ VISUAL_GEOMETRY_JS = r'''e => {
       const q=clip(rect);if(valid(q))text_boxes.push(q);
     }
   }
-  return {visible,text_boxes};
+  return {visible:visible||(allowTextOverflow&&text_boxes.length>0),text_boxes};
 }'''
 
 
@@ -58,6 +59,47 @@ def visual_geometry(browser):
     return browser.page.evaluate('''() => {
       const measure=('''+VISUAL_GEOMETRY_JS+''');
       return Object.fromEntries([...document.querySelectorAll('[data-fd-id]')].map(e=>[e.dataset.fdId,measure(e)]));
+    }''')
+
+
+def detector_labels(browser):
+    """Detector supervision is not limited by the policy's editable owner budget.
+
+    These are DOM-derived labels, not exhaustive human annotations. Report
+    unsupported content rather than declaring unmatched predictions correct.
+    """
+    return browser.page.evaluate('''() => {
+      const measure=('''+VISUAL_GEOMETRY_JS+'''),items=[];
+      const audit={contract:''' + repr(DETECTOR_LABEL_CONTRACT) + ''',visible_owners:0,
+        untagged_owners:0,pseudo_content_owners:0,embedded_documents:0,canvas_elements:0};
+      for(const e of document.querySelectorAll('body,body *')){
+        const g=measure(e,true);if(!g.visible)continue;
+        if(e.parentElement?.closest('button,input,textarea,select,img,svg,canvas,video'))continue;
+        const s=getComputedStyle(e),root=e.matches('body,html');
+        let l=0,t=0,r=innerWidth,b=innerHeight;
+        for(let p=e.parentElement;p;p=p.parentElement){
+          const a=getComputedStyle(p),q=p.getBoundingClientRect();
+          if(['hidden','clip','scroll','auto'].includes(a.overflowX)){l=Math.max(l,q.left+p.clientLeft);r=Math.min(r,q.left+p.clientLeft+p.clientWidth);}
+          if(['hidden','clip','scroll','auto'].includes(a.overflowY)){t=Math.max(t,q.top+p.clientTop);b=Math.min(b,q.top+p.clientTop+p.clientHeight);}
+        }
+        const q=e.getBoundingClientRect(),box=[Math.max(l,q.left),Math.max(t,q.top),Math.min(r,q.right),Math.min(b,q.bottom)];
+        const owner=e.getAttribute('data-fd-id');
+        const add=(label,rect=box)=>{if(rect[2]>rect[0]&&rect[3]>rect[1])items.push({label,box:rect,owner_id:owner});};
+        audit.visible_owners++;if(!owner)audit.untagged_owners++;
+        if(['::before','::after'].some(p=>{const a=getComputedStyle(e,p);return !['none','normal','""'].includes(a.content)&&a.display!=='none'&&a.visibility==='visible'&&Number(a.opacity)>0;}))audit.pseudo_content_owners++;
+        if(e.matches('iframe,object,embed'))audit.embedded_documents++;
+        if(e.matches('canvas'))audit.canvas_elements++;
+        if(e.matches('button,input,textarea,select')){add(3);continue;}
+        if(e.matches('img,svg,canvas,video')){add(2);continue;}
+        // Background artwork remains visible even when the element has text.
+        if(!root&&s.backgroundImage!=='none')add(2);
+        if(g.text_boxes.length){for(const rect of g.text_boxes)add(1,rect);continue;}
+        const painted=s.backgroundColor!=='transparent'&&s.backgroundColor!=='rgba(0, 0, 0, 0)';
+        const border=['Top','Bottom','Left','Right'].some(k=>parseFloat(s['border'+k+'Width'])>0&&s['border'+k+'Style']!=='none'&&s['border'+k+'Color']!=='rgba(0, 0, 0, 0)');
+        if(!root&&s.backgroundImage==='none'&&(painted||border))add(4);
+      }
+      audit.labels=items.length;
+      return {elements:items,label_audit:audit};
     }''')
 
 

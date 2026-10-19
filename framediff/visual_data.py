@@ -13,7 +13,7 @@ from .html_bridge import HtmlBrowser,embed_placeholder
 from .html_feedback import refresh_geometry
 from .plans import dom_tree
 from .visual import (CONTRACT,ACTION_CONTRACT,ACTION_VALUES,
-                     annotate,elements,abstract_image,VISUAL_GEOMETRY_CONTRACT)
+                     annotate,elements,abstract_image,VISUAL_GEOMETRY_CONTRACT,DETECTOR_LABEL_CONTRACT,detector_labels)
 from .web_experiment import guard_run,digest
 
 
@@ -66,12 +66,15 @@ def generate(args):
 def _render_page(task):
     args, out, index, source = task
     geometry_contract=getattr(args,'visual_geometry_contract',VISUAL_GEOMETRY_CONTRACT)
+    detection_contract=getattr(args,'detector_label_contract',DETECTOR_LABEL_CONTRACT if geometry_contract else None)
     if getattr(args,'lazy_train',False) and source['split']=='train':
         from .lazy_webui import CONTRACT as LAZY
         settings={k:getattr(args,k) for k in ('seed','max_nodes','abstract_size','min_elements','max_source_mae')}
-        settings.update(resume=True,clean_only=True,lazy_train=False,visual_geometry_contract=geometry_contract)
+        settings.update(resume=True,clean_only=True,lazy_train=False,visual_geometry_contract=geometry_contract,
+                        detector_label_contract=detection_contract)
         row={**source,'id':source['id']+'/clean','lazy_contract':LAZY,
              'visual_geometry_contract':geometry_contract,
+             'detector_label_contract':detection_contract,
              'lazy_source':source,'lazy_settings':settings,'contract':CONTRACT}
         return {'page':{**row,'id':source['id']},'policy':[row],'detection':[row]},None,False
     work=out/'pages'/hashlib.sha256(source['id'].encode()).hexdigest()[:20]
@@ -86,6 +89,7 @@ def _render_page(task):
                                                    'target_image','target_abstract'))
             if (saved['page']['source_sha']==source['source_sha'] and saved['policy'] and
                 saved['detection'] and saved.get('visual_geometry_contract')==geometry_contract
+                and saved.get('detector_label_contract')==detection_contract
                 and all(Path(path).is_file() for path in assets)):
                 return saved, None, True
         except (OSError, ValueError, KeyError, TypeError):
@@ -139,13 +143,15 @@ def _render_page(task):
                     'current_image':str(screenshot),'current_abstract':str(abstract),'current_html':str(html_path),
                     'corruption_edit':corruption,**feedback}
                 local_policy.append(record)
-                local_detection.append({**base,'id':record['id'],'image':str(screenshot),'elements':labels})
+                detection=detector_labels(browser) if detection_contract else {'elements':labels}
+                local_detection.append({**base,'id':record['id'],'image':str(screenshot),
+                                        'detector_label_contract':detection_contract,**detection})
             browser.load(tagged,viewport);save_example('clean',tagged,target_boxes)
             # Screenshot waits for fonts. Use geometry measured after that same
             # capture for both supervision and the clean corruption reference.
             clean=local_policy[0]
             tree=copy.deepcopy(clean['current']);target_boxes=copy.deepcopy(clean['current_boxes'])
-            target_elements=local_detection[0]['elements']
+            target_elements=elements(tree,target_boxes,viewport,clean.get('current_clip_boxes'))
             base['target_elements']=target_elements
             for record in (local_policy[0],local_detection[0]):record['target_elements']=target_elements
             (work/'target.png').write_bytes(Path(clean['current_image']).read_bytes())
@@ -183,7 +189,7 @@ def _render_page(task):
                   'construction':('clean normalization input; no corruption' if getattr(args,'clean_only',False)
                                   else 'controlled same-DOM corruption; not screenshot-generated initial HTML')}
             saved={'page':page,'policy':local_policy,'detection':local_detection,
-                   'visual_geometry_contract':geometry_contract};write_json(cache,saved)
+                   'visual_geometry_contract':geometry_contract,'detector_label_contract':detection_contract};write_json(cache,saved)
         return saved, None, False
     except Exception as error:
         failure={'id':source['id'],'error':str(error)}
@@ -203,6 +209,7 @@ def build(args):
     out=Path(args.out).resolve()
     config={'kind':'visual-data-v7-cached-css-corruptions','contract':CONTRACT,'action_contract':ACTION_CONTRACT,
             'visual_geometry_contract':VISUAL_GEOMETRY_CONTRACT,
+            'detector_label_contract':DETECTOR_LABEL_CONTRACT,
             'sources':sources,'settings':{k:v for k,v in vars(args).items() if k not in ('out','resume','workers')}}
     if not getattr(args,'clean_only',False):config['settings'].pop('clean_only',None)
     if any(r.get('hierarchy') for r in sources):raise ValueError('Use original parent-preserving HTML, not flat manifests')

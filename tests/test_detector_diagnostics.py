@@ -69,3 +69,16 @@ def test_evaluation_single_inference_sweep_and_visualization(tmp_path,monkeypatc
     with pytest.raises(ValueError,match='leakage'):
         visual_train.evaluate_detector(args)
     assert len(calls)==1
+
+
+def test_label_audit_does_not_forgive_unmatched_predictions():
+    from framediff.detector_support import label_coverage,compare,Aggregate
+    from framediff.visual import DETECTOR_LABEL_CONTRACT
+    row={'id':'page/view','detector_label_contract':DETECTOR_LABEL_CONTRACT,
+         'label_audit':{'pseudo_content_owners':1,'embedded_documents':1}}
+    pred=[{'box':[0,0,20,20],'label':1,'score':.9}]
+    bucket=Aggregate();bucket.add(row,pred,[],compare(pred,[]))
+    assert bucket.report()['false_positives']==1
+    audit=label_coverage([row,{'id':'old/view'}])
+    assert audit['unaudited_pages']==1 and audit['full_dom_labeled_pages']==1
+    assert audit['pseudo_content_pages']==1 and audit['embedded_document_pages']==1

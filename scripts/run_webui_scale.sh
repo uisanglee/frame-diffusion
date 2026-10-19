@@ -58,6 +58,7 @@ if [[ "$stage" == detector || ( "$stage" == all && "$needs_detector" == 1 ) ]]; 
     --steps "${DETECTOR_STEPS:-20000}" --lr "${DETECTOR_LR:-0.0001}" \
     --render-workers "${DETECTOR_RENDER_WORKERS:-2}" --render-prefetch "${DETECTOR_RENDER_PREFETCH:-4}" \
     --render-timeout "${DETECTOR_RENDER_TIMEOUT:-900}" \
+    --loader-workers "${DETECTOR_LOADER_WORKERS:-2}" --loader-prefetch "${DETECTOR_LOADER_PREFETCH:-2}" \
     --batch-size "${BATCH_SIZE:-2}" --accumulation "${ACCUMULATION:-4}" \
     --val-samples "${VAL_SAMPLES:-2000}" --eval-every "${EVAL_EVERY:-500}" \
     --early-stop-patience "${EARLY_STOP_PATIENCE:-10}" \

@@ -59,9 +59,13 @@ def detect_batch(net,images,threshold=.4):
 
 
 def detection_losses(net,rows,device):
-    images=[detector_input(r['image']).to(device) for r in rows]
-    labels=[{'boxes':torch.tensor([e['box'] for e in r['elements']],dtype=torch.float32,device=device).reshape(-1,4),
-             'labels':torch.tensor([e['label'] for e in r['elements']],dtype=torch.int64,device=device)} for r in rows]
+    from .detector_support import prepare_detector_batch
+    rows=[r if '_detector_pixels' in r else prepare_detector_batch([r])[0] for r in rows]
+    images=[];labels=[]
+    for row in rows:
+        pixels=row['_detector_pixels'];target=row['_detector_target']
+        images.append(pixels.to(device,non_blocking=True).float()/255)
+        labels.append({k:v.to(device,non_blocking=True) for k,v in target.items()})
     return net(images,labels)
 
 
@@ -240,11 +244,14 @@ def policy_validation_metrics(net,rows,device,rng,prediction_probability,batch_s
     return result
 
 
-def detector_quality(net,rows,device,threshold=.4):
-    from .detector_support import Aggregate, compare
+def detector_quality(net,rows,device,threshold=.4,workers=0,prefetch=2):
+    from .detector_support import Aggregate, compare, detector_batches, label_coverage
     net.eval();bucket=Aggregate()
-    for row in rows:
-        pred=detect(net,detector_input(row['image']),threshold)
+    for batch in detector_batches(rows,1,workers,prefetch,str(device).startswith('cuda')):
+        row=batch[0]
+        pixels=row.get('_detector_pixels')
+        image=(pixels.to(device,non_blocking=True).float()/255 if pixels is not None else detector_input(row['image']))
+        pred=detect(net,image,threshold)
         target=row['elements']
         bucket.add(row,pred,target,compare(pred,target))
     report=bucket.report()
@@ -254,7 +261,8 @@ def detector_quality(net,rows,device,threshold=.4):
             'detector_predictions':report['predictions'],'detector_targets':report['targets'],
             'detector_small_n':report['small_n'],'detector_threshold':threshold,
             'detector_by_class':report['by_class'],'detector_by_view':report['by_view'],
-            'detector_by_device':report['by_device'],'detector_prediction_errors':report['prediction_errors']}
+            'detector_by_device':report['by_device'],'detector_prediction_errors':report['prediction_errors'],
+            'detector_label_coverage':label_coverage(rows)}
 
 
 def train(args):
@@ -275,6 +283,8 @@ def _train(args,stack):
     if any(r.get('contract')!=CONTRACT for r in train_rows+val_rows):raise ValueError('Dataset contract mismatch')
     if not 0<=args.prediction_probability<=1:raise ValueError('Prediction probability must be in [0,1]')
     is_detector=args.command=='visual-train-detector'
+    loader_workers=getattr(args,'loader_workers',2);loader_prefetch=getattr(args,'loader_prefetch',2)
+    if is_detector and (loader_workers<0 or loader_prefetch<1):raise ValueError('Invalid detector loader settings')
     legality_report=None
     if not is_detector:
         train_rows,train_rejected=filter_legal_policy_rows(train_rows)
@@ -289,6 +299,9 @@ def _train(args,stack):
         from .visual import label_contract
         geometry_contract=label_contract(train_rows+val_rows)
         if geometry_contract:cfg['visual_geometry_contract']=geometry_contract
+        coverage={r.get('detector_label_contract') for r in train_rows+val_rows}
+        if len(coverage)>1:raise ValueError('Mixed detector label coverage versions; regenerate matching train/val labels')
+        if next(iter(coverage)):cfg['detector_label_contract']=next(iter(coverage))
         if cfg['min_size']<32 or cfg['max_size']<cfg['min_size'] or cfg['max_detections']<1:raise ValueError('Invalid detector dimensions')
         kind='visual-detector-v1'
     else:
@@ -314,7 +327,8 @@ def _train(args,stack):
     data_signature={'train':digest(args.train),'val':digest(args.val)}
     out=Path(args.out).resolve()
     run_settings={k:v for k,v in vars(args).items() if k not in
-                  ('out','resume','steps','init_checkpoint','render_workers','render_prefetch','render_timeout')}
+                  ('out','resume','steps','init_checkpoint','render_workers','render_prefetch','render_timeout',
+                   'loader_workers','loader_prefetch')}
     run_settings['validation_sampling']='page-round-robin-v1'
     guard_run(out,{'kind':kind,'config':cfg,'data':data_signature,'settings':run_settings},bool(args.resume))
     ck=torch.load(args.resume or args.init_checkpoint,map_location='cpu',weights_only=True) if args.resume or args.init_checkpoint else None
@@ -391,10 +405,18 @@ def _train(args,stack):
         from .detector_support import DetectorStream
         render_stream=stack.enter_context(DetectorStream(view_pools,rng,args.batch_size,
             Path(args.train).resolve().parent/'.lazy-detector-cache',out/'lazy-rejections.jsonl',
-            getattr(args,'render_workers',2),getattr(args,'render_prefetch',4),getattr(args,'render_timeout',900.)))
+            getattr(args,'render_workers',2),getattr(args,'render_prefetch',4),getattr(args,'render_timeout',900.),
+            decode=bool(loader_workers)))
+    elif is_detector and loader_workers and start<args.steps and not early['stopped']:
+        from .detector_support import DetectorLoader
+        render_stream=DetectorLoader(view_pools,rng,args.batch_size,loader_workers,loader_prefetch,
+                                     device.startswith('cuda'))
+        stack.callback(render_stream.close)
     for step in range(start+1,args.steps+1):
-        net.train();opt.zero_grad(set_to_none=True);total=0.;step_parts={}
+        step_started=time.perf_counter()
+        net.train();opt.zero_grad(set_to_none=True);total=0.;step_parts={};data_wait=0.
         for _ in range(args.accumulation):
+            wait_started=time.perf_counter()
             batch=render_stream.take() if render_stream else (sample_policy_rows(policy_pools,args.batch_size,rng) if policy_pools else
                    sample_page_views(view_pools,args.batch_size,rng))
             if is_detector and render_stream is None:
@@ -412,17 +434,22 @@ def _train(args,stack):
                         else:raise RuntimeError('32 consecutive lazy detector preparation failures; inspect lazy-rejections.jsonl')
                     materialized.append(row)
                 batch=materialized
+            data_wait+=time.perf_counter()-wait_started
             with amp():
                 if is_detector:value=detection_loss(net,batch,device);parts={}
                 elif cfg['training_scheme']=='balanced-v1':
                     value,_,_,_,parts=policy_batch(net,batch,device,rng,args.prediction_probability)
                 else:value=policy_loss(net,batch,device,rng,args.prediction_probability);parts={}
             if not torch.isfinite(value):raise RuntimeError('Non-finite training loss')
-            (value/args.accumulation).backward();total+=float(value.detach())/args.accumulation
+            (value/args.accumulation).backward()
+            total+=(value.detach() if is_detector else float(value.detach()))/args.accumulation
             for key,part in parts.items():step_parts[key]=step_parts.get(key,0.)+float(part.detach())/args.accumulation
         torch.nn.utils.clip_grad_norm_(net.parameters(),1.);opt.step()
         if step%args.log_every==0 or step==args.steps:
-            row={'step':step,'loss':total,'elapsed_s':time.perf_counter()-started}
+            row={'step':step,'loss':float(total),'elapsed_s':time.perf_counter()-started}
+            if is_detector:
+                row.update(data_wait_s=data_wait,step_seconds=time.perf_counter()-step_started)
+                row['images_per_second']=args.batch_size*args.accumulation/row['step_seconds']
             row.update({f'{key}_loss':value for key,value in sorted(step_parts.items())})
             with (out/'train.jsonl').open('a') as stream:
                 import json
@@ -435,8 +462,10 @@ def _train(args,stack):
             selected=validation_sample(val_rows,args.val_samples)
             with torch.random.fork_rng(),torch.no_grad():
                 torch.manual_seed(90210)
-                for offset in range(0,len(selected),args.batch_size):
-                    rows=selected[offset:offset+args.batch_size]
+                from .detector_support import detector_batches
+                batches=(detector_batches(selected,args.batch_size,loader_workers,loader_prefetch,device.startswith('cuda'))
+                         if is_detector else (selected[i:i+args.batch_size] for i in range(0,len(selected),args.batch_size)))
+                for rows in batches:
                     with amp():
                         if is_detector:
                             parts=detection_losses(net,rows,device);value=sum(parts.values())
@@ -460,7 +489,8 @@ def _train(args,stack):
                       'validation_available_n':len(val_rows),'validation_complete':len(selected)==len(val_rows)}
             if is_detector:
                 eval_row['validation_components']={k:v/len(selected) for k,v in sorted(components.items())}
-                with torch.inference_mode():eval_row.update(detector_quality(net,selected,device,args.metric_threshold))
+                with torch.inference_mode():eval_row.update(detector_quality(net,selected,device,args.metric_threshold,
+                                                                            loader_workers,loader_prefetch))
             else:
                 eval_row['validation_components']={key:components[key]/component_counts[key]
                                                    for key in sorted(components)}
@@ -594,7 +624,7 @@ def cache_targets(args):
 
 
 def evaluate_detector(args):
-    from .detector_support import Aggregate, compare, visualize
+    from .detector_support import Aggregate, compare, visualize, label_coverage
     thresholds=sorted(set([args.threshold]+list(getattr(args,'thresholds',[.3,.4,.5,.6,.7]))))
     if any(not 0 <= t <= 1 for t in thresholds):raise ValueError('thresholds must be in [0,1]')
     if args.limit < 0 or getattr(args,'visualize_limit',30) < 0:raise ValueError('limits must be nonnegative')
@@ -619,20 +649,25 @@ def evaluate_detector(args):
             pred=[e for e in predictions if e['score']>=threshold]
             detail=compare(pred,row['elements'])
             bucket.add(row,pred,row['elements'],detail)
+            bucket.records[-1]['label_audit']=row.get('label_audit')
             if threshold==args.threshold and getattr(args,'visualize_dir',None) and index<getattr(args,'visualize_limit',30):
                 path=Path(args.visualize_dir)/f'{index:06d}.png'
-                visualize(path,row['image'],pred,row['elements'],detail)
+                visualize(path,row['image'],pred,row['elements'],detail,row.get('label_audit'))
                 bucket.records[-1]['visualization']=str(path)
         if (index+1)%50==0 or index+1==len(rows):
             print({'detector_diagnostics':index+1,'total':len(rows)},flush=True)
     primary=buckets[args.threshold]
     report={**primary.report(),'threshold':args.threshold,'records':primary.records,
+            'label_coverage':label_coverage(rows),
+            'training_label_contract':ck.get('config',{}).get('detector_label_contract'),
             'visual_geometry_contract':ck.get('config',{}).get('visual_geometry_contract'),
             'threshold_sweep':{str(t):bucket.report() for t,bucket in buckets.items()},
             'checkpoint':str(args.checkpoint),'data':str(args.data),
             'note':'Class-aware maximum-cardinality one-to-one IoU50 matching, not COCO AP. '
                    'Small means original-image box area < 32^2. Sweep uses the same post-NMS predictions '
-                   'and checkpoint max_detections cap. Tune thresholds on validation, not test.',
+                   'and checkpoint max_detections cap. Tune thresholds on validation, not test. '
+                   'False positives are relative to supplied DOM labels, not proof that no real visual element exists. '
+                   'Inspect label_coverage before attributing unmatched predictions to model error.',
             'error_rules':{'duplicate':'Unmatched prediction with same-class IoU >= 0.5',
                            'class_confusion':'Otherwise, different-class IoU >= 0.5',
                            'localization':'Otherwise, same-class 0.1 <= IoU < 0.5',
