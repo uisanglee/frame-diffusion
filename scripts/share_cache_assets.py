@@ -113,39 +113,40 @@ def run(roots, store, apply=False):
     return report
 
 
-def diagnostic_cleanup(roots, apply=False, min_age_hours=24, journal=None):
+def diagnostic_cleanup(roots, apply=False, min_age_hours=24, journal=None, log_every=5000):
     """Remove only known diagnostics, never whole failed/staging directories."""
-    protected=set();errors=[];files=set()
-    def references(value,origin):
-        if isinstance(value,dict):
-            for key,item in value.items():references(key,origin);references(item,origin)
-        elif isinstance(value,list):
-            for item in value:references(item,origin)
-        elif isinstance(value,str) and len(value)<4096 and '\x00' not in value:
-            if value.startswith('/'):
-                path=Path(value)
-                protected.add(str(path))
-                protected.add(str(committed_asset(origin,path)))
-            elif value.lower().endswith(('.png','.html','.jpg','.webp')) and '://' not in value:
-                protected.add(os.path.abspath(origin.parent/value))
-                protected.add(os.path.abspath(value))
-    # Include manifests AND completion metadata, not only current train rows.
+    protected=set();errors=[];files=set();metadata=set();visited=set();scanned=0
+    started=time.monotonic();last_log=started
+    def progress(stage,count,force=False,**extra):
+        nonlocal last_log
+        now=time.monotonic()
+        if force or count%log_every==0 or now-last_log>=5:
+            print(json.dumps({'cleanup_stage':stage,'processed':count,
+                'elapsed_s':round(now-started,1),**extra}),flush=True)
+            last_log=now
+    progress('discover',0,True)
+    def walk_error(exc):errors.append({'record':str(exc.filename),'error':str(exc)})
     for root in roots:
-        for path in root.rglob('*'):
-            if path.is_symlink() or not path.is_file():continue
-            files.add(path)
-            if path.suffix not in ('.json','.jsonl'):continue
-            try:
-                with path.open() as stream:
-                    if path.suffix=='.jsonl':
-                        for line in stream:
-                            if line.strip():references(json.loads(line),path)
-                    else:references(json.load(stream),path)
-            except (OSError,ValueError,TypeError) as exc:
-                errors.append({'record':str(path),'error':str(exc)})
+        for directory,dirs,names in os.walk(root,followlinks=False,onerror=walk_error):
+            if directory in visited:
+                dirs[:]=[];continue
+            visited.add(directory)
+            scroll_directory=Path(directory).name in ('scroll-before','scroll-after')
+            for name in names:
+                scanned+=1
+                # Avoid stat()/Path construction for unrelated images/assets.
+                if name.endswith(('.json','.jsonl')):
+                    metadata.add(Path(directory)/name)
+                elif (name in ('before.png','reloaded.png','rejected.html') or
+                      (scroll_directory and re.fullmatch(r'\d+\.png',name))):
+                    path=Path(directory)/name
+                    if not path.is_symlink():files.add(path)
+                progress('discover',scanned,candidate_names=len(files),metadata_files=len(metadata))
+    progress('discover',scanned,True,candidate_names=len(files),metadata_files=len(metadata))
     candidates=[];blocked=0;young=0;unclassified=0
     now=time.time()
-    for path in sorted(files):
+    for index,path in enumerate(sorted(files),1):
+        progress('classify',index,total=len(files))
         # Restrict to the known normalized page layout. Preserve every JSON,
         # normalized.html, initial.*, after.png and all source/rendered assets.
         folder=next((p for p in path.parents if p.parent.name in ('train','val','test')
@@ -173,7 +174,56 @@ def diagnostic_cleanup(roots, apply=False, min_age_hours=24, journal=None):
             young+=1;continue
         candidates.append({'path':str(path),'reason':reason,'size':st.st_size,
                            'device':st.st_dev,'inode':st.st_ino,'nlink':st.st_nlink,
-                           'blocks':st.st_blocks,'sha256':digest(path)})
+                           'blocks':st.st_blocks,'mtime_ns':st.st_mtime_ns,'ctime_ns':st.st_ctime_ns})
+    # Keep only paths matching candidates; no stat/hash for unrelated metadata
+    # references. Still parse every JSON/JSONL so bad metadata blocks deletion.
+    candidate_paths={c['path'] for c in candidates}
+    basenames={Path(p).name for p in candidate_paths}
+    staging_aliases=defaultdict(set)
+    for name in candidate_paths:
+        parts=Path(name).parts
+        for index,part in enumerate(parts):
+            if re.fullmatch('[0-9a-f]{64}',part):
+                staging_aliases[part,parts[index+1:]].add(name)
+    def references(value,origin):
+        if isinstance(value,dict):
+            for key,item in value.items():references(key,origin);references(item,origin)
+        elif isinstance(value,list):
+            for item in value:references(item,origin)
+        elif isinstance(value,str) and len(value)<4096 and '\x00' not in value and value.rsplit('/',1)[-1] in basenames:
+            path=Path(value)
+            # A migrated shared cache can retain historical metadata rooted in
+            # a DIFFERENT old cache directory. Match key+full relative suffix,
+            # not just the basename. Extra protection is safe here.
+            for index,part in enumerate(path.parts):
+                match=re.fullmatch(r'\.([0-9a-f]{64})\.[A-Za-z0-9_-]+',part)
+                if match:protected.update(staging_aliases.get((match[1],path.parts[index+1:]),()))
+            choices=[os.path.abspath(path)] if path.is_absolute() else [os.path.abspath(origin.parent/path),os.path.abspath(path)]
+            # Protect even historical staging references without probing disk
+            # for every string; conservative matches can only prevent deletion.
+            choices.extend(re.sub(r'/\.([0-9a-f]{64})\.[A-Za-z0-9_-]+/',r'/\1/',p) for p in list(choices))
+            protected.update(candidate_paths.intersection(choices))
+            if not candidate_paths.intersection(choices):
+                for p in choices:
+                    try:
+                        resolved=str(Path(p).resolve())
+                        if resolved in candidate_paths:protected.add(resolved)
+                    except (OSError,ValueError):pass
+    progress('references',0,True,total=len(metadata))
+    for index,path in enumerate(sorted(metadata),1):
+        try:
+            with path.open() as stream:
+                if path.suffix=='.jsonl':
+                    for line_number,line in enumerate(stream,1):
+                        if line.strip():references(json.loads(line),path)
+                        if line_number%10000==0:progress('references',index,file=str(path),lines=line_number)
+                else:references(json.load(stream),path)
+        except (OSError,ValueError,TypeError) as exc:
+            errors.append({'record':str(path),'error':str(exc)})
+        progress('references',index,total=len(metadata),protected=len(protected))
+    progress('references',len(metadata),True,total=len(metadata),protected=len(protected))
+    blocked=len(protected)
+    candidates=[c for c in candidates if c['path'] not in protected]
     by_inode=defaultdict(list)
     for c in candidates:by_inode[c['device'],c['inode']].append(c)
     reclaim=sum(group[0]['blocks']*512 for group in by_inode.values() if len(group)==group[0]['nlink'])
@@ -183,15 +233,24 @@ def diagnostic_cleanup(roots, apply=False, min_age_hours=24, journal=None):
             'estimated_reclaimable_bytes':reclaim,'applied':False}
     if apply and not errors:
         # Validate the entire plan before deleting any file. Writers must stop.
-        for c in candidates:
+        progress('verify_delete',0,True,total=len(candidates))
+        for index,c in enumerate(candidates,1):
             p=Path(c['path']);st=p.stat()
-            if p.is_symlink() or (st.st_dev,st.st_ino)!=(c['device'],c['inode']) or digest(p)!=c['sha256']:
+            if p.is_symlink() or (st.st_dev,st.st_ino,st.st_size,st.st_mtime_ns,st.st_ctime_ns)!=(c['device'],c['inode'],c['size'],c['mtime_ns'],c['ctime_ns']):
                 raise ValueError(f'Diagnostic changed during audit: {p}')
+            c['sha256']=digest(p)
+            after=p.stat()
+            if (st.st_ino,st.st_size,st.st_mtime_ns,st.st_ctime_ns)!=(after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns):
+                raise ValueError(f'Diagnostic changed while hashing: {p}')
+            progress('verify_delete',index,total=len(candidates))
         if journal is not None:
             journal.parent.mkdir(parents=True,exist_ok=True)
             journal.write_text(json.dumps(report,ensure_ascii=False,indent=2))
-        for c in candidates:Path(c['path']).unlink()
+        for index,c in enumerate(candidates,1):
+            Path(c['path']).unlink()
+            progress('delete',index,total=len(candidates))
         report['applied']=True
+    progress('complete',len(candidates),True,applied=report['applied'],errors=len(errors))
     return report
 
 
@@ -203,11 +262,13 @@ def main():
     parser.add_argument('--apply',action='store_true')
     parser.add_argument('--cleanup-diagnostics',action='store_true')
     parser.add_argument('--min-age-hours',type=float,default=24)
+    parser.add_argument('--log-every',type=int,default=5000)
     args=parser.parse_args()
     if args.min_age_hours<0:parser.error('min-age-hours must be nonnegative')
+    if args.log_every<1:parser.error('log-every must be positive')
     roots=[Path(p).resolve() for p in args.roots]
     if any(not p.is_dir() for p in roots):parser.error('All roots must be existing cache directories')
-    report=(diagnostic_cleanup(roots,args.apply,args.min_age_hours,Path(args.report)) if args.cleanup_diagnostics
+    report=(diagnostic_cleanup(roots,args.apply,args.min_age_hours,Path(args.report),args.log_every) if args.cleanup_diagnostics
             else run(roots,Path(args.store).resolve(),args.apply))
     target=Path(args.report);target.parent.mkdir(parents=True,exist_ok=True)
     target.write_text(json.dumps(report,ensure_ascii=False,indent=2))

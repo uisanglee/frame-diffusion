@@ -138,3 +138,37 @@ def test_cleanup_counts_external_hardlinks_as_no_reclaim(tmp_path):
     os.link(image,tmp_path/'outside.png')
     report=module().diagnostic_cleanup([root],min_age_hours=0)
     assert report['candidate_count']==1 and report['estimated_reclaimable_bytes']==0
+
+
+def test_fast_audit_never_hashes_images_and_reports_progress(tmp_path,monkeypatch,capsys):
+    tool=module();folder=tmp_path/'normalized-pages/train'/('a'*64);folder.mkdir(parents=True)
+    (folder/'before.png').write_bytes(b'large image')
+    (folder/'after.png').write_bytes(b'training input')
+    monkeypatch.setattr(tool,'digest',lambda p: (_ for _ in ()).throw(AssertionError('audit hashed an image')))
+    result=tool.diagnostic_cleanup([tmp_path],min_age_hours=0,log_every=1)
+    assert result['candidate_count']==1 and 'sha256' not in result['candidates'][0]
+    output=capsys.readouterr().out
+    assert all(f'"cleanup_stage": "{stage}"' in output for stage in ('discover','classify','references','complete'))
+
+
+def test_fast_reference_scan_preserves_relative_and_staging_paths(tmp_path):
+    entry=tmp_path/'lazy-train-views'/('a'*64)
+    folder=entry/'labels/normalized-pages/train'/('b'*64);folder.mkdir(parents=True)
+    for name in ('before.png','reloaded.png'):(folder/name).write_bytes(b'needed')
+    stale=tmp_path/'previous-location'/('.'+entry.name+'.temp')/'labels/normalized-pages/train'/folder.name/'before.png'
+    (folder/'input.json').write_text(json.dumps({'nested':[{'target':str(stale)}], 'other':'reloaded.png'}))
+    result=module().diagnostic_cleanup([tmp_path],apply=True,min_age_hours=0,log_every=1)
+    assert result['candidate_count']==0 and result['referenced_preserved']==2
+    assert (folder/'before.png').is_file() and (folder/'reloaded.png').is_file()
+
+
+def test_fast_apply_hashes_only_unreferenced_candidates(tmp_path,monkeypatch):
+    tool=module();folder=tmp_path/'normalized-pages/test'/('a'*64);folder.mkdir(parents=True)
+    image=folder/'before.png';image.write_bytes(b'diagnostic')
+    training=folder/'after.png';training.write_bytes(b'train')
+    calls=[];original=tool.digest
+    def counted(path):calls.append(path);return original(path)
+    monkeypatch.setattr(tool,'digest',counted)
+    result=tool.diagnostic_cleanup([tmp_path],True,0,journal=tmp_path/'journal.json')
+    assert result['applied'] and calls==[image] and training.read_bytes()==b'train'
+    assert result['candidates'][0]['sha256']==hashlib.sha256(b'diagnostic').hexdigest()
