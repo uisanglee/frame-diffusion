@@ -2,6 +2,36 @@
 # Resume when last.pt exists; otherwise start a fresh training run.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
+if [[ "${1:-}" == legacy-* ]]; then
+  case "$1" in
+    legacy-detector-7k) size=7000; gpu=2; mode=detector ;;
+    legacy-detector-56169) size=56169; gpu=3; mode=detector ;;
+    legacy-tuide-7k) size=7000; gpu=2; mode=abstract ;;
+    legacy-tuide-56169) size=56169; gpu=3; mode=abstract ;;
+    legacy-screenshot-7k) size=7000; gpu=4; mode=screenshot ;;
+    legacy-screenshot-56169) size=56169; gpu=2; mode=screenshot ;;
+    *) echo 'Unknown legacy experiment' >&2; exit 2 ;;
+  esac
+  export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-$gpu}"
+  export REUSE_LEGACY_DOM=1
+  detector_steps=20000; stage1_steps=30000; stage2_steps=15000
+  if [[ "$size" == 56169 ]]; then
+    detector_steps=40000; stage1_steps=60000; stage2_steps=30000
+  fi
+  export DETECTOR_STEPS="${DETECTOR_STEPS:-$detector_steps}"
+  export POLICY_STAGE1_STEPS="${POLICY_STAGE1_STEPS:-$stage1_steps}"
+  export POLICY_STAGE2_STEPS="${POLICY_STAGE2_STEPS:-$stage2_steps}"
+  export POLICY_SCREENSHOT_STEPS="${POLICY_SCREENSHOT_STEPS:-$((POLICY_STAGE1_STEPS+POLICY_STAGE2_STEPS))}"
+  if [[ "$mode" == detector ]]; then
+    export STAGE=detector BATCH_SIZE="${BATCH_SIZE:-1}" ACCUMULATION="${ACCUMULATION:-8}"
+    export POLICY_MODES=abstract
+  else
+    export STAGE="${STAGE:-policy}" POLICY_MODES="$mode"
+  fi
+  exec bash scripts/run_webui_scale.sh "$size" \
+    "${LEGACY_DATA_ROOT:-data/webui-7k-56169-safe-margin-v1}" \
+    "${LEGACY_RUN_ROOT:-runs/webui-legacy-dom-shared-v1}"
+fi
 case "${1:-}" in
   detector-7k) size=7000; gpu=2; steps=20000; mode=detector ;;
   detector-56169) size=56169; gpu=3; steps=40000; mode=detector ;;

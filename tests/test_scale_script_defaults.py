@@ -16,6 +16,26 @@ DEFAULTS = dict(STAGE='all', POLICY_SCALE='s', POLICY_MODES='abstract screenshot
     REPEATS='3', ROLLOUT_WORKERS='4', ROLLOUT_BATCH_SIZE='4', ROLLOUT_BATCH_WAIT_MS='10')
 
 
+def test_legacy_launcher_shared_data_budgets_and_modes(tmp_path):
+    scripts=tmp_path/'scripts';scripts.mkdir()
+    source=Path(__file__).resolve().parents[1]/'scripts/resume_webui_training.sh'
+    shutil.copyfile(source,scripts/source.name)
+    (scripts/'run_webui_scale.sh').write_text(
+        'printf "%s\\n" "$@" "$STAGE" "$POLICY_MODES" "$CUDA_VISIBLE_DEVICES" '
+        '"$REUSE_LEGACY_DOM" "$POLICY_STAGE1_STEPS" "$POLICY_STAGE2_STEPS" "$POLICY_SCREENSHOT_STEPS"\n')
+    env={k:v for k,v in os.environ.items() if k not in DEFAULTS and k not in
+         ('CUDA_VISIBLE_DEVICES','POLICY_SCREENSHOT_STEPS','LEGACY_DATA_ROOT','LEGACY_RUN_ROOT')}
+    for size,gpu1,gpu2 in (('7k','2','4'),('56169','3','2')):
+        for mode,gpu in (('tuide',gpu1),('screenshot',gpu2),('detector',gpu1)):
+            result=subprocess.run(['bash',str(scripts/source.name),f'legacy-{mode}-{size}'],
+                                  env=env,check=True,capture_output=True,text=True).stdout.splitlines()
+            assert result[1:3]==['data/webui-7k-56169-safe-margin-v1','runs/webui-legacy-dom-shared-v1']
+            assert result[3]==('detector' if mode=='detector' else 'policy')
+            assert result[4]==('screenshot' if mode=='screenshot' else 'abstract')
+            assert result[5:7]==[gpu,'1']
+            assert int(result[9])==int(result[7])+int(result[8])
+
+
 def test_resume_launcher_fresh_resume_and_preserved_output(tmp_path):
     scripts=tmp_path/'scripts';scripts.mkdir()
     source=Path(__file__).resolve().parents[1]/'scripts/resume_webui_training.sh'

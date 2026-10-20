@@ -45,6 +45,14 @@ export ROLLOUT_BATCH_WAIT_MS="${ROLLOUT_BATCH_WAIT_MS:-10}"
 base="$data/$size"
 output="$runs/$size"
 [[ -s "$base/coverage.json" ]] || { echo "Complete prepare_webui_scales.sh first: $base/coverage.json missing" >&2; exit 2; }
+if [[ "${REUSE_LEGACY_DOM:-0}" == 1 ]]; then
+  python - "$data" "$size" <<'PY'
+import json,sys
+from framediff.visual import validate_legacy_dataset
+print(json.dumps({'legacy_dom_preflight':validate_legacy_dataset(sys.argv[1],sys.argv[2]),
+                  'regenerate_data':False}),flush=True)
+PY
+fi
 common=$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["common_test_scale"])' "$data/split-report.json")
 stage=$STAGE
 case "$stage" in all|detector|policy|evaluate) ;; *) echo 'STAGE must be all, detector, policy, or evaluate' >&2; exit 2;; esac

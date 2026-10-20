@@ -57,6 +57,42 @@ VISUAL_CLASS_JS = r'''(e,g) => {
   return painted||border?4:0;
 }'''
 
+# Exact pre-fragment classification for unversioned, published DOM-box datasets.
+# Do not silently apply the newer visibility/class rules to an old experiment.
+LEGACY_VISUAL_CLASS_JS = r'''e => {
+  const s=getComputedStyle(e),primitive='button,input,textarea,select,img,svg,canvas,video';
+  if(e.parentElement?.closest(primitive))return 0;
+  if(e.matches('button,input,textarea,select'))return 3;
+  if(e.matches('img,svg,canvas,video'))return 2;
+  if([...e.childNodes].some(n=>n.nodeType===3&&n.textContent.trim())&&!e.matches('body,html'))return 1;
+  const painted=s.backgroundColor!=='transparent'&&s.backgroundColor!=='rgba(0, 0, 0, 0)';
+  const border=['Top','Bottom','Left','Right'].some(k=>parseFloat(s['border'+k+'Width'])>0&&s['border'+k+'Style']!=='none');
+  return !e.matches('body,html')&&(painted||border)?4:0;
+}'''
+
+
+def validate_legacy_dataset(root, size):
+    """Read-only preflight: reuse published labels, never stamp new versions."""
+    from pathlib import Path
+    from .ir import read_jsonl
+    base=Path(root)/str(size)
+    counts={}
+    for split in ('train','val','test'):
+        for folder,kind in (('rendered','detector'),('css','policy')):
+            path=base/folder/f'{kind}-{split}.jsonl'
+            count=0
+            for row in read_jsonl(path):
+                settings=row.get('lazy_settings',{})
+                if (label_contract([row]) is not None or
+                    row.get('detector_label_contract') is not None or
+                    settings.get('visual_geometry_contract') is not None or
+                    settings.get('detector_label_contract') is not None or
+                    settings.get('policy_relabel')):
+                    raise ValueError(f'Not legacy DOM-box data: {path}, id={row.get("id")}; do not mix label versions')
+                count+=1
+            if not count:raise ValueError(f'Empty legacy manifest: {path}')
+            counts[str(path)]=count
+    return counts
 def visual_geometry(browser):
     return browser.page.evaluate('''() => {
       const measure=('''+VISUAL_GEOMETRY_JS+''');
@@ -216,12 +252,21 @@ def annotate(browser, tree, visual_boxes=False):
     A control's descendants are suppressed to avoid double-counting its text.
     """
     if visual_boxes:tree['visual_geometry_contract']=VISUAL_GEOMETRY_CONTRACT
+    contract=tree.get('visual_geometry_contract')
+    if contract not in (None,VISUAL_GEOMETRY_CONTRACT):
+        raise ValueError('Unknown visual label version; regenerate matching labels')
     labels = browser.page.evaluate('''() => {
       const measure=('''+VISUAL_GEOMETRY_JS+'''),classify=('''+VISUAL_CLASS_JS+''');
       return Object.fromEntries(
       [...document.querySelectorAll('[data-fd-id]')].map(e=>{
         return [e.getAttribute('data-fd-id'),classify(e,measure(e))];
       }));}''')
+    if contract is None:
+        labels=browser.page.evaluate('''() => {
+          const classify=('''+LEGACY_VISUAL_CLASS_JS+''');
+          return Object.fromEntries([...document.querySelectorAll('[data-fd-id]')]
+            .map(e=>[e.getAttribute('data-fd-id'),classify(e)]));
+        }''')
     for node in tree['nodes']: node['visual_class'] = labels.get(node['id'], 0)
     refresh_visual_geometry(browser,tree)
     return tree

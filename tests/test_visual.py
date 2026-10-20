@@ -188,6 +188,41 @@ def test_text_fragment_labels_cannot_mix_with_owner_boxes():
         label_contract([{'visual_geometry_contract':'visible-text-fragments-owner-v1'}])
 
 
+def test_legacy_preflight_is_read_only_and_rejects_versioned_data(tmp_path):
+    import json
+    from framediff.visual import validate_legacy_dataset,VISUAL_GEOMETRY_CONTRACT
+    for split in ('train','val','test'):
+        for folder,kind in (('rendered','detector'),('css','policy')):
+            path=tmp_path/'7000'/folder/f'{kind}-{split}.jsonl'
+            path.parent.mkdir(parents=True,exist_ok=True)
+            path.write_text(json.dumps({'id':split+'/clean','current':{'nodes':[]}})+'\n')
+    before={p:p.read_bytes() for p in tmp_path.rglob('*.jsonl')}
+    assert len(validate_legacy_dataset(tmp_path,7000))==6
+    assert all(p.read_bytes()==value for p,value in before.items())
+    path=tmp_path/'7000/css/policy-test.jsonl'
+    path.write_text(json.dumps({'id':'bad','visual_geometry_contract':VISUAL_GEOMETRY_CONTRACT})+'\n')
+    with pytest.raises(ValueError,match='Not legacy'):
+        validate_legacy_dataset(tmp_path,7000)
+    path.write_text(json.dumps({'id':'bad','lazy_settings':{'policy_relabel':{'source':{}}}})+'\n')
+    with pytest.raises(ValueError,match='Not legacy'):
+        validate_legacy_dataset(tmp_path,7000)
+
+
+@pytest.mark.browser
+def test_unversioned_data_retains_legacy_classification():
+    from framediff.html_bridge import HtmlBrowser
+    from framediff.visual import annotate
+    with HtmlBrowser() as browser:
+        browser.load('<div data-fd-id="a" style="color:transparent;width:500px;height:100px">Hello</div>',[600,400])
+        tree={'nodes':[{'id':'a'}]}
+        annotate(browser,tree)
+        # Old labels classify direct text; newer visibility filtering must not
+        # silently alter an already-published unversioned experiment.
+        assert tree['nodes'][0]['visual_class']==1
+        assert 'visual_geometry_contract' not in tree
+        assert elements(tree,{'a':[0,0,500,100]},[600,400])==[{'label':1,'box':[0.,0.,500,100]}]
+
+
 def test_validation_sampling_covers_pages_and_is_repeatable():
     from framediff.visual_train import validation_sample
     rows=[{'id':f'{page}/{state}','source_sha':str(page),'target_image':f'{page}.png'}
