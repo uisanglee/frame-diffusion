@@ -45,7 +45,20 @@ export ROLLOUT_BATCH_WAIT_MS="${ROLLOUT_BATCH_WAIT_MS:-10}"
 base="$data/$size"
 detector_data="${DETECTOR_DATA_ROOT:-$data}/$size/rendered"
 output="$runs/$size"
-[[ -s "$base/coverage.json" ]] || { echo "Complete prepare_webui_scales.sh first: $base/coverage.json missing" >&2; exit 2; }
+stage=$STAGE
+case "$stage" in all|detector|policy|evaluate) ;; *) echo 'STAGE must be all, detector, policy, or evaluate' >&2; exit 2;; esac
+if [[ "$stage" == policy ]]; then
+  # Training consumes manifests, not scale evaluation/provenance metadata.
+  for input in policy-train.jsonl policy-val.jsonl pages-train.jsonl; do
+    [[ -s "$base/css/$input" ]] || {
+      echo "Missing policy training input: $base/css/$input" >&2
+      echo 'Use the existing prepared DATA_ROOT and the original RUN_ROOT to resume. No automatic data regeneration or path fallback is performed.' >&2
+      exit 2
+    }
+  done
+else
+  [[ -s "$base/coverage.json" ]] || { echo "Complete prepare_webui_scales.sh first: $base/coverage.json missing" >&2; exit 2; }
+fi
 if [[ "${REUSE_LEGACY_DOM:-0}" == 1 ]]; then
   python - "$data" "$size" <<'PY'
 import json,sys
@@ -54,9 +67,9 @@ print(json.dumps({'legacy_dom_preflight':validate_legacy_dataset(sys.argv[1],sys
                   'regenerate_data':False}),flush=True)
 PY
 fi
-common=$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["common_test_scale"])' "$data/split-report.json")
-stage=$STAGE
-case "$stage" in all|detector|policy|evaluate) ;; *) echo 'STAGE must be all, detector, policy, or evaluate' >&2; exit 2;; esac
+if [[ "$stage" != policy ]]; then
+  common=$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["common_test_scale"])' "$data/split-report.json")
+fi
 device=${DEVICE:-cuda}
 detector="${DETECTOR_CHECKPOINT:-$output/detector/best.pt}"
 if [[ -n "${DETECTOR_CHECKPOINT:-}" && ( "$stage" == all || "$stage" == detector ) ]]; then

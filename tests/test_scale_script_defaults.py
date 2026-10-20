@@ -72,7 +72,7 @@ def test_resume_launcher_fresh_resume_and_preserved_output(tmp_path):
         assert (out/'last.pt').read_text()=='checkpoint'
 
 
-def run_script(tmp_path, overrides):
+def run_script(tmp_path, overrides, missing_input=None):
     scripts=tmp_path/'scripts';scripts.mkdir()
     source=Path(__file__).resolve().parents[1]/'scripts/run_webui_scale.sh'
     shutil.copyfile(source,scripts/source.name)
@@ -88,15 +88,41 @@ else:
 ''')
     stub.chmod(0o755)
     data=tmp_path/'data';(data/'7000').mkdir(parents=True)
-    (data/'7000/coverage.json').write_text('{}')
+    if overrides.get('STAGE') == 'policy':
+        css=data/'7000/css';css.mkdir()
+        for name in ('policy-train.jsonl','policy-val.jsonl','pages-train.jsonl'):
+            if name != missing_input:
+                (css/name).write_text('{}\n')
+    else:
+        (data/'7000/coverage.json').write_text('{}')
     env={k:v for k,v in os.environ.items() if k not in DEFAULTS}
     env.update(PATH=str(binary)+os.pathsep+env['PATH'],TEST_LOG=str(tmp_path/'calls.jsonl'),
                TEST_ENV_KEYS=json.dumps(list(DEFAULTS)))
     env.update(overrides)
     result=subprocess.run(['bash',str(scripts/source.name),'7000',str(data),str(tmp_path/'runs')],
                           env=env,capture_output=True,text=True)
+    if missing_input:
+        assert result.returncode==2
+        assert f'Missing policy training input: {data}/7000/css/{missing_input}' in result.stderr
+        assert not (tmp_path/'calls.jsonl').exists()
+        return []
     assert result.returncode==0,result.stderr
     return [json.loads(line) for line in (tmp_path/'calls.jsonl').read_text().splitlines()]
+
+
+def test_screenshot_policy_without_coverage_or_detector(tmp_path):
+    calls=run_script(tmp_path,dict(STAGE='policy',POLICY_MODES='screenshot',
+                                 ONLINE_WORKERS='4',ONLINE_PREFETCH='8'))
+    assert len(calls)==1 and calls[0]['args'][0]=='policy-fixture'
+    assert calls[0]['env']['ONLINE_WORKERS']=='4'
+    assert calls[0]['env']['ONLINE_PREFETCH']=='8'
+    assert calls[0]['args'][-1]==str(tmp_path/'runs/7000/tuide-s-screenshot')
+    assert not (tmp_path/'data/7000/coverage.json').exists()
+
+
+def test_policy_missing_manifest_fails_without_regeneration(tmp_path):
+    run_script(tmp_path,dict(STAGE='policy',POLICY_MODES='screenshot'),
+               missing_input='pages-train.jsonl')
 
 
 def test_shared_defaults_reach_all_stages(tmp_path):
