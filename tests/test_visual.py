@@ -48,7 +48,7 @@ def fixture_tree():
 
 
 @pytest.mark.browser
-def test_visual_text_boxes_separate_owner_and_refresh_after_edit():
+def test_visual_owner_boxes_refresh_after_edit():
     from framediff.html_bridge import HtmlBrowser
     from framediff.plans import dom_tree
     from framediff.visual import annotate
@@ -61,7 +61,8 @@ def test_visual_text_boxes_separate_owner_and_refresh_after_edit():
             tree,boxes,_=dom_tree(dom);annotate(browser,tree,visual_boxes=True)
             return tree,boxes,elements(tree,boxes,[600,400]),browser.page.screenshot()
         wide,wb,wi,wp=measure('600px');tight,tb,ti,tp=measure('max-content')
-        assert wp==tp and wi==ti
+        assert wp==tp and wi!=ti
+        assert wi[0]['box'][2]-wi[0]['box'][0]==600
         owner=wi[0]['owner_id']
         assert wb[owner][2]==600 and tb[owner][2]<60
         browser.page.eval_on_selector(f'[data-fd-id="{owner}"]','e=>e.style.marginLeft="80px"')
@@ -97,7 +98,7 @@ def test_text_lines_nested_owners_clipping_and_transparency():
     with HtmlBrowser() as browser:
         dom=browser.snapshot(html,[600,400]);tree,boxes,_=dom_tree(dom);annotate(browser,tree,visual_boxes=True)
         items=elements(tree,boxes,[600,400]);owners={n['name']:n['id'] for n in dom['nodes']}
-        assert sum(e['owner_id']==owners['alpha beta gamma delta child'] for e in items)>=2
+        assert sum(e['owner_id']==owners['alpha beta gamma delta child'] for e in items)==1
         assert sum(e['owner_id']==owners['child'] for e in items)==1
         assert not any(e['owner_id']==owners['invisible'] for e in items)
         assert all(e['box'][3]-e['box'][1]<=10 for e in items if e['owner_id']==owners['clipped'])
@@ -153,9 +154,38 @@ def test_full_detector_labels_background_body_contents_and_unsupported_audit():
     with HtmlBrowser() as browser:
         browser.snapshot(html,[600,400],max_nodes=4)
         result=detector_labels(browser)
-        assert sum(e['label']==1 for e in result['elements'])==4
-        assert sum(e['label']==2 for e in result['elements'])==1
+        # No owner rectangle for display:contents/zero-height, no body label.
+        assert sum(e['label']==1 for e in result['elements'])==1
+        assert sum(e['label']==2 for e in result['elements'])==0
         assert result['label_audit']['pseudo_content_owners']==1
+
+
+@pytest.mark.browser
+def test_detector_and_policy_share_owner_rectangle_definition():
+    from framediff.html_bridge import HtmlBrowser
+    from framediff.plans import dom_tree
+    from framediff.visual import annotate,detector_labels
+    from framediff.explicit_html import feedback_metadata
+    html='''<body style="margin:0">
+      <div style="width:500px;height:100px">Hello</div>
+      <button>Go</button><div style="width:60px;height:20px;background:red"></div>
+      <div style="width:100px;height:20px;overflow:hidden"><p style="width:200px;margin:0">Clipped</p></div>
+      <div style="opacity:0">Hidden</div></body>'''
+    with HtmlBrowser() as browser:
+        dom=browser.snapshot(html,[600,400],max_nodes=100)
+        tree,boxes,_=dom_tree(dom);annotate(browser,tree,visual_boxes=True)
+        feedback=feedback_metadata(browser,tree)
+        actual=elements(tree,boxes,[600,400],feedback['current_clip_boxes'])
+        expected=detector_labels(browser)['elements']
+        canonical=lambda items:sorted((e['label'],tuple(e['box'])) for e in items)
+        assert canonical(actual)==canonical(expected)
+        assert (1,(0,0,500,100)) in canonical(actual)
+
+
+def test_text_fragment_labels_cannot_mix_with_owner_boxes():
+    from framediff.visual import label_contract
+    with pytest.raises(ValueError,match='Unknown visual label'):
+        label_contract([{'visual_geometry_contract':'visible-text-fragments-owner-v1'}])
 
 
 def test_validation_sampling_covers_pages_and_is_repeatable():

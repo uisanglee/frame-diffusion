@@ -16,9 +16,9 @@ from .preparation_workers import page_map, write_json, write_jsonl
 from .visual import VISUAL_GEOMETRY_CONTRACT, annotate, abstract_image
 from .web_experiment import digest, guard_run
 
-# Semantic cache revision, seeded with the previous module digest for compatibility.
+# Semantic cache revision: text-fragment caches must not be reused as owner boxes.
 # Bump when supervision/eligibility semantics change, not for logging-only edits.
-CACHE_REVISION='3ff4239251337a522245bbad6c9344cd94acf5e07aa753c6846e8290a965d485'
+CACHE_REVISION='policy-dom-owner-box-v1'
 
 
 def failure_reason(exc):

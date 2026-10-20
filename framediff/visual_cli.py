@@ -15,7 +15,7 @@ def add_parsers(sub):
     p.add_argument('--observation-size',type=int,default=384)
     p.add_argument('--limit',type=int,default=0)
     p=sub.add_parser('visual-tree-normalize',help='Selectively freeze safe sizes while preserving original CSS and DOM')
-    p.add_argument('--latest-visual-labels',action='store_true',help='Remeasure cached HTML using current text-fragment labels; use a fresh output directory')
+    p.add_argument('--latest-visual-labels',action='store_true',help='Remeasure cached HTML using shared DOM owner-box labels; use a fresh output directory')
     p.add_argument('--workers',type=int,default=1,help='Independent browser page workers; may change on resume')
     p.add_argument('--rendered',required=True);p.add_argument('--out',required=True)
     p.add_argument('--resume',action='store_true');p.add_argument('--seed',type=int,default=42)

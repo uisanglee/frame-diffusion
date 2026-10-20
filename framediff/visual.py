@@ -19,10 +19,10 @@ from .model import encode, collate, Block, ModelConfig
 CONTRACT = 'visible-ui-v1'
 ACTION_CONTRACT = 'single-css-declaration-normalized-v3-no-padding-gap'
 CLASSES = ('background', 'text', 'image', 'control', 'painted-region')
-VISUAL_GEOMETRY_CONTRACT = 'visible-text-fragments-owner-v1'
-DETECTOR_LABEL_CONTRACT = 'full-visible-dom-v1'
-# CSS owner boxes remain untouched. Ranges measure only this owner's direct
-# text, avoiding duplicate supervision for text belonging to child owners.
+VISUAL_GEOMETRY_CONTRACT = 'visible-dom-owner-box-v1'
+DETECTOR_LABEL_CONTRACT = 'full-visible-dom-owner-box-v1'
+# Both detector labels and policy observations use clipped DOM owner rectangles.
+# Keep the text_boxes transport key for cached metadata consumers, not text ranges.
 VISUAL_GEOMETRY_JS = r'''(e, allowTextOverflow=false) => {
   let l=0,t=0,r=innerWidth,b=innerHeight;
   for(let p=e;p;p=p.parentElement){
@@ -37,23 +37,25 @@ VISUAL_GEOMETRY_JS = r'''(e, allowTextOverflow=false) => {
   const clip=q=>[Math.max(l,q.left),Math.max(t,q.top),Math.min(r,q.right),Math.min(b,q.bottom)];
   const valid=q=>q[2]>q[0]&&q[3]>q[1];
   const own=e.getBoundingClientRect(),visible=valid(clip(own));
-  if(!visible&&!allowTextOverflow)return {visible:false,text_boxes:[]};
+  if(!visible)return {visible:false,text_boxes:[]};
   const style=getComputedStyle(e),color=style.webkitTextFillColor||style.color;
   const transparent=color==='transparent'||/rgba\([^)]*,\s*0\s*\)$/.test(color);
-  const text_boxes=[];
-  if(['hidden','clip','scroll','auto'].includes(style.overflowX)){l=Math.max(l,own.left+e.clientLeft);r=Math.min(r,own.left+e.clientLeft+e.clientWidth);}
-  if(['hidden','clip','scroll','auto'].includes(style.overflowY)){t=Math.max(t,own.top+e.clientTop);b=Math.min(b,own.top+e.clientTop+e.clientHeight);}
-  if(!transparent)for(const node of e.childNodes){
-    if(node.nodeType!==3||!node.textContent.trim())continue;
-    const text=node.textContent,range=document.createRange();
-    range.setStart(node,text.search(/\S/));range.setEnd(node,text.trimEnd().length);
-    for(const rect of range.getClientRects()){
-      const q=clip(rect);if(valid(q))text_boxes.push(q);
-    }
-  }
-  return {visible:visible||(allowTextOverflow&&text_boxes.length>0),text_boxes};
+  const ownText=[...e.childNodes].some(n=>n.nodeType===3&&n.textContent.trim());
+  return {visible,text_boxes:!transparent&&ownText?[clip(own)]:[]};
 }'''
 
+VISUAL_CLASS_JS = r'''(e,g) => {
+  const primitive='button,input,textarea,select,img,svg,canvas,video';
+  if(!g.visible||e.matches('body,html')||e.parentElement?.closest(primitive))return 0;
+  if(e.matches('button,input,textarea,select'))return 3;
+  if(e.matches('img,svg,canvas,video'))return 2;
+  if(g.text_boxes.length)return 1;
+  const s=getComputedStyle(e);
+  if(s.backgroundImage!=='none')return 2;
+  const painted=s.backgroundColor!=='transparent'&&s.backgroundColor!=='rgba(0, 0, 0, 0)';
+  const border=['Top','Bottom','Left','Right'].some(k=>parseFloat(s['border'+k+'Width'])>0&&s['border'+k+'Style']!=='none'&&s['border'+k+'Color']!=='rgba(0, 0, 0, 0)');
+  return painted||border?4:0;
+}'''
 
 def visual_geometry(browser):
     return browser.page.evaluate('''() => {
@@ -69,7 +71,7 @@ def detector_labels(browser):
     unsupported content rather than declaring unmatched predictions correct.
     """
     return browser.page.evaluate('''() => {
-      const measure=('''+VISUAL_GEOMETRY_JS+'''),items=[];
+      const measure=('''+VISUAL_GEOMETRY_JS+'''),classify=('''+VISUAL_CLASS_JS+'''),items=[];
       const audit={contract:''' + repr(DETECTOR_LABEL_CONTRACT) + ''',visible_owners:0,
         untagged_owners:0,pseudo_content_owners:0,embedded_documents:0,canvas_elements:0};
       for(const e of document.querySelectorAll('body,body *')){
@@ -89,14 +91,7 @@ def detector_labels(browser):
         if(['::before','::after'].some(p=>{const a=getComputedStyle(e,p);return !['none','normal','""'].includes(a.content)&&a.display!=='none'&&a.visibility==='visible'&&Number(a.opacity)>0;}))audit.pseudo_content_owners++;
         if(e.matches('iframe,object,embed'))audit.embedded_documents++;
         if(e.matches('canvas'))audit.canvas_elements++;
-        if(e.matches('button,input,textarea,select')){add(3);continue;}
-        if(e.matches('img,svg,canvas,video')){add(2);continue;}
-        // Background artwork remains visible even when the element has text.
-        if(!root&&s.backgroundImage!=='none')add(2);
-        if(g.text_boxes.length){for(const rect of g.text_boxes)add(1,rect);continue;}
-        const painted=s.backgroundColor!=='transparent'&&s.backgroundColor!=='rgba(0, 0, 0, 0)';
-        const border=['Top','Bottom','Left','Right'].some(k=>parseFloat(s['border'+k+'Width'])>0&&s['border'+k+'Style']!=='none'&&s['border'+k+'Color']!=='rgba(0, 0, 0, 0)');
-        if(!root&&s.backgroundImage==='none'&&(painted||border))add(4);
+        const label=classify(e,g);if(label)add(label);
       }
       audit.labels=items.length;
       return {elements:items,label_audit:audit};
@@ -221,20 +216,12 @@ def annotate(browser, tree, visual_boxes=False):
     A control's descendants are suppressed to avoid double-counting its text.
     """
     if visual_boxes:tree['visual_geometry_contract']=VISUAL_GEOMETRY_CONTRACT
-    labels = browser.page.evaluate('''() => Object.fromEntries(
+    labels = browser.page.evaluate('''() => {
+      const measure=('''+VISUAL_GEOMETRY_JS+'''),classify=('''+VISUAL_CLASS_JS+''');
+      return Object.fromEntries(
       [...document.querySelectorAll('[data-fd-id]')].map(e=>{
-        const id=e.getAttribute('data-fd-id'), s=getComputedStyle(e);
-        const primitive='button,input,textarea,select,img,svg,canvas,video';
-        if(e.parentElement?.closest(primitive))return [id,0];
-        if(e.matches('button,input,textarea,select'))return [id,3];
-        if(e.matches('img,svg,canvas,video'))return [id,2];
-        const ownText=[...e.childNodes].some(n=>n.nodeType===3 && n.textContent.trim());
-        if(ownText && !e.matches('body,html'))return [id,1];
-        const color=s.backgroundColor;
-        const painted=color!=='transparent' && color!=='rgba(0, 0, 0, 0)';
-        const border=['Top','Bottom','Left','Right'].some(k=>parseFloat(s['border'+k+'Width'])>0 && s['border'+k+'Style']!=='none');
-        return [id,!e.matches('body,html')&&(painted||border)?4:0];
-      }))''')
+        return [e.getAttribute('data-fd-id'),classify(e,measure(e))];
+      }));}''')
     for node in tree['nodes']: node['visual_class'] = labels.get(node['id'], 0)
     refresh_visual_geometry(browser,tree)
     return tree
