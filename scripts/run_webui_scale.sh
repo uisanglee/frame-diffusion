@@ -12,7 +12,11 @@ data=$2
 runs=$3
 # Shared experiment defaults; caller-provided environment values take precedence.
 # Export these so the nested policy scripts receive the same configuration.
-export STAGE="${STAGE:-all}"
+export STAGE="${STAGE:-policy}"
+export DEVICE="${DEVICE:-cuda}"
+export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
+export TUIDE_SAVE_DIAGNOSTICS="${TUIDE_SAVE_DIAGNOSTICS:-0}"
+export TUIDE_SHARED_CACHE="${TUIDE_SHARED_CACHE:-$repo_root/data/webui-shared-cache}"
 export POLICY_SCALE="${POLICY_SCALE:-s}"
 export POLICY_MODES="${POLICY_MODES:-abstract screenshot}"
 export BATCH_SIZE="${BATCH_SIZE:-2}"
@@ -29,6 +33,7 @@ export EARLY_STOP_PATIENCE="${EARLY_STOP_PATIENCE:-10}"
 export EARLY_STOP_MIN_DELTA="${EARLY_STOP_MIN_DELTA:-0}"
 export ONLINE_WORKERS="${ONLINE_WORKERS:-2}"
 export ONLINE_PREFETCH="${ONLINE_PREFETCH:-4}"
+export ONLINE_TIMEOUT="${ONLINE_TIMEOUT:-900}"
 export PARENT_FIRST="${PARENT_FIRST:-0}"
 export SEED="${SEED:-42}"
 export REPAIR_STEPS="${REPAIR_STEPS:-20}"
@@ -41,7 +46,7 @@ base="$data/$size"
 output="$runs/$size"
 [[ -s "$base/coverage.json" ]] || { echo "Complete prepare_webui_scales.sh first: $base/coverage.json missing" >&2; exit 2; }
 common=$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["common_test_scale"])' "$data/split-report.json")
-stage=${STAGE:-all}
+stage=$STAGE
 case "$stage" in all|detector|policy|evaluate) ;; *) echo 'STAGE must be all, detector, policy, or evaluate' >&2; exit 2;; esac
 device=${DEVICE:-cuda}
 detector="${DETECTOR_CHECKPOINT:-$output/detector/best.pt}"
