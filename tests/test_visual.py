@@ -135,8 +135,44 @@ def test_detector_labels_are_not_limited_by_policy_owner_budget():
         tree,boxes,_=dom_tree(dom);annotate(browser,tree,visual_boxes=True)
         limited=elements(tree,boxes,[600,500])
         prediction=[next(e for e in result['elements'] if e['owner_id'] is None)]
-        assert not compare(prediction,limited)['matches']
+        assert compare(prediction,limited)['matches']
+        assert limited==result['elements']
+        assert len(tree['nodes'])==len(dom['nodes'])+1  # Synthetic viewport only.
         assert compare(prediction,result['elements'])['matches']
+
+
+@pytest.mark.browser
+def test_unselected_parent_text_in_full_observation_and_refresh():
+    import copy
+    from framediff.html_bridge import HtmlBrowser
+    from framediff.plans import dom_tree
+    from framediff.visual import annotate,detector_labels,visual_geometry,semantic_masks
+    from framediff.tree_online import abstraction
+    from framediff.explicit_html import target_abstraction
+    html='<body style="margin:0"><h1>Coverage for <b>file.py</b></h1>'
+    html+='<h2>41 statements <span>33 run</span><span>8 missing</span></h2>'
+    html+='<p>toggle line displays <span>r</span></p>'
+    html+=''.join(f'<span>Leaf {i}</span>' for i in range(20))+'</body>'
+    with HtmlBrowser() as browser:
+        dom=browser.snapshot(html,[1000,600],max_nodes=4,visual_geometry=False)
+        assert browser.page.locator('h2').get_attribute('data-fd-id') is None
+        tree,boxes,_=dom_tree(dom);annotate(browser,tree,visual_boxes=True)
+        identities=[(n['id'],n.get('parent')) for n in tree['nodes']]
+        items=elements(tree,boxes,[1000,600])
+        assert len(items)>len(tree['nodes'])
+        assert items==detector_labels(browser)['elements']
+        h2=browser.page.locator('h2').bounding_box()
+        expected=[h2['x'],h2['y'],h2['x']+h2['width'],h2['y']+h2['height']]
+        assert any(e['owner_id'] is None and e['box']==expected for e in items)
+        before=copy.deepcopy(items)
+        geometry=visual_geometry(browser)
+        # Preservation checks use their own captured geometry, not stale tree data.
+        assert (target_abstraction([],set(),[1000,600],64,tree,geometry)
+                ==semantic_masks(items,[1000,600],64)).all()
+        browser.page.locator('h2').evaluate('e=>e.style.width="400px"')
+        _,_,after=abstraction(browser,tree,[1000,600],64)
+        assert after!=before and after==detector_labels(browser)['elements']
+        assert identities==[(n['id'],n.get('parent')) for n in tree['nodes']]
 
 
 @pytest.mark.browser

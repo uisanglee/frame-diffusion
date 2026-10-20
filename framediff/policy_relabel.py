@@ -18,7 +18,7 @@ from .web_experiment import digest, guard_run
 
 # Semantic cache revision: text-fragment caches must not be reused as owner boxes.
 # Bump when supervision/eligibility semantics change, not for logging-only edits.
-CACHE_REVISION='policy-dom-owner-box-v1'
+CACHE_REVISION='policy-full-dom-owner-box-v2'
 
 
 def failure_reason(exc):

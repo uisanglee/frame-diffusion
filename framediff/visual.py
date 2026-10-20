@@ -19,7 +19,7 @@ from .model import encode, collate, Block, ModelConfig
 CONTRACT = 'visible-ui-v1'
 ACTION_CONTRACT = 'single-css-declaration-normalized-v3-no-padding-gap'
 CLASSES = ('background', 'text', 'image', 'control', 'painted-region')
-VISUAL_GEOMETRY_CONTRACT = 'visible-dom-owner-box-v1'
+VISUAL_GEOMETRY_CONTRACT = 'full-visible-dom-owner-box-v2'
 DETECTOR_LABEL_CONTRACT = 'full-visible-dom-owner-box-v1'
 # Both detector labels and policy observations use clipped DOM owner rectangles.
 # Keep the text_boxes transport key for cached metadata consumers, not text ranges.
@@ -94,10 +94,13 @@ def validate_legacy_dataset(root, size):
             counts[str(path)]=count
     return counts
 def visual_geometry(browser):
-    return browser.page.evaluate('''() => {
+    geometry=browser.page.evaluate('''() => {
       const measure=('''+VISUAL_GEOMETRY_JS+''');
       return Object.fromEntries([...document.querySelectorAll('[data-fd-id]')].map(e=>[e.dataset.fdId,measure(e)]));
     }''')
+    # Observations cover the complete visible DOM; editable IDs remain bounded.
+    geometry['_full_visual_elements']=detector_labels(browser)['elements']
+    return geometry
 
 
 def detector_labels(browser):
@@ -137,6 +140,7 @@ def detector_labels(browser):
 def refresh_visual_geometry(browser, tree):
     if tree.get('visual_geometry_contract') != VISUAL_GEOMETRY_CONTRACT:return
     geometry=visual_geometry(browser)
+    tree['full_visual_elements']=geometry['_full_visual_elements']
     for node in tree['nodes']:
         info=geometry.get(node['id'],{'visible':False,'text_boxes':[]})
         node['visual_visible']=info['visible'];node['visual_boxes']=info['text_boxes']
@@ -274,19 +278,15 @@ def annotate(browser, tree, visual_boxes=False):
 
 def elements(tree, boxes, viewport, clip_boxes=None):
     w, h = viewport
+    if tree.get('visual_geometry_contract')==VISUAL_GEOMETRY_CONTRACT:
+        if 'full_visual_elements' not in tree:
+            raise ValueError('Missing full DOM observation; remeasure HTML before use')
+        # Already viewport/overflow clipped by the same collector as detector GT.
+        return [dict(item,box=list(item['box'])) for item in tree['full_visual_elements']]
     result = []
     for node in tree['nodes']:
         label = node.get('visual_class', 0)
         if not label: continue
-        if tree.get('visual_geometry_contract') == VISUAL_GEOMETRY_CONTRACT:
-            if 'visual_visible' not in node:raise ValueError('Missing measured visual geometry')
-            if not node['visual_visible']:continue
-            if label==1:
-                for bx in node['visual_boxes']:
-                    x1,y1,x2,y2=max(0.,bx[0]),max(0.,bx[1]),min(w,bx[2]),min(h,bx[3])
-                    if x2>x1 and y2>y1:
-                        result.append({'box':[x1,y1,x2,y2],'label':label,'owner_id':node['id']})
-                continue
         x, y, bw, bh = boxes[node['id']]
         x1, y1, x2, y2 = max(0., x), max(0., y), min(w, x+bw), min(h, y+bh)
         if clip_boxes is not None and clip_boxes.get(node['id']) is not None:

@@ -141,6 +141,8 @@ def target_abstraction(rows, target_ids, viewport, size, tree=None, geometry=Non
     if geometry is not None:
         tree={**tree,'nodes':[{**n,'visual_visible':geometry.get(n['id'],{}).get('visible',False),
                               'visual_boxes':geometry.get(n['id'],{}).get('text_boxes',[])} for n in tree['nodes']]}
+        if '_full_visual_elements' in geometry:
+            tree['full_visual_elements']=geometry['_full_visual_elements']
     return semantic_masks(elements(tree,boxes,viewport,clips),viewport,size)
 
 
