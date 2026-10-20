@@ -14,6 +14,29 @@ from framediff.policy_relabel import refresh_row, relabel
 from framediff.ir import write_jsonl, read_jsonl
 
 
+def test_render_failure_audit_preserves_inputs(tmp_path):
+    from PIL import Image
+    spec=importlib.util.spec_from_file_location('render_audit',Path(__file__).resolve().parents[1]/'scripts/audit_policy_render.py')
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    row=fixture(tmp_path)
+    with Image.open(row['target_image']) as image:
+        image=image.convert('RGB')
+        image.putpixel((0,0),(1,2,3))
+        image.save(row['target_image'])
+    before={key:Path(row[key]).read_bytes() for key in
+            ('target_html','current_html','target_image','current_image')}
+    out=tmp_path/'audit';out.mkdir()
+    report=module.audit(row,out)
+    assert not report['renders']['target']['pixels_equal']
+    assert report['renders']['current']['pixels_equal']
+    assert report['renders']['target']['new_elements']
+    assert not report['renders']['target']['stored_owner_boxes_available']
+    assert (out/'target-comparison.png').is_file()
+    assert (out/'current-diff-x8.png').is_file()
+    assert all(Path(row[key]).read_bytes()==data for key,data in before.items())
+    assert module.pixel_metrics(Image.new('RGB',(1,1)),Image.new('RGB',(2,1)))['size_equal'] is False
+
+
 def test_detector_relabel_reuse_images_only(tmp_path):
     spec=importlib.util.spec_from_file_location('detector_relabel',Path(__file__).resolve().parents[1]/'scripts/relabel_detector_data.py')
     module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
