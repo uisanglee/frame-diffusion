@@ -22,15 +22,41 @@ def test_text_raster_preservation_guard():
     b=a.copy();b.putpixel((5,7),(80,80,80))
     items=[{'label':1,'box':[0,0,20,20]}]
     row={'target_elements':items}
-    check=lambda image,**kw:render_preservation(a,image,row,'target',{},kw.get('items',items),[[4,4,5,10]])
-    assert check(b)['criterion']=='stored-geometry-and-local-text-raster'
+    check=lambda image,**kw:render_preservation(a,image,row,'target',{},kw.get('items',items))
+    assert check(b)['criterion']=='stored-geometry-and-visible-edges'
     outside=b.copy();outside.putpixel((25,15),(0,0,0))
-    with pytest.raises(ValueError,match='outside text'):check(outside)
+    with pytest.raises(ValueError,match='visible structure changed'):check(outside)
     with pytest.raises(ValueError,match='geometry changed'):
         check(b,items=[{'label':1,'box':[1,0,21,20]}])
-    with pytest.raises(ValueError,match='nonlocal text'):
+    with pytest.raises(ValueError,match='visible structure changed'):
         check(Image.new('RGB',a.size,'white'))
     assert check(a)['pixels_equal']
+    recolored=Image.new('RGB',a.size,'black')
+    ImageDraw.Draw(recolored).rectangle((5,5,7,12),fill='yellow')
+    assert check(recolored)['criterion']=='stored-geometry-and-visible-edges'
+    moved=Image.new('RGB',a.size,'white')
+    ImageDraw.Draw(moved).rectangle((12,5,14,12),fill='black')
+    with pytest.raises(ValueError,match='visible structure changed'):check(moved)
+
+
+def test_color_changes_and_raster_noise_require_geometry():
+    from PIL import Image
+    from framediff.policy_relabel import render_preservation
+    saved=Image.new('RGB',(1170,2532),'white')
+    measured=saved.copy()
+    measured.putpixel((10,10),(253,255,255))
+    measured.putpixel((20,20),(255,254,255))
+    boxes={'node':[0,0,100,100]}
+    row={'current_boxes':boxes}
+    def check(image, source=row, geometry=boxes):
+        return render_preservation(saved,image,source,'current',geometry,[])
+    result=check(measured)
+    assert result['criterion']=='stored-geometry-and-visible-edges'
+    with pytest.raises(ValueError,match='owner geometry changed'):
+        check(measured,geometry={'node':[1,0,100,100]})
+    with pytest.raises(ValueError,match='no stored geometry'):check(measured,source={})
+    assert check(Image.new('RGB',saved.size,'blue'))['missing_edges']==0
+    with pytest.raises(ValueError,match='size'):check(Image.new('RGB',(10,10)))
 
 
 def test_audit_overlay_uses_box_field():

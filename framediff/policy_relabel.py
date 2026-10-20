@@ -21,10 +21,13 @@ from .web_experiment import digest, guard_run
 CACHE_REVISION='policy-full-dom-owner-box-v2'
 
 
-def render_preservation(saved, measured, row, prefix, boxes, items, text_rects):
-    """Conservative fallback: exact stored geometry and text-local raster changes."""
+def render_preservation(saved, measured, row, prefix, boxes, items):
+    """Compare geometry and visible edge locations, not absolute RGB colours.
+
+    This is a structural heuristic, not semantic image/content equivalence.
+    """
     import numpy as np
-    from PIL import ImageDraw, ImageFilter
+    from PIL import ImageFilter
     if saved.size != measured.size:
         raise ValueError(f'{prefix}: saved screenshot differs from measured HTML (size)')
     a=np.asarray(saved.convert('RGB'));b=np.asarray(measured.convert('RGB'))
@@ -42,37 +45,24 @@ def render_preservation(saved, measured, row, prefix, boxes, items, text_rects):
     if owner_boxes:
         if any(k not in boxes or list(v)!=list(boxes[k]) for k,v in owner_boxes.items()):
             raise ValueError(f'{prefix}: saved screenshot differs from measured HTML (owner geometry changed)')
-    # Use text-node line rectangles, never broad CSS-owner rectangles.
-    region=Image.new('L',saved.size,0);draw=ImageDraw.Draw(region)
-    for x,y,w,h in text_rects:
-        if w>0 and h>0:draw.rectangle((x,y,x+w,y+h),fill=255)
-    allowed=np.asarray(region)>0
-    if np.any(difference & ~allowed):
-        raise ValueError(f'{prefix}: saved screenshot differs from measured HTML (outside text)')
-    # Each changed pixel must have a close colour counterpart within one pixel
-    # in BOTH directions. This rejects removed text and substantial colour changes.
-    for source,target in ((saved,measured),(measured,saved)):
-        low=np.asarray(target.convert('RGB').filter(ImageFilter.MinFilter(3)),dtype=np.int16)
-        high=np.asarray(target.convert('RGB').filter(ImageFilter.MaxFilter(3)),dtype=np.int16)
-        value=np.asarray(source.convert('RGB'),dtype=np.int16)
-        compatible=np.all((value>=low-8)&(value<=high+8),axis=2)
-        if np.any(difference & ~compatible):
-            raise ValueError(f'{prefix}: saved screenshot differs from measured HTML (nonlocal text change)')
-    return {'pixels_equal':False,'criterion':'stored-geometry-and-local-text-raster',
-            'changed_pixel_fraction':float(difference.mean())}
-
-
-def text_rectangles(browser):
-    return browser.page.evaluate("""() => {
-      const result=[], walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
-      while(walker.nextNode()){
-        const n=walker.currentNode;if(!n.textContent.trim())continue;
-        const s=getComputedStyle(n.parentElement);
-        if(s.visibility!=='visible'||s.display==='none'||Number(s.opacity)===0)continue;
-        const r=document.createRange();r.selectNodeContents(n);
-        for(const b of r.getClientRects())result.push([b.x,b.y,b.width,b.height]);
-      }return result;
-    }""")
+    def edges(image):
+        rgb=image.convert('RGB')
+        lo=np.asarray(rgb.filter(ImageFilter.MinFilter(3)),dtype=np.int16)
+        hi=np.asarray(rgb.filter(ImageFilter.MaxFilter(3)),dtype=np.int16)
+        # Within-image contrast suppresses raster noise, not between-image colour
+        # change. RGB channels retain isoluminant coloured boundaries.
+        return (hi-lo).max(axis=2)>16
+    first,second=edges(saved),edges(measured)
+    def expand(mask):
+        return np.asarray(Image.fromarray(mask.astype('uint8')*255).filter(ImageFilter.MaxFilter(3)))>0
+    missing=int((first & ~expand(second)).sum())
+    added=int((second & ~expand(first)).sum())
+    if missing or added:
+        raise ValueError(f'{prefix}: saved screenshot differs from measured HTML '
+                         f'(visible structure changed: missing_edges={missing}, added_edges={added})')
+    return {'pixels_equal':False,'criterion':'stored-geometry-and-visible-edges',
+            'changed_pixel_fraction':float(difference.mean()),
+            'missing_edges':missing,'added_edges':added}
 
 
 def failure_reason(exc):
@@ -111,8 +101,7 @@ def refresh_row(row, out, size=384, clean_only=False):
             annotate(browser,tree,visual_boxes=True)
             mask,boxes,items=abstraction(browser,tree,row['viewport'],size)
             with Image.open(io.BytesIO(png)) as measured, Image.open(row[prefix+'_image']) as saved:
-                preservation[prefix]=render_preservation(saved,measured,row,prefix,boxes,items,
-                                                        text_rectangles(browser))
+                preservation[prefix]=render_preservation(saved,measured,row,prefix,boxes,items)
             parsed=css_owners.read(browser,tree)
             if parsed['owners']!=row['css_owners']:
                 raise ValueError(f'{prefix}: CSS owners changed')
