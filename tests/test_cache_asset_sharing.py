@@ -23,6 +23,23 @@ def fixture(root,content):
     return image,record
 
 
+def test_dedup_includes_legacy_rendered_without_removing_paths(tmp_path):
+    entry=tmp_path/'lazy-train-views'/('a'*64)
+    rendered=entry/'rendered';rendered.mkdir(parents=True)
+    a=rendered/'clean.png';b=rendered/'target.png'
+    a.write_bytes(b'identical pixels');b.write_bytes(a.read_bytes())
+    result=entry/'result.json'
+    result.write_text(json.dumps({'contract':'lazy-webui-train-view-cache-v2-verified',
+        'assets':{str(a):hashlib.sha256(a.read_bytes()).hexdigest()}}))
+    original=result.read_bytes()
+    tool=module()
+    report=tool.run([tmp_path/'lazy-train-views'],tmp_path/'blobs',False,True)
+    assert not report['errors'] and report['estimated_reclaimable_bytes']==len(a.read_bytes())
+    tool.run([tmp_path/'lazy-train-views'],tmp_path/'blobs',True,True)
+    assert a.is_file() and b.is_file() and os.path.samefile(a,b)
+    assert result.read_bytes()==original
+
+
 def test_dedup_preserves_records_bytes_and_reuses_storage(tmp_path):
     a,ra=fixture(tmp_path/'normalized-pages',b'same')
     b,rb=fixture(tmp_path/'.online-target-cache',b'same')

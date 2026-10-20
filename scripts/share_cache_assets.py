@@ -1,7 +1,9 @@
 """Audit or hardlink byte-identical assets of completed TUIDE caches.
 
-Stop all writers before --apply. Existing paths/JSON are preserved. Only files
-listed with verified SHA256 in successful cache records are eligible. Committed
+Stop all writers before --apply. Existing paths/JSON are preserved. By default,
+only files listed with verified SHA256 in successful cache records are eligible.
+--include-lazy-intermediates also hashes rendered assets in completed lazy caches.
+Committed
 assets must remain immutable; regenerate by removing the cache entry, never by
 overwriting its HTML/images in place. Never delete cache roots after this tool.
 """
@@ -53,7 +55,7 @@ def committed_asset(record, path):
     return path
 
 
-def run(roots, store, apply=False):
+def run(roots, store, apply=False, include_lazy_intermediates=False):
     groups=defaultdict(dict);errors=[];records=0;relocated=[]
     for root in roots:
         for name in ('record.json','result.json'):
@@ -77,6 +79,18 @@ def run(roots, store, apply=False):
                         if path!=original:
                             relocated.append({'record':str(record),'from':str(original),'to':str(path)})
                         groups[sha][str(path)]=path.stat()
+                    if (include_lazy_intermediates and record.name=='result.json'
+                        and value.get('contract') in CACHE_CONTRACTS
+                        and record.parent.parent.name=='lazy-train-views'
+                        and re.fullmatch(r'[0-9a-f]{64}',record.parent.name)):
+                        # Older successful entries retain unindexed rendering
+                        # intermediates. Link equal bytes, preserving every path.
+                        for path in (record.parent/'rendered').rglob('*'):
+                            if path.suffix.lower() not in ('.html','.png','.jpg','.jpeg','.webp'):continue
+                            if path.is_symlink() or not path.resolve().is_relative_to(record.parent.resolve()):
+                                raise ValueError(f'Unsafe intermediate asset: {path}')
+                            if path.is_file():groups[digest(path)][str(path)]=path.stat()
+                    if records%100==0:print({'cache_records_scanned':records},flush=True)
                 except (OSError,ValueError,TypeError) as exc:
                     errors.append({'record':str(record),'error':str(exc)})
     report={'records':records,'errors':errors,'resolved_staging_paths':relocated,
@@ -261,15 +275,19 @@ def main():
     parser.add_argument('--report',required=True)
     parser.add_argument('--apply',action='store_true')
     parser.add_argument('--cleanup-diagnostics',action='store_true')
+    parser.add_argument('--include-lazy-intermediates',action='store_true',
+                        help='Also hardlink identical rendered assets in completed lazy caches; preserve all paths')
     parser.add_argument('--min-age-hours',type=float,default=24)
     parser.add_argument('--log-every',type=int,default=5000)
     args=parser.parse_args()
     if args.min_age_hours<0:parser.error('min-age-hours must be nonnegative')
     if args.log_every<1:parser.error('log-every must be positive')
+    if args.cleanup_diagnostics and args.include_lazy_intermediates:
+        parser.error('Use include-lazy-intermediates with deduplication, not diagnostic cleanup')
     roots=[Path(p).resolve() for p in args.roots]
     if any(not p.is_dir() for p in roots):parser.error('All roots must be existing cache directories')
     report=(diagnostic_cleanup(roots,args.apply,args.min_age_hours,Path(args.report),args.log_every) if args.cleanup_diagnostics
-            else run(roots,Path(args.store).resolve(),args.apply))
+            else run(roots,Path(args.store).resolve(),args.apply,args.include_lazy_intermediates))
     target=Path(args.report);target.parent.mkdir(parents=True,exist_ok=True)
     target.write_text(json.dumps(report,ensure_ascii=False,indent=2))
     print(json.dumps({k:v for k,v in report.items() if k not in ('duplicate_groups','resolved_staging_paths','candidates')},ensure_ascii=False))

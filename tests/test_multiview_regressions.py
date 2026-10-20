@@ -88,6 +88,20 @@ def test_lazy_cache_invalidates_when_preparation_changes(tmp_path,monkeypatch):
     assert cache._key(row,True)!=before
 
 
+def test_compact_unpublished_cache_preserves_inputs_and_links_duplicates(tmp_path):
+    from framediff.lazy_webui import compact_new_cache
+    work=tmp_path/'stage';work.mkdir()
+    paths={name:work/name for name in ('target.png','current.png','current.html','unused.png','report.json')}
+    for name,path in paths.items():path.write_text('pixels' if name.endswith('.png') else name)
+    result={'target_image':str(paths['target.png']),'current_image':str(paths['current.png']),
+            'current_html':str(paths['current.html'])}
+    compact_new_cache(work,result)
+    assert not paths['unused.png'].exists()
+    assert all(Path(path).is_file() for path in result.values())
+    assert paths['report.json'].is_file()
+    assert os.path.samefile(paths['target.png'],paths['current.png'])
+
+
 def test_stream_only_changes_do_not_invalidate_preparation(monkeypatch):
     from framediff.lazy_webui import preparation_fingerprint
     original=Path.read_text
@@ -191,6 +205,10 @@ def test_lazy_policy_disk_cache_survives_process_cache(tmp_path,monkeypatch):
     finally:first.close()
     assert prepared['visible_candidates'] and prepared['target_declaration_state']
     assert Path(prepared['target_html']).is_file() and Path(prepared['target_image']).is_file()
+    entry=root/first._key(row,True)
+    assert not (entry/'rendered').exists()
+    assert list(entry.rglob('report.json'))
+    assert Path(prepared['current_html']).is_file() and Path(prepared['current_image']).is_file()
     import framediff.visual_data as visual_data
     monkeypatch.setattr(visual_data,'_render_page',lambda *a,**k: (_ for _ in ()).throw(
         AssertionError('persistent lazy cache rerendered the page')))
@@ -225,9 +243,10 @@ def test_shared_cache_imports_existing_without_rendering(tmp_path,monkeypatch):
 
 
 @pytest.mark.browser
-def test_lazy_detector_and_policy_materialization(tmp_path,capsys):
+def test_lazy_detector_and_policy_materialization(tmp_path,capsys,monkeypatch):
     from framediff.lazy_webui import TrainViewCache,portable_images
     from framediff.tree_online import target_pool,OnlineSampler
+    monkeypatch.setenv('TUIDE_VERBOSE_INSPECTION','1')
     row=lazy_descriptor(tmp_path)
     cache=TrainViewCache(capacity=1)
     try:

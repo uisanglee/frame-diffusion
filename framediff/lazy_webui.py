@@ -22,6 +22,42 @@ CONTRACT = 'lazy-webui-train-view-v1'
 DISK_CACHE_CONTRACT = 'lazy-webui-train-view-cache-v2-verified'
 
 
+def compact_new_cache(work, result):
+    """Trim only unpublished generated work; never prune an existing cache."""
+    work=work.resolve()
+    keep=set()
+    def references(value):
+        if isinstance(value,dict):
+            for item in value.values():references(item)
+        elif isinstance(value,list):
+            for item in value:references(item)
+        elif isinstance(value,str) and value.startswith('/') and len(value)<4096 and '\x00' not in value:
+            path=Path(value).resolve()
+            if path.is_relative_to(work) and path.is_file():keep.add(path)
+    references(result)
+    # Detector relabeling uses image.with_suffix('.html') as its source.
+    if 'image' in result:
+        html=Path(result['image']).with_suffix('.html').resolve()
+        if html.is_file():keep.add(html)
+    # Keep human-readable outcomes; preparation-only metadata is disposable
+    # because result.json contains the complete verified training row.
+    reports={'report.json','candidate-inspection.json','page-status.json','failure.json'}
+    for path in work.rglob('*'):
+        if path.is_file() and path.name in reports:keep.add(path)
+    for path in list(work.rglob('*')):
+        if path.is_file() and path not in keep:path.unlink()
+    # Preserve paths but store byte-identical immutable assets only once.
+    seen={}
+    for path in sorted(keep):
+        if path.suffix.lower() not in ('.html','.png','.jpg','.jpeg','.webp'):continue
+        with path.open('rb') as stream:sha=hashlib.file_digest(stream,'sha256').hexdigest()
+        if sha in seen:
+            path.unlink();os.link(seen[sha],path)
+        else:seen[sha]=path
+    for path in sorted(work.rglob('*'),key=lambda p:len(p.parts),reverse=True):
+        if path.is_dir() and not any(path.iterdir()):path.rmdir()
+
+
 @lru_cache(maxsize=1)
 def preparation_fingerprint():
     root=Path(__file__).parent
@@ -187,6 +223,8 @@ class TrainViewCache:
                 if error:raise ValueError(f'Lazy normalization failed: {error}')
                 result=seed
             else:result=rendered['detection'][0]
+            if os.environ.get('TUIDE_SAVE_DIAGNOSTICS','0')!='1':
+                compact_new_cache(work,result)
             if disk is not None:
                 relocated=self._relocate(result,work,disk)
                 assets={str(disk/Path(result[k]).relative_to(work)):
