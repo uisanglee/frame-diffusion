@@ -75,7 +75,14 @@ else
     --seed "${SEED:-42}" --min-elements "${MIN_ELEMENTS:-3}" \
     --max-source-mae "${MAX_SOURCE_MAE:-1.0}" --resume
 fi
+label_options=()
+case "${LATEST_VISUAL_LABELS:-0}" in
+  1) label_options+=(--latest-visual-labels) ;;
+  0) ;;
+  *) echo 'LATEST_VISUAL_LABELS must be 0 or 1' >&2; exit 2 ;;
+esac
 python -m framediff visual-tree-normalize --rendered "$data/master/rendered" \
+  "${label_options[@]}" \
   --out "$data/master/labels" --workers "${PREPARE_WORKERS:-4}" \
   --seed "${SEED:-42}" --max-css-owners "${MAX_CSS_OWNERS:-512}" \
   --observation-size "${IMAGE_SIZE:-384}" \

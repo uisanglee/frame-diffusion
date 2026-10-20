@@ -86,7 +86,8 @@ def test_resume_retries_rejected_page_without_rebuilding_successes(tmp_path, mon
 
 
 @pytest.mark.parametrize('workers', [1, 2])
-def test_normalize_then_corrupt_and_resume(tmp_path, monkeypatch, workers):
+@pytest.mark.parametrize('latest', [False, True])
+def test_normalize_then_corrupt_and_resume(tmp_path, monkeypatch, workers, latest):
     monkeypatch.setenv('TUIDE_SAVE_DIAGNOSTICS','1')
     source=tmp_path/'source';source.mkdir();out=tmp_path/'normalized'
     with HtmlBrowser() as browser:
@@ -106,7 +107,16 @@ def test_normalize_then_corrupt_and_resume(tmp_path, monkeypatch, workers):
     args=SimpleNamespace(rendered=str(source),out=str(out),resume=True,seed=42,
                          max_css_owners=64,observation_size=96,max_pixel_mae=.01,max_box_error=1.)
     args.workers=workers
+    args.latest_visual_labels=latest
+    original_files={p:p.read_bytes() for p in source.iterdir() if p.is_file()}
     prepare(args)
+    assert all(p.read_bytes()==content for p,content in original_files.items())
+    from framediff.visual import label_contract, VISUAL_GEOMETRY_CONTRACT
+    for split in ('train','val','test'):
+        rows=list(read_jsonl(out/f'policy-{split}.jsonl'))
+        assert label_contract(rows)==(VISUAL_GEOMETRY_CONTRACT if latest else None)
+        if latest:
+            assert any(n.get('visual_boxes') for n in rows[0]['current']['nodes'])
     monkeypatch.delenv('TUIDE_SAVE_DIAGNOSTICS')
     # Remove real scroll diagnostics, then exercise the original downstream
     # normalization resume, online corruption and fixed evaluation checks.
@@ -145,12 +155,15 @@ def test_normalize_then_corrupt_and_resume(tmp_path, monkeypatch, workers):
     from framediff.css_owners import CONTRACT as OWNER_CONTRACT
     from framediff.tree_policy import TreePolicy,TreeConfig,batch_inputs
     torch.set_num_threads(1)
-    net=TreePolicy(TreeConfig(size=96,hidden=32,layers=1,heads=4,max_nodes=64,
-                             stylesheets=True,action_contract=OWNER_CONTRACT),pretrained=False)
-    loss,_=net.loss(*batch_inputs(net,[generated],'cpu'),[generated['replacement_edit']])
-    assert torch.isfinite(loss)
-    loss.backward()
-    assert net.output.weight.grad is not None
+    for mode in ('abstract','screenshot'):
+        example=generated if mode=='abstract' else row
+        net=TreePolicy(TreeConfig(size=96,hidden=32,layers=1,heads=4,max_nodes=64,mode=mode,
+                                 visual_geometry_contract=label_contract([generated]),
+                                 stylesheets=True,action_contract=OWNER_CONTRACT),pretrained=False)
+        loss,_=net.loss(*batch_inputs(net,[example],'cpu'),[example['replacement_edit']])
+        assert torch.isfinite(loss)
+        loss.backward()
+        assert net.output.weight.grad is not None
     monkeypatch.setattr('framediff.tree_normalize.convert',lambda *a,**k: (_ for _ in ()).throw(AssertionError('renormalized')))
     checkpoints={p:p.stat().st_mtime_ns for p in out.glob('normalized-pages/*/*/record.json')}
     args.workers=3-workers
@@ -182,5 +195,22 @@ def test_normalize_then_corrupt_and_resume(tmp_path, monkeypatch, workers):
     assert all(p.stat().st_mtime_ns==mtime for p,mtime in checkpoints.items() if p!=pending)
     for split in ('train','val','test'):
         fixed=list(read_jsonl(frozen/f'policy-{split}.jsonl'))[0]
+        assert label_contract([fixed])==(VISUAL_GEOMETRY_CONTRACT if latest else None)
         assert '/normalized-pages/' in fixed['target_html']
         assert fixed['explicit_size_limits']
+
+
+def test_upgrade_lazy_descriptor_without_mutating_source(tmp_path):
+    import copy
+    from framediff.tree_normalize import _prepare_page
+    from framediff.visual import VISUAL_GEOMETRY_CONTRACT, DETECTOR_LABEL_CONTRACT
+    row=dict(id='p/clean',split='train',lazy_contract='lazy',
+             lazy_settings={'visual_geometry_contract':None},visual_geometry_contract=None)
+    before=copy.deepcopy(row)
+    args=SimpleNamespace(latest_visual_labels=True,max_css_owners=64,
+                         observation_size=96,max_pixel_mae=.01,max_box_error=1.)
+    new,page,error=_prepare_page((args,tmp_path,'train',0,'p',row,{'p':{'id':'p'}}))
+    assert error is None and row==before
+    assert new['visual_geometry_contract']==page['visual_geometry_contract']==VISUAL_GEOMETRY_CONTRACT
+    assert new['lazy_settings']['visual_geometry_contract']==VISUAL_GEOMETRY_CONTRACT
+    assert new['lazy_settings']['detector_label_contract']==DETECTOR_LABEL_CONTRACT

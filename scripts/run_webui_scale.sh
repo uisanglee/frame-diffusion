@@ -44,7 +44,10 @@ common=$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["common_
 stage=${STAGE:-all}
 case "$stage" in all|detector|policy|evaluate) ;; *) echo 'STAGE must be all, detector, policy, or evaluate' >&2; exit 2;; esac
 device=${DEVICE:-cuda}
-detector="$output/detector/best.pt"
+detector="${DETECTOR_CHECKPOINT:-$output/detector/best.pt}"
+if [[ -n "${DETECTOR_CHECKPOINT:-}" && ( "$stage" == all || "$stage" == detector ) ]]; then
+  echo 'Use STAGE=policy or evaluate with DETECTOR_CHECKPOINT' >&2; exit 2
+fi
 needs_detector=0
 for mode in $POLICY_MODES; do
   case "$mode" in abstract) needs_detector=1;; screenshot) ;; *) echo 'Invalid POLICY_MODES' >&2; exit 2;; esac

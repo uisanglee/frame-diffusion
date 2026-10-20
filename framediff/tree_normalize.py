@@ -12,7 +12,7 @@ from .html_bridge import HtmlBrowser
 from .html_feedback import refresh_geometry
 from .ir import read_json, read_jsonl
 from .tree_online import ONLINE_CONTRACT, SAMPLING_CONTRACT, OnlineSampler, target_pool
-from .visual import annotate, elements
+from .visual import annotate, elements, VISUAL_GEOMETRY_CONTRACT, DETECTOR_LABEL_CONTRACT
 from .visual_data import validate_splits
 from .web_experiment import digest, guard_run
 from .preparation_workers import page_map, write_json, write_jsonl
@@ -45,13 +45,19 @@ def _guard_normalization_run(out,config,resume):
 
 def _prepare_page(task):
     args, out, split, index, page_id, row, pages = task
+    latest=getattr(args,'latest_visual_labels',False)
+    expected_contract=VISUAL_GEOMETRY_CONTRACT if latest else row.get('visual_geometry_contract')
     if row.get('lazy_contract'):
         if split!='train':raise ValueError('Lazy held-out normalization is forbidden')
         settings={**row['lazy_settings'],**{k:getattr(args,k) for k in
             ('max_css_owners','observation_size','max_pixel_mae','max_box_error')}}
+        if latest:
+            settings.update(visual_geometry_contract=VISUAL_GEOMETRY_CONTRACT,
+                            detector_label_contract=DETECTOR_LABEL_CONTRACT)
         contract=CONTRACT
         new={**row,'lazy_settings':settings,'normalization_contract':contract,
              'teacher_strategy':css_owners.CONTRACT}
+        if latest:new['visual_geometry_contract']=expected_contract
         return new,{**pages[page_id],**new,'id':page_id},None
     folder=out/'normalized-pages'/split/hashlib.sha256(page_id.encode()).hexdigest()
     folder.mkdir(parents=True,exist_ok=True)
@@ -62,7 +68,7 @@ def _prepare_page(task):
         if args.resume and cache.exists():
             saved=read_json(cache)
             if saved['source_sha']!=signature:raise ValueError('Source HTML changed; use a new output directory')
-            if saved['row'].get('visual_geometry_contract')!=row.get('visual_geometry_contract'):
+            if saved['row'].get('visual_geometry_contract')!=expected_contract:
                 raise ValueError('Visual labels changed; use a new normalized output directory')
             for key,sha in saved['assets'].items():
                 if digest(key)!=sha:raise ValueError('Normalized cache assets changed')
@@ -75,6 +81,14 @@ def _prepare_page(task):
             normalized=folder/'normalized.html'
             stamp=folder/'normalization.json'
             with HtmlBrowser() as browser:
+                if latest:
+                    # Measure the cached tagged HTML; preserve DOM owner IDs and
+                    # source assets, but never relabel by changing metadata alone.
+                    row=copy.deepcopy(row)
+                    browser.load(html_path.read_text(),row['viewport'])
+                    browser.stable_capture()
+                    annotate(browser,row['current'],visual_boxes=True)
+                    row['visual_geometry_contract']=expected_contract
                 if args.resume and stamp.exists():
                     status=read_json(stamp)
                     if status['source_sha']!=signature or status['sha']!=digest(normalized):
@@ -186,6 +200,9 @@ def prepare(args):
         max_css_owners=args.max_css_owners,observation_size=args.observation_size,
         max_pixel_mae=args.max_pixel_mae,max_box_error=args.max_box_error,
         corruption=ONLINE_CONTRACT,sampling=SAMPLING_CONTRACT)
+    if getattr(args,'latest_visual_labels',False):
+        config['visual_geometry_contract']=VISUAL_GEOMETRY_CONTRACT
+        config['visual_labels_sha']=digest(Path(__file__).with_name('visual.py'))
     _guard_normalization_run(out,config,args.resume)
     report={};all_rows=[]
     # Per-page normalization closes its browser before the corruption sampler
