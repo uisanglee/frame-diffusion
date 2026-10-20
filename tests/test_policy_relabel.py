@@ -14,6 +14,33 @@ from framediff.policy_relabel import refresh_row, relabel
 from framediff.ir import write_jsonl, read_jsonl
 
 
+def test_text_raster_preservation_guard():
+    from PIL import Image, ImageDraw
+    from framediff.policy_relabel import render_preservation
+    a=Image.new('RGB',(30,20),'white')
+    ImageDraw.Draw(a).rectangle((5,5,7,12),fill='black')
+    b=a.copy();b.putpixel((5,7),(80,80,80))
+    items=[{'label':1,'box':[0,0,20,20]}]
+    row={'target_elements':items}
+    check=lambda image,**kw:render_preservation(a,image,row,'target',{},kw.get('items',items),[[4,4,5,10]])
+    assert check(b)['criterion']=='stored-geometry-and-local-text-raster'
+    outside=b.copy();outside.putpixel((25,15),(0,0,0))
+    with pytest.raises(ValueError,match='outside text'):check(outside)
+    with pytest.raises(ValueError,match='geometry changed'):
+        check(b,items=[{'label':1,'box':[1,0,21,20]}])
+    with pytest.raises(ValueError,match='nonlocal text'):
+        check(Image.new('RGB',a.size,'white'))
+    assert check(a)['pixels_equal']
+
+
+def test_audit_overlay_uses_box_field():
+    from PIL import Image
+    spec=importlib.util.spec_from_file_location('render_audit',Path(__file__).resolve().parents[1]/'scripts/audit_policy_render.py')
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    result=module.overlay(Image.new('RGB',(20,20),'white'),[{'box':[2,2,10,10]}])
+    assert result.getpixel((2,2))==(255,0,0)
+
+
 def test_render_failure_audit_preserves_inputs(tmp_path):
     from PIL import Image
     spec=importlib.util.spec_from_file_location('render_audit',Path(__file__).resolve().parents[1]/'scripts/audit_policy_render.py')

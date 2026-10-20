@@ -30,7 +30,7 @@ def overlay(image, elements):
     image = image.convert('RGB').copy()
     draw = ImageDraw.Draw(image)
     for item in elements:
-        box = item.get('xyxy')
+        box = item.get('box', item.get('xyxy'))
         if box and len(box) == 4:
             draw.rectangle(box, outline='red', width=2)
     return image

@@ -21,6 +21,60 @@ from .web_experiment import digest, guard_run
 CACHE_REVISION='policy-full-dom-owner-box-v2'
 
 
+def render_preservation(saved, measured, row, prefix, boxes, items, text_rects):
+    """Conservative fallback: exact stored geometry and text-local raster changes."""
+    import numpy as np
+    from PIL import ImageDraw, ImageFilter
+    if saved.size != measured.size:
+        raise ValueError(f'{prefix}: saved screenshot differs from measured HTML (size)')
+    a=np.asarray(saved.convert('RGB'));b=np.asarray(measured.convert('RGB'))
+    difference=np.any(a!=b,axis=2)
+    if not difference.any():return {'pixels_equal':True,'criterion':'exact'}
+    old=row.get(prefix+'_elements')
+    owner_boxes=row.get(prefix+'_boxes')
+    if not old and not owner_boxes:
+        raise ValueError(f'{prefix}: saved screenshot differs from measured HTML (no stored geometry)')
+    if old:
+        from collections import Counter
+        key=lambda e:(e['label'],tuple(e['box']))
+        if Counter(map(key,old))-Counter(map(key,items)):
+            raise ValueError(f'{prefix}: saved screenshot differs from measured HTML (element geometry changed)')
+    if owner_boxes:
+        if any(k not in boxes or list(v)!=list(boxes[k]) for k,v in owner_boxes.items()):
+            raise ValueError(f'{prefix}: saved screenshot differs from measured HTML (owner geometry changed)')
+    # Use text-node line rectangles, never broad CSS-owner rectangles.
+    region=Image.new('L',saved.size,0);draw=ImageDraw.Draw(region)
+    for x,y,w,h in text_rects:
+        if w>0 and h>0:draw.rectangle((x,y,x+w,y+h),fill=255)
+    allowed=np.asarray(region)>0
+    if np.any(difference & ~allowed):
+        raise ValueError(f'{prefix}: saved screenshot differs from measured HTML (outside text)')
+    # Each changed pixel must have a close colour counterpart within one pixel
+    # in BOTH directions. This rejects removed text and substantial colour changes.
+    for source,target in ((saved,measured),(measured,saved)):
+        low=np.asarray(target.convert('RGB').filter(ImageFilter.MinFilter(3)),dtype=np.int16)
+        high=np.asarray(target.convert('RGB').filter(ImageFilter.MaxFilter(3)),dtype=np.int16)
+        value=np.asarray(source.convert('RGB'),dtype=np.int16)
+        compatible=np.all((value>=low-8)&(value<=high+8),axis=2)
+        if np.any(difference & ~compatible):
+            raise ValueError(f'{prefix}: saved screenshot differs from measured HTML (nonlocal text change)')
+    return {'pixels_equal':False,'criterion':'stored-geometry-and-local-text-raster',
+            'changed_pixel_fraction':float(difference.mean())}
+
+
+def text_rectangles(browser):
+    return browser.page.evaluate("""() => {
+      const result=[], walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
+      while(walker.nextNode()){
+        const n=walker.currentNode;if(!n.textContent.trim())continue;
+        const s=getComputedStyle(n.parentElement);
+        if(s.visibility!=='visible'||s.display==='none'||Number(s.opacity)===0)continue;
+        const r=document.createRange();r.selectNodeContents(n);
+        for(const b of r.getClientRects())result.push([b.x,b.y,b.width,b.height]);
+      }return result;
+    }""")
+
+
 def failure_reason(exc):
     message=str(exc)
     for text,reason in (
@@ -50,15 +104,15 @@ def refresh_row(row, out, size=384, clean_only=False):
         result.pop(key,None)
     tree=copy.deepcopy(row['current'])
     with HtmlBrowser() as browser:
-        observations={}
+        observations={};preservation={}
         for prefix in (('target',) if clean_only else ('target','current')):
             browser.load(Path(row[prefix+'_html']).read_text(),row['viewport'])
             png,_=browser.stable_capture()
-            with Image.open(io.BytesIO(png)) as measured, Image.open(row[prefix+'_image']) as saved:
-                if measured.size!=saved.size or measured.convert('RGB').tobytes()!=saved.convert('RGB').tobytes():
-                    raise ValueError(f'{prefix}: saved screenshot differs from measured HTML')
             annotate(browser,tree,visual_boxes=True)
             mask,boxes,items=abstraction(browser,tree,row['viewport'],size)
+            with Image.open(io.BytesIO(png)) as measured, Image.open(row[prefix+'_image']) as saved:
+                preservation[prefix]=render_preservation(saved,measured,row,prefix,boxes,items,
+                                                        text_rectangles(browser))
             parsed=css_owners.read(browser,tree)
             if parsed['owners']!=row['css_owners']:
                 raise ValueError(f'{prefix}: CSS owners changed')
@@ -89,7 +143,8 @@ def refresh_row(row, out, size=384, clean_only=False):
     # Recheck clean-target eligibility under the new observation definition.
     checked=target_pool([{**result,'split':'train'}],cache_dir=out.parent/'.inspection',observation_size=size)[0]
     result['visible_candidates']=checked['visible_candidates']
-    result['relabel_audit']={'pixels_equal':True,'teacher_preserved':True,
+    result['relabel_audit']={'pixels_equal':all(p['pixels_equal'] for p in preservation.values()),
+                            'render_preservation':preservation,'teacher_preserved':True,
                             'target_boxes':target[1]}
     return result
 
