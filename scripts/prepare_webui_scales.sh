@@ -125,6 +125,15 @@ else
     --seed "${SEED:-42}" --min-elements "${MIN_ELEMENTS:-3}" \
     --max-source-mae "${MAX_SOURCE_MAE:-1.0}" --resume
 fi
+if [[ "${RELABEL_POLICY_ONLY:-0}" == 1 ]]; then
+  [[ -n "${REUSE_SPLITS:-}" ]] || { echo 'RELABEL_POLICY_ONLY requires REUSE_SPLITS' >&2; exit 2; }
+  export TUIDE_SHARED_CACHE="${TUIDE_SHARED_CACHE:-$repo_root/data/webui-shared-cache}"
+  for kind in labels css; do
+    python -m framediff visual-policy-relabel \
+      --rendered "$REUSE_SPLITS/master/$kind" --out "$data/master/$kind" \
+      --workers "${PREPARE_WORKERS:-4}" --observation-size "${IMAGE_SIZE:-384}" --resume
+  done
+else
 label_options=()
 case "${LATEST_VISUAL_LABELS:-0}" in
   1) label_options+=(--latest-visual-labels) ;;
@@ -142,5 +151,6 @@ python -m framediff visual-tree-freeze --rendered "$data/master/labels" \
   --out "$data/master/css" --workers "${PREPARE_WORKERS:-4}" \
   --samples-per-page "${FIXED_SAMPLES_PER_PAGE:-1}" --max-noise "${ONLINE_MAX_NOISE:-4}" \
   --observation-size "${IMAGE_SIZE:-384}" --seed "${TEST_SEED:-90210}" --resume
+fi
 python -m framediff visual-webui-scales-subset --data "$data"
 echo "Prepared nested scale datasets in $data. Keep master/ assets."

@@ -43,7 +43,7 @@ def _guard_normalization_run(out,config,resume):
 
 
 
-def _prepare_page(task):
+def _prepare_page(task, persist_seed=True):
     args, out, split, index, page_id, row, pages = task
     latest=getattr(args,'latest_visual_labels',False)
     expected_contract=VISUAL_GEOMETRY_CONTRACT if latest else row.get('visual_geometry_contract')
@@ -147,19 +147,25 @@ def _prepare_page(task):
             sampler=OnlineSampler(pool,'screenshot',seed=args.seed,max_noise=1)
             new=sampler.generate(index)
             initial=folder/'initial.html';png=folder/'initial.png'
-            initial.write_text(new.pop('current_html_text'));png.write_bytes(new['current_image'])
-            new.update(split=split,current_html=str(initial),current_image=str(png),normalization_stats=stats,
+            if persist_seed:
+                initial.write_text(new.pop('current_html_text'));png.write_bytes(new['current_image'])
+                new.update(current_html=str(initial),current_image=str(png))
+            else:
+                new.pop('current_html_text',None);new.pop('current_image',None)
+            new.update(split=split,normalization_stats=stats,
                        normalization_contract=CONTRACT)
             page={k:pages[page_id][k] for k in ('id','group','split','source_sha','viewport')}
             for key in ('page_id','view'):
                 if key in pages[page_id]:page[key]=pages[page_id][key]
             page.update(html=str(normalized),target_html=str(normalized),
                 visual_geometry_contract=tree.get('visual_geometry_contract'),
-                screenshot=str(folder/'after.png'),initial_html=str(initial),
+                screenshot=str(folder/'after.png'),
                 evaluation_target_boxes=boxes,policy_subset=css_owners.CONTRACT,
                 normalization_contract=CONTRACT,original_html=str(html_path))
-            assets={str(p):digest(p) for p in (normalized,folder/'after.png',initial,png)}
-            write_json(cache,{'source_sha':signature,'row':new,'page':page,'assets':assets})
+            if persist_seed:
+                page['initial_html']=str(initial)
+                assets={str(p):digest(p) for p in (normalized,folder/'after.png',initial,png)}
+                write_json(cache,{'source_sha':signature,'row':new,'page':page,'assets':assets})
         write_json(folder/'page-status.json',{'id':page_id,'status':'kept',
                    'normalization_stats':new.get('normalization_stats')})
     except Exception as exc:

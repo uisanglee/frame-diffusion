@@ -120,6 +120,7 @@ def test_stream_only_changes_do_not_invalidate_preparation(monkeypatch):
 def test_sampler_memory_fix_preserves_existing_cache_fingerprint():
     from framediff.lazy_webui import preparation_fingerprint
     assert preparation_fingerprint()['online_preparation']=='e598fecb8a9bb423bba5e9cf118b338f89be0bbe3d83195d5512e4e7c2fbf53d'
+    assert preparation_fingerprint()['tree_normalize.py']=='99abfa568147b5581248b90f477b920c26202fd5dffa02f9059135ea5eb5cc7f'
 
 
 @pytest.mark.browser
@@ -208,7 +209,8 @@ def test_lazy_policy_disk_cache_survives_process_cache(tmp_path,monkeypatch):
     entry=root/first._key(row,True)
     assert not (entry/'rendered').exists()
     assert list(entry.rglob('report.json'))
-    assert Path(prepared['current_html']).is_file() and Path(prepared['current_image']).is_file()
+    assert 'current_html' not in prepared and 'current_image' not in prepared
+    assert not list(entry.rglob('initial.html')) and not list(entry.rglob('initial.png'))
     import framediff.visual_data as visual_data
     monkeypatch.setattr(visual_data,'_render_page',lambda *a,**k: (_ for _ in ()).throw(
         AssertionError('persistent lazy cache rerendered the page')))
@@ -223,9 +225,12 @@ def test_shared_cache_imports_existing_without_rendering(tmp_path,monkeypatch):
     from framediff.lazy_webui import TrainViewCache
     import framediff.visual_data as data
     row=lazy_descriptor(tmp_path);old=tmp_path/'old-cache'
+    # Simulate a published legacy cache retaining the seed assets.
+    monkeypatch.setenv('TUIDE_SAVE_DIAGNOSTICS','1')
     first=TrainViewCache(cache_dir=old)
     try:before=first.get(row,policy=True)
     finally:first.close()
+    monkeypatch.delenv('TUIDE_SAVE_DIAGNOSTICS')
     monkeypatch.setenv('TUIDE_SHARED_CACHE',str(tmp_path/'shared'))
     monkeypatch.setattr(data,'_render_page',lambda *a,**k: (_ for _ in ()).throw(AssertionError('rerender')))
     shared=TrainViewCache(cache_dir=old)
@@ -276,7 +281,7 @@ def test_lazy_detector_and_policy_materialization(tmp_path,capsys,monkeypatch):
 
 
 @pytest.mark.browser
-def test_lazy_training_cache_stage2_and_resume(tmp_path):
+def test_lazy_training_cache_stage2_and_resume(tmp_path,monkeypatch):
     import torch
     from framediff.cli import main
     from framediff.lazy_webui import TrainViewCache
@@ -291,7 +296,11 @@ def test_lazy_training_cache_stage2_and_resume(tmp_path):
     cache=TrainViewCache()
     try:
         val_detection={**cache.get(val_descriptor),'split':'val'}
-        val_policy={**cache.get(val_descriptor,policy=True),'split':'val'}
+        # This fixture uses a train materializer to construct a fixed held-out
+        # sample. Explicitly retain that sample's assets, unlike online targets.
+        with monkeypatch.context() as context:
+            context.setenv('TUIDE_SAVE_DIAGNOSTICS','1')
+            val_policy={**cache.get(val_descriptor,policy=True),'split':'val'}
         write_jsonl(tmp_path/'detector-train.jsonl',[row])
         write_jsonl(tmp_path/'detector-val.jsonl',[val_detection])
         write_jsonl(tmp_path/'policy-train.jsonl',[row])

@@ -72,6 +72,9 @@ def preparation_fingerprint():
               and getattr(node,'name',None) not in excluded
               and not (isinstance(node,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='_sampler' for t in node.targets))]
     hashes={name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in names}
+    # Optional seed-file retention changes storage only; preserve existing keys.
+    if hashes['tree_normalize.py']=='5f2f562d97282db97fcbe96f6ab5cb2bfccfd347519eaeba3973a810bde6315c':
+        hashes['tree_normalize.py']='99abfa568147b5581248b90f477b920c26202fd5dffa02f9059135ea5eb5cc7f'
     # Audited storage-only change: screenshot retention does not change the
     # prepared training example. Unknown future edits still invalidate caches.
     if hashes['safe_sizes.py']=='1acceb2dff0b09384551c9c63276ceb3d4807dab1de160075129a97d4532b4a5':
@@ -215,19 +218,35 @@ class TrainViewCache:
         if not hasattr(args,'detector_label_contract'):args.detector_label_contract=None
         index=int(hashlib.sha256(source['id'].encode()).hexdigest()[:8],16)
         try:
-            rendered,error,_=_render_page((args,work/'rendered',index,source))
-            if error:raise ValueError(f'Lazy render failed: {error}')
-            if policy:
+            relabel=settings.get('policy_relabel')
+            if relabel and policy:
+                from .policy_relabel import refresh_row
+                previous=TrainViewCache(cache_dir=relabel['cache_dir'])
+                try:
+                    original=previous.get(relabel['source'],policy=True)
+                    result=refresh_row(original,work/'visual-labels',relabel['size'],clean_only=True)
+                finally:previous.close()
+            else:
+                rendered,error,_=_render_page((args,work/'rendered',index,source))
+                if error:raise ValueError(f'Lazy render failed: {error}')
+            if policy and not relabel:
                 seed,page,error=_prepare_page((args,work/'labels','train',index,source['id'],
-                    rendered['policy'][0],{source['id']:rendered['page']}))
+                    rendered['policy'][0],{source['id']:rendered['page']}),
+                    persist_seed=os.environ.get('TUIDE_SAVE_DIAGNOSTICS','0')=='1')
                 if error:raise ValueError(f'Lazy normalization failed: {error}')
                 result=seed
-            else:result=rendered['detection'][0]
+            elif not policy:result=rendered['detection'][0]
             if os.environ.get('TUIDE_SAVE_DIAGNOSTICS','0')!='1':
+                if policy:
+                    # OnlineSampler starts from target_html and generates its
+                    # own current state. Seed RGB/HTML are not training inputs.
+                    for field in ('current_html','current_image','current_abstract',
+                                  'initial_html','initial_image','current_html_text'):
+                        result.pop(field,None)
                 compact_new_cache(work,result)
             if disk is not None:
                 relocated=self._relocate(result,work,disk)
-                assets={str(disk/Path(result[k]).relative_to(work)):
+                assets={self._relocate(result[k],work,disk):
                         hashlib.sha256(Path(result[k]).read_bytes()).hexdigest()
                         for k in ('target_html','target_image','image','current_html','current_image') if k in result}
                 (work/'result.json').write_text(json.dumps(

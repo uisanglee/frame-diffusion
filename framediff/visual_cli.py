@@ -24,6 +24,10 @@ def add_parsers(sub):
     p.add_argument('--max-pixel-mae',type=float,default=.01)
     p.add_argument('--max-box-error',type=float,default=1.)
     p.add_argument('--limit-pages',type=int,default=0,help='Smoke check: maximum pages per split; 0 means all')
+    p=sub.add_parser('visual-policy-relabel',help='Remeasure immutable normalized/corrupted HTML; preserve RGB assets and teachers')
+    p.add_argument('--rendered',required=True);p.add_argument('--out',required=True)
+    p.add_argument('--workers',type=int,default=4);p.add_argument('--observation-size',type=int,default=384)
+    p.add_argument('--resume',action='store_true')
     from .css_diffusion_experiment import add_parsers as add_css_diffusion_parsers
     add_css_diffusion_parsers(sub)
     from .composition import add_parsers as add_composition_parsers
@@ -161,6 +165,9 @@ def run(args):
     if args.command=='visual-tree-normalize':
         from .tree_normalize import prepare
         return prepare(args)
+    if args.command=='visual-policy-relabel':
+        from .policy_relabel import relabel
+        return relabel(args)
     if args.command=='visual-explicit-html':
         from .explicit_html import run as run_explicit
         return run_explicit(args)
