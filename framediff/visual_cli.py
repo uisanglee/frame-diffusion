@@ -25,6 +25,7 @@ def add_parsers(sub):
     p.add_argument('--max-box-error',type=float,default=1.)
     p.add_argument('--limit-pages',type=int,default=0,help='Smoke check: maximum pages per split; 0 means all')
     p=sub.add_parser('visual-policy-relabel',help='Remeasure immutable normalized/corrupted HTML; preserve RGB assets and teachers')
+    p.add_argument('--clean-heldout',action='store_true',help='Verify only clean val/test targets for subsequent fresh fixed corruption; ignore old teachers')
     p.add_argument('--rendered',required=True);p.add_argument('--out',required=True)
     p.add_argument('--workers',type=int,default=4);p.add_argument('--observation-size',type=int,default=384)
     p.add_argument('--resume',action='store_true')

@@ -1,6 +1,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 import copy
+import json
 
 import pytest
 
@@ -10,6 +11,41 @@ from framediff.plans import dom_tree
 from framediff.visual import annotate, VISUAL_GEOMETRY_CONTRACT
 from framediff.policy_relabel import refresh_row, relabel
 from framediff.ir import write_jsonl, read_jsonl
+
+
+def test_live_failure_reporting(tmp_path,monkeypatch,capsys):
+    from framediff import policy_relabel as module
+    source=tmp_path/'source';source.mkdir();out=tmp_path/'out'
+    for split in ('train','val','test'):
+        write_jsonl(source/f'policy-{split}.jsonl',[{'id':split+'/bad'},{'id':split+'/good'}])
+        write_jsonl(source/f'pages-{split}.jsonl',[])
+    def mapped(fn,tasks,workers):
+        tasks=list(tasks);split=tasks[0][0]['id'].split('/')[0]
+        error={'sample_id':split+'/bad','reason':'screenshot_mismatch','error':'example'}
+        yield None,error
+        # Verify persistence and flushed output before the next result arrives.
+        assert list(read_jsonl(out/f'rejections-{split}.jsonl'))==[error]
+        state=json.loads((out/f'relabel-progress-{split}.json').read_text())
+        assert state['processed']==1 and state['failure_reasons']=={'screenshot_mismatch':1}
+        assert 'relabel_failure' in capsys.readouterr().out
+        yield {'id':split+'/good'},None
+    monkeypatch.setattr(module,'page_map',mapped)
+    report=relabel(SimpleNamespace(rendered=source,out=out,workers=1,observation_size=64,resume=True))
+    assert all(r['failure_reasons']=={'screenshot_mismatch':1} for r in report.values())
+    assert json.loads((out/'relabel-progress-test.json').read_text())['status']=='complete'
+
+
+@pytest.mark.parametrize('error,reason',[
+    (ValueError('target: saved screenshot differs from measured HTML'),'screenshot_mismatch'),
+    (ValueError('Existing corruption has no new abstraction effect'),'corruption_no_visual_effect'),
+    (ValueError('Existing teacher has no new abstraction effect'),'teacher_no_visual_effect'),
+    (ValueError('Render stabilization timed out'),'render_unstable'),
+    (FileNotFoundError('missing'),'missing_asset'),
+    (RuntimeError('unknown'),'other'),
+])
+def test_failure_categories(error,reason):
+    from framediff.policy_relabel import failure_reason
+    assert failure_reason(error)==reason
 
 
 def fixture(tmp_path):
@@ -105,3 +141,45 @@ def test_lazy_reuses_existing_normalization_without_render_or_corruption(tmp_pat
     cache=TrainViewCache(cache_dir=tmp_path/'legacy')
     assert cache.get(upgraded,policy=True)==result
     cache.close()
+
+
+def test_rebuild_heldout_reuses_clean_assets_and_new_teachers(tmp_path,monkeypatch):
+    from framediff import policy_relabel as module
+    from framediff.tree_freeze import freeze
+    from framediff.tree_edits import repair_path
+    row=fixture(tmp_path);source=tmp_path/'source';source.mkdir()
+    original={row[k]:Path(row[k]).read_bytes() for k in ('target_html','target_image')}
+    for split in ('train','val','test'):
+        sample={**row,'id':split+'/seed','group':split,'split':split}
+        if split!='train':
+            sample.update(current_html='/missing/obsolete.html',current_image='/missing/obsolete.png',replacement_edit=None)
+        write_jsonl(source/f'policy-{split}.jsonl',[sample])
+        write_jsonl(source/f'pages-{split}.jsonl',[{'id':split,'split':split,'html':row['target_html']}])
+    args=SimpleNamespace(rendered=source,out=tmp_path/'labels',workers=1,observation_size=64,resume=True,clean_heldout=True)
+    report=relabel(args)
+    assert all(r['kept']==1 and r['failed']==0 for r in report.values())
+    def forbidden(*a,**kw):raise AssertionError('successful clean cache remeasured')
+    monkeypatch.setattr(module,'refresh_row',forbidden)
+    assert relabel(args)==report
+    options=SimpleNamespace(rendered=args.out,out=tmp_path/'css',workers=1,observation_size=64,
+        resume=True,seed=90210,max_noise=1,samples_per_page=1)
+    freeze(options)
+    import torch
+    from framediff.tree_policy import TreePolicy,TreeConfig,batch_inputs
+    torch.set_num_threads(1)
+    for split in ('val','test'):
+        rows=list(read_jsonl(options.out/f'policy-{split}.jsonl'));assert len(rows)==1
+        sample=rows[0]
+        assert sample['replacement_edit'] in repair_path(sample['declaration_state'],sample['target_declaration_state'])
+        assert sample['visual_geometry_contract']==VISUAL_GEOMETRY_CONTRACT
+        assert Path(sample['current_html']).is_file() and Path(sample['current_image']).is_file()
+        for mode in ('abstract','screenshot'):
+            net=TreePolicy(TreeConfig(mode=mode,size=64,hidden=32,layers=1,heads=4,max_nodes=64,
+                stylesheets=True,action_contract=css_owners.CONTRACT,visual_geometry_contract=VISUAL_GEOMETRY_CONTRACT),pretrained=False)
+            loss,_=net.loss(*batch_inputs(net,rows,'cpu'),[sample['replacement_edit']])
+            assert torch.isfinite(loss)
+    before={p:p.read_bytes() for p in options.out.rglob('*') if p.is_file()}
+    monkeypatch.setattr('framediff.tree_freeze.OnlineSampler',forbidden)
+    freeze(options)
+    assert all(p.read_bytes()==data for p,data in before.items())
+    assert all(Path(p).read_bytes()==data for p,data in original.items())

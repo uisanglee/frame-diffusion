@@ -125,7 +125,18 @@ else
     --seed "${SEED:-42}" --min-elements "${MIN_ELEMENTS:-3}" \
     --max-source-mae "${MAX_SOURCE_MAE:-1.0}" --resume
 fi
-if [[ "${RELABEL_POLICY_ONLY:-0}" == 1 ]]; then
+if [[ "${REBUILD_HELDOUT:-0}" == 1 ]]; then
+  [[ -n "${REUSE_SPLITS:-}" ]] || { echo 'REBUILD_HELDOUT requires REUSE_SPLITS' >&2; exit 2; }
+  export TUIDE_SHARED_CACHE="${TUIDE_SHARED_CACHE:-$repo_root/data/webui-shared-cache}"
+  python -m framediff visual-policy-relabel \
+    --rendered "$REUSE_SPLITS/master/labels" --out "$data/master/labels" \
+    --clean-heldout --workers "${PREPARE_WORKERS:-4}" \
+    --observation-size "${IMAGE_SIZE:-384}" --resume
+  python -m framediff visual-tree-freeze --rendered "$data/master/labels" \
+    --out "$data/master/css" --workers "${PREPARE_WORKERS:-4}" \
+    --samples-per-page "${FIXED_SAMPLES_PER_PAGE:-1}" --max-noise "${ONLINE_MAX_NOISE:-4}" \
+    --observation-size "${IMAGE_SIZE:-384}" --seed "${TEST_SEED:-90210}" --resume
+elif [[ "${RELABEL_POLICY_ONLY:-0}" == 1 ]]; then
   [[ -n "${REUSE_SPLITS:-}" ]] || { echo 'RELABEL_POLICY_ONLY requires REUSE_SPLITS' >&2; exit 2; }
   export TUIDE_SHARED_CACHE="${TUIDE_SHARED_CACHE:-$repo_root/data/webui-shared-cache}"
   for kind in labels css; do
