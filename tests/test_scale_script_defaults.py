@@ -80,7 +80,7 @@ else:
 
 
 def test_shared_defaults_reach_all_stages(tmp_path):
-    calls=run_script(tmp_path,{})
+    calls=run_script(tmp_path,{'STAGE':'all'})
     detector=next(c for c in calls if 'visual-train-detector' in c['args'])
     assert all(detector['env'][k]==v for k,v in DEFAULTS.items())
     policies=[c for c in calls if c['args'][0]=='policy-fixture']
@@ -93,6 +93,29 @@ def test_shared_defaults_reach_all_stages(tmp_path):
         args=call['args']
         assert args[args.index('--repeats')+1]=='3'
         assert args[args.index('--workers')+1]=='4'
+
+
+def test_reuse_split_metadata_is_read_only_and_resumable(tmp_path):
+    script=(Path(__file__).resolve().parents[1]/'scripts/prepare_webui_scales.sh').read_text()
+    code=script.split('python - "$REUSE_SPLITS" "$data" <<\'PY\'\n',1)[1].split('\nPY\n',1)[0]
+    source=tmp_path/'old';source.mkdir();out=tmp_path/'new'
+    (source/'config.json').write_text(json.dumps({'sizes':[7000,56169]}))
+    (source/'split-report.json').write_text('{"common_test_scale":7000}')
+    for name in ('master/source','7000/source','56169/source'):
+        folder=source/name;folder.mkdir(parents=True)
+        (folder/'manifest.jsonl').write_text('{"id":"same"}\n')
+    before={p:p.read_bytes() for p in source.rglob('*') if p.is_file()}
+    def run():
+        return subprocess.run([sys.executable,'-',str(source),str(out)],input=code,text=True,capture_output=True)
+    assert run().returncode==0
+    assert (out/'master/source').is_symlink()
+    labels=out/'master/labels';labels.mkdir();(labels/'record').write_text('keep')
+    assert run().returncode==0
+    assert (labels/'record').read_text()=='keep'
+    assert all(p.read_bytes()==value for p,value in before.items())
+    (out/'config.json').write_text('{}')
+    failure=run()
+    assert failure.returncode!=0 and 'differs' in failure.stderr
 
 
 def test_explicit_overrides_are_preserved(tmp_path):
@@ -110,7 +133,7 @@ def test_explicit_overrides_are_preserved(tmp_path):
 
 
 def test_screenshot_all_skips_detector_and_evaluates_single_stage(tmp_path):
-    calls=run_script(tmp_path,dict(POLICY_MODES='screenshot'))
+    calls=run_script(tmp_path,dict(STAGE='all',POLICY_MODES='screenshot'))
     assert len(calls)==3  # one policy run and own/common rollout
     assert calls[0]['args'][0]=='policy-fixture'
     for call in calls[1:]:

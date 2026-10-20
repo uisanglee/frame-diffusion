@@ -25,8 +25,58 @@ if [[ -n "${ALLOCATION_COUNTS:-}" ]]; then
   read -r -a allocation_counts <<< "$ALLOCATION_COUNTS"
   split_options+=(--allocation-counts "${allocation_counts[@]}")
 fi
-python -m framediff visual-webui-scales-prepare --root "$raw" --out "$data" \
-  --sizes "${sizes[@]}" --views "${views[@]}" --seed "${SEED:-42}" "${split_options[@]}" --resume
+if [[ -n "${REUSE_SPLITS:-}" ]]; then
+  # Reuse the exact published selections; do not scan raw HTML or repartition.
+  python - "$REUSE_SPLITS" "$data" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+source, target = (Path(p).resolve() for p in sys.argv[1:])
+if source == target or source in target.parents or target in source.parents:
+    raise SystemExit('REUSE_SPLITS requires a separate output root')
+config = json.loads((source / 'config.json').read_text())
+files = ['config.json', 'split-report.json']
+directories = ['master/source'] + [f'{size}/source' for size in config['sizes']]
+# Preflight every path before publishing anything. Existing new-label results
+# remain usable only when their exact original selections still match.
+for name in files:
+    src, dst = source / name, target / name
+    if not src.is_file():
+        raise SystemExit(f'Missing split metadata: {src}')
+    if dst.exists() and dst.read_bytes() != src.read_bytes():
+        raise SystemExit(f'Split metadata differs: {dst}; choose a fresh output root')
+for name in directories:
+    src, dst = source / name, target / name
+    if not (src / 'manifest.jsonl').is_file():
+        raise SystemExit(f'Missing selection: {src}')
+    if dst.exists() or dst.is_symlink():
+        if not dst.is_dir():
+            raise SystemExit(f'Invalid existing source directory: {dst}')
+        for path in src.rglob('*'):
+            if path.is_file():
+                existing = dst / path.relative_to(src)
+                if not existing.is_file() or existing.read_bytes() != path.read_bytes():
+                    raise SystemExit(f'Existing selection differs: {existing}')
+target.mkdir(parents=True, exist_ok=True)
+for name in files:
+    dst = target / name
+    if not dst.exists():
+        temp = dst.with_suffix('.tmp')
+        temp.write_bytes((source / name).read_bytes())
+        temp.replace(dst)
+for name in directories:
+    dst = target / name
+    if not dst.exists():
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.symlink_to((source / name).resolve(), target_is_directory=True)
+print(f'Reusing exact splits from {source}; sizes={config["sizes"]}; raw scan skipped', flush=True)
+PY
+  export REUSE_RENDERED="${REUSE_RENDERED:-$REUSE_SPLITS/master/rendered}"
+else
+  python -m framediff visual-webui-scales-prepare --root "$raw" --out "$data" \
+    --sizes "${sizes[@]}" --views "${views[@]}" --seed "${SEED:-42}" "${split_options[@]}" --resume
+fi
 # REUSE_RENDERED may point at a complete master/rendered directory from an
 # identical source manifest.  This keeps the expensive HTML rendering cache
 # while allowing labels/CSS data to be rebuilt in a fresh experiment root.
