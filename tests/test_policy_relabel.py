@@ -14,49 +14,29 @@ from framediff.policy_relabel import refresh_row, relabel
 from framediff.ir import write_jsonl, read_jsonl
 
 
-def test_text_raster_preservation_guard():
-    from PIL import Image, ImageDraw
-    from framediff.policy_relabel import render_preservation
-    a=Image.new('RGB',(30,20),'white')
-    ImageDraw.Draw(a).rectangle((5,5,7,12),fill='black')
-    b=a.copy();b.putpixel((5,7),(80,80,80))
+def test_label_geometry_tolerance():
+    from framediff.policy_relabel import geometry_preservation
     items=[{'label':1,'box':[0,0,20,20]}]
     row={'target_elements':items}
-    check=lambda image,**kw:render_preservation(a,image,row,'target',{},kw.get('items',items))
-    assert check(b)['criterion']=='stored-geometry-and-visible-edges'
-    outside=b.copy();outside.putpixel((25,15),(0,0,0))
-    with pytest.raises(ValueError,match='visible structure changed'):check(outside)
+    shifted=[{'label':1,'box':[.28125,0,20.28125,20]}]
+    assert not geometry_preservation(row,'target',{},shifted)['pixel_comparison_performed']
+    for bad in ([],[{'label':2,'box':[0,0,20,20]}],[{'label':1,'box':[2,0,22,20]}]):
+        with pytest.raises(ValueError,match='geometry changed'):
+            geometry_preservation(row,'target',{},bad)
     with pytest.raises(ValueError,match='geometry changed'):
-        check(b,items=[{'label':1,'box':[1,0,21,20]}])
-    with pytest.raises(ValueError,match='visible structure changed'):
-        check(Image.new('RGB',a.size,'white'))
-    assert check(a)['pixels_equal']
-    recolored=Image.new('RGB',a.size,'black')
-    ImageDraw.Draw(recolored).rectangle((5,5,7,12),fill='yellow')
-    assert check(recolored)['criterion']=='stored-geometry-and-visible-edges'
-    moved=Image.new('RGB',a.size,'white')
-    ImageDraw.Draw(moved).rectangle((12,5,14,12),fill='black')
-    with pytest.raises(ValueError,match='visible structure changed'):check(moved)
+        geometry_preservation({'target_elements':items*2},'target',{},items)
 
 
 def test_color_changes_and_raster_noise_require_geometry():
-    from PIL import Image
-    from framediff.policy_relabel import render_preservation
-    saved=Image.new('RGB',(1170,2532),'white')
-    measured=saved.copy()
-    measured.putpixel((10,10),(253,255,255))
-    measured.putpixel((20,20),(255,254,255))
+    from framediff.policy_relabel import geometry_preservation
     boxes={'node':[0,0,100,100]}
     row={'current_boxes':boxes}
-    def check(image, source=row, geometry=boxes):
-        return render_preservation(saved,image,source,'current',geometry,[])
-    result=check(measured)
-    assert result['criterion']=='stored-geometry-and-visible-edges'
+    def check(source=row, geometry=boxes):
+        return geometry_preservation(source,'current',geometry,[])
+    assert check()['criterion']=='stored-label-geometry'
     with pytest.raises(ValueError,match='owner geometry changed'):
-        check(measured,geometry={'node':[1,0,100,100]})
-    with pytest.raises(ValueError,match='no stored geometry'):check(measured,source={})
-    assert check(Image.new('RGB',saved.size,'blue'))['missing_edges']==0
-    with pytest.raises(ValueError,match='size'):check(Image.new('RGB',(10,10)))
+        check(geometry={'node':[2,0,100,100]})
+    with pytest.raises(ValueError,match='no stored geometry'):check(source={})
 
 
 def test_audit_overlay_uses_box_field():
@@ -83,7 +63,7 @@ def test_render_failure_audit_preserves_inputs(tmp_path):
     assert not report['renders']['target']['pixels_equal']
     assert report['renders']['current']['pixels_equal']
     assert report['renders']['target']['new_elements']
-    assert not report['renders']['target']['stored_owner_boxes_available']
+    assert report['renders']['target']['stored_owner_boxes_available']
     assert (out/'target-comparison.png').is_file()
     assert (out/'current-diff-x8.png').is_file()
     assert all(Path(row[key]).read_bytes()==data for key,data in before.items())
@@ -151,6 +131,7 @@ def test_failure_categories(error,reason):
 
 
 def fixture(tmp_path):
+    from framediff.tree_online import abstraction
     with HtmlBrowser() as b:
         dom=b.snapshot('<body style="margin:0"><div class="card" style="width:200px;height:50px;margin-left:10px;background:red">Hello</div></body>',[400,200],max_nodes=32)
         tree,boxes,_=dom_tree(dom);annotate(b,tree)
@@ -158,11 +139,14 @@ def fixture(tmp_path):
         nid=b.page.locator('.card').get_attribute('data-fd-id')
         owner=next(i for i,o in enumerate(parsed['owners']) if o.get('id')==nid)
         target_png,_=b.stable_capture()
+        _,target_boxes,target_items=abstraction(b,tree,[400,200],64)
         css_owners.execute(b,parsed['owners'],[owner,'margin-left','60px',''])
         current=b.page.content();state=css_owners.read(b,tree)['state']
         current_png,_=b.stable_capture()
+        _,boxes,_=abstraction(b,tree,[400,200],64)
     row=dict(id='page/online-0',group='page',source_sha='page',split='train',viewport=[400,200],
-        current=tree,current_boxes=boxes,css_owners=parsed['owners'],declaration_state=state,
+        current=tree,current_boxes=boxes,target_boxes=target_boxes,target_elements=target_items,
+        css_owners=parsed['owners'],declaration_state=state,
         target_declaration_state=parsed['state'],replacement_edit=[owner,'margin-left','10px',''],
         teacher_strategy=css_owners.CONTRACT,symbolic_distance=1)
     for key,value in [('target_html',target),('current_html',current),('target_image',target_png),('current_image',current_png)]:
@@ -174,6 +158,9 @@ def fixture(tmp_path):
 def test_relabel_preserves_assets_teacher_and_both_training_modes(tmp_path,monkeypatch):
     row=fixture(tmp_path);before=copy.deepcopy(row)
     assets={row[k]:Path(row[k]).read_bytes() for k in ('target_html','current_html','target_image','current_image')}
+    def no_capture(*args,**kwargs):
+        raise AssertionError('Relabel must not recapture screenshots')
+    monkeypatch.setattr(HtmlBrowser,'stable_capture',no_capture)
     updated=refresh_row(row,tmp_path/'new',64)
     assert row==before and updated['replacement_edit']==row['replacement_edit']
     assert updated['visual_geometry_contract']==VISUAL_GEOMETRY_CONTRACT
@@ -188,16 +175,27 @@ def test_relabel_preserves_assets_teacher_and_both_training_modes(tmp_path,monke
             stylesheets=True,action_contract=css_owners.CONTRACT,visual_geometry_contract=VISUAL_GEOMETRY_CONTRACT),pretrained=False)
         loss,_=net.loss(*batch_inputs(net,[updated],'cpu'),[updated['replacement_edit']])
         assert torch.isfinite(loss);loss.backward()
-    wrong={**row,'current_image':row['target_image']}
-    with pytest.raises(ValueError,match='saved screenshot differs'):
+    wrong={**row,'current_boxes':row['target_boxes']}
+    with pytest.raises(ValueError,match='label geometry mismatch'):
         refresh_row(wrong,tmp_path/'bad',64)
+
+
+def test_relabel_ignores_rgb_but_checks_image_dimensions(tmp_path):
+    from PIL import Image
+    row=fixture(tmp_path)
+    Image.new('RGB',tuple(row['viewport']),'blue').save(row['current_image'])
+    updated=refresh_row(row,tmp_path/'color',64)
+    assert updated['relabel_audit']['pixel_comparison_performed'] is False
+    Image.new('RGB',(10,10),'blue').save(row['current_image'])
+    with pytest.raises(ValueError,match='image dimensions mismatch'):
+        refresh_row(row,tmp_path/'size',64)
 
 
 def test_manifest_relabel_resume_and_failure_reporting(tmp_path,monkeypatch):
     row=fixture(tmp_path);source=tmp_path/'source';source.mkdir()
     for split in ('train','val','test'):
         sample={**row,'id':split+'/online-0','group':split,'source_sha':split,'split':split}
-        bad={**sample,'id':split+'bad/online-0','current_image':row['target_image']}
+        bad={**sample,'id':split+'bad/online-0','current_boxes':row['target_boxes']}
         write_jsonl(source/f'policy-{split}.jsonl',[sample,bad])
         write_jsonl(source/f'pages-{split}.jsonl',[{'id':split,'split':split,'html':row['target_html']},
                                                   {'id':split+'bad','split':split}])

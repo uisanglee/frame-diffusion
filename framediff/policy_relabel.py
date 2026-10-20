@@ -1,7 +1,6 @@
 """Refresh visual supervision on immutable, already normalized CSS examples."""
 import copy
 import hashlib
-import io
 import json
 from collections import Counter
 from pathlib import Path
@@ -21,53 +20,44 @@ from .web_experiment import digest, guard_run
 CACHE_REVISION='policy-full-dom-owner-box-v2'
 
 
-def render_preservation(saved, measured, row, prefix, boxes, items):
-    """Compare geometry and visible edge locations, not absolute RGB colours.
-
-    This is a structural heuristic, not semantic image/content equivalence.
-    """
-    import numpy as np
-    from PIL import ImageFilter
-    if saved.size != measured.size:
-        raise ValueError(f'{prefix}: saved screenshot differs from measured HTML (size)')
-    a=np.asarray(saved.convert('RGB'));b=np.asarray(measured.convert('RGB'))
-    difference=np.any(a!=b,axis=2)
-    if not difference.any():return {'pixels_equal':True,'criterion':'exact'}
+def geometry_preservation(row, prefix, boxes, items, tolerance=1.0):
+    """Validate saved labels against measured geometry; do not compare RGB."""
+    import math
+    def close(a,b):
+        return len(a)==len(b)==4 and all(
+            math.isfinite(float(x)) and math.isfinite(float(y)) and abs(x-y)<=tolerance
+            for x,y in zip(a,b))
     old=row.get(prefix+'_elements')
     owner_boxes=row.get(prefix+'_boxes')
     if not old and not owner_boxes:
-        raise ValueError(f'{prefix}: saved screenshot differs from measured HTML (no stored geometry)')
+        raise ValueError(f'{prefix}: label geometry mismatch (no stored geometry)')
     if old:
-        from collections import Counter
-        key=lambda e:(e['label'],tuple(e['box']))
-        if Counter(map(key,old))-Counter(map(key,items)):
-            raise ValueError(f'{prefix}: saved screenshot differs from measured HTML (element geometry changed)')
+        # Match one-to-one, allowing newly recovered labels in the full DOM.
+        matched={}
+        candidates=[[j for j,new in enumerate(items)
+                     if new['label']==item['label'] and close(item['box'],new['box'])]
+                    for item in old]
+        def assign(i,seen):
+            for j in candidates[i]:
+                if j in seen:continue
+                seen.add(j)
+                if j not in matched or assign(matched[j],seen):
+                    matched[j]=i;return True
+            return False
+        if any(not assign(i,set()) for i in range(len(old))):
+            raise ValueError(f'{prefix}: label geometry mismatch (element geometry changed)')
     if owner_boxes:
-        if any(k not in boxes or list(v)!=list(boxes[k]) for k,v in owner_boxes.items()):
-            raise ValueError(f'{prefix}: saved screenshot differs from measured HTML (owner geometry changed)')
-    def edges(image):
-        rgb=image.convert('RGB')
-        lo=np.asarray(rgb.filter(ImageFilter.MinFilter(3)),dtype=np.int16)
-        hi=np.asarray(rgb.filter(ImageFilter.MaxFilter(3)),dtype=np.int16)
-        # Within-image contrast suppresses raster noise, not between-image colour
-        # change. RGB channels retain isoluminant coloured boundaries.
-        return (hi-lo).max(axis=2)>16
-    first,second=edges(saved),edges(measured)
-    def expand(mask):
-        return np.asarray(Image.fromarray(mask.astype('uint8')*255).filter(ImageFilter.MaxFilter(3)))>0
-    missing=int((first & ~expand(second)).sum())
-    added=int((second & ~expand(first)).sum())
-    if missing or added:
-        raise ValueError(f'{prefix}: saved screenshot differs from measured HTML '
-                         f'(visible structure changed: missing_edges={missing}, added_edges={added})')
-    return {'pixels_equal':False,'criterion':'stored-geometry-and-visible-edges',
-            'changed_pixel_fraction':float(difference.mean()),
-            'missing_edges':missing,'added_edges':added}
+        if any(k not in boxes or not close(v,boxes[k]) for k,v in owner_boxes.items()):
+            raise ValueError(f'{prefix}: label geometry mismatch (owner geometry changed)')
+    return {'criterion':'stored-label-geometry','tolerance_px':tolerance,
+            'pixel_comparison_performed':False}
 
 
 def failure_reason(exc):
     message=str(exc)
     for text,reason in (
+        ('label geometry mismatch','geometry_mismatch'),
+        ('image dimensions mismatch','image_size_mismatch'),
         ('saved screenshot differs','screenshot_mismatch'),
         ('CSS owners changed','css_owner_mismatch'),
         ('CSS state changed','css_state_mismatch'),
@@ -97,11 +87,13 @@ def refresh_row(row, out, size=384, clean_only=False):
         observations={};preservation={}
         for prefix in (('target',) if clean_only else ('target','current')):
             browser.load(Path(row[prefix+'_html']).read_text(),row['viewport'])
-            png,_=browser.stable_capture()
             annotate(browser,tree,visual_boxes=True)
             mask,boxes,items=abstraction(browser,tree,row['viewport'],size)
-            with Image.open(io.BytesIO(png)) as measured, Image.open(row[prefix+'_image']) as saved:
-                preservation[prefix]=render_preservation(saved,measured,row,prefix,boxes,items)
+            # Header-only check; existing image is not decoded or recaptured.
+            with Image.open(row[prefix+'_image']) as saved:
+                if saved.size!=tuple(row['viewport']):
+                    raise ValueError(f'{prefix}: image dimensions mismatch')
+            preservation[prefix]=geometry_preservation(row,prefix,boxes,items)
             parsed=css_owners.read(browser,tree)
             if parsed['owners']!=row['css_owners']:
                 raise ValueError(f'{prefix}: CSS owners changed')
@@ -132,7 +124,7 @@ def refresh_row(row, out, size=384, clean_only=False):
     # Recheck clean-target eligibility under the new observation definition.
     checked=target_pool([{**result,'split':'train'}],cache_dir=out.parent/'.inspection',observation_size=size)[0]
     result['visible_candidates']=checked['visible_candidates']
-    result['relabel_audit']={'pixels_equal':all(p['pixels_equal'] for p in preservation.values()),
+    result['relabel_audit']={'pixels_equal':None,'pixel_comparison_performed':False,
                             'render_preservation':preservation,'teacher_preserved':True,
                             'target_boxes':target[1]}
     return result

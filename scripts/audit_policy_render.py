@@ -116,7 +116,7 @@ def main():
     with open(args.rejections) as source:
         for line in source:
             item = json.loads(line)
-            if item.get('reason') == 'screenshot_mismatch' and item.get('sample_id') not in wanted:
+            if item.get('reason') in ('screenshot_mismatch','geometry_mismatch','image_size_mismatch') and item.get('sample_id') not in wanted:
                 wanted.append(item['sample_id'])
             if len(wanted) >= args.limit:
                 break
@@ -147,7 +147,7 @@ def main():
         print(json.dumps(summary['samples'][-1], ensure_ascii=False), flush=True)
     if not wanted:
         (out/'summary.json').write_text(json.dumps(summary, indent=2))
-        raise SystemExit('No screenshot_mismatch samples found')
+        raise SystemExit('No screenshot/geometry/image-size mismatch samples found')
 
 
 if __name__ == '__main__':
