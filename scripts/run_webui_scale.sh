@@ -43,6 +43,7 @@ export ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-4}"
 export ROLLOUT_BATCH_WAIT_MS="${ROLLOUT_BATCH_WAIT_MS:-10}"
 [[ "$size" =~ ^[0-9]+$ ]] || { echo 'SIZE must be numeric' >&2; exit 2; }
 base="$data/$size"
+detector_data="${DETECTOR_DATA_ROOT:-$data}/$size/rendered"
 output="$runs/$size"
 [[ -s "$base/coverage.json" ]] || { echo "Complete prepare_webui_scales.sh first: $base/coverage.json missing" >&2; exit 2; }
 if [[ "${REUSE_LEGACY_DOM:-0}" == 1 ]]; then
@@ -69,7 +70,7 @@ if [[ "$stage" == detector || ( "$stage" == all && "$needs_detector" == 1 ) ]]; 
   options=()
   if [[ -f "$output/detector/last.pt" ]]; then options=(--resume "$output/detector/last.pt"); fi
   python -m framediff visual-train-detector \
-    --train "$base/rendered/detector-train.jsonl" --val "$base/rendered/detector-val.jsonl" \
+    --train "$detector_data/detector-train.jsonl" --val "$detector_data/detector-val.jsonl" \
     --out "$output/detector" --device "$device" --seed "${SEED:-42}" \
     --steps "${DETECTOR_STEPS:-20000}" --lr "${DETECTOR_LR:-0.0001}" \
     --render-workers "${DETECTOR_RENDER_WORKERS:-2}" --render-prefetch "${DETECTOR_RENDER_PREFETCH:-4}" \
@@ -80,8 +81,8 @@ if [[ "$stage" == detector || ( "$stage" == all && "$needs_detector" == 1 ) ]]; 
     --early-stop-patience "${EARLY_STOP_PATIENCE:-10}" \
     --early-stop-min-delta "${EARLY_STOP_MIN_DELTA:-0}" ${options[@]+"${options[@]}"}
   for population in own common; do
-    testbase=$base
-    [[ "$population" == common ]] && testbase="$data/$common"
+    testbase="${DETECTOR_DATA_ROOT:-$data}/$size"
+    [[ "$population" == common ]] && testbase="${DETECTOR_DATA_ROOT:-$data}/$common"
     python -m framediff visual-evaluate-detector --data "$testbase/rendered/detector-test.jsonl" \
       --checkpoint "$detector" --out "$output/detector-test-$population.json" \
       --device "$device" --threshold "${DETECTOR_THRESHOLD:-0.4}"

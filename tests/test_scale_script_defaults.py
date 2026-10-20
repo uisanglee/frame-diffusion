@@ -152,6 +152,16 @@ def test_explicit_overrides_are_preserved(tmp_path):
         assert 'tuide-m-abstract' in args[args.index('--abstract-checkpoint')+1]
 
 
+def test_detector_manifest_root_override(tmp_path):
+    calls=run_script(tmp_path,dict(STAGE='detector',DETECTOR_DATA_ROOT='data/full-dom-labels'))
+    training=next(c['args'] for c in calls if 'visual-train-detector' in c['args'])
+    assert training[training.index('--train')+1]=='data/full-dom-labels/7000/rendered/detector-train.jsonl'
+    for call in calls:
+        args=call['args']
+        if 'visual-evaluate-detector' in args:
+            assert args[args.index('--data')+1]=='data/full-dom-labels/7000/rendered/detector-test.jsonl'
+
+
 def test_screenshot_all_skips_detector_and_evaluates_single_stage(tmp_path):
     calls=run_script(tmp_path,dict(STAGE='all',POLICY_MODES='screenshot'))
     assert len(calls)==3  # one policy run and own/common rollout

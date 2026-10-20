@@ -46,7 +46,8 @@ def initialize():
 
 
 def process(task):
-    row, folder = task
+    row, folder, *options = task
+    reuse_only=bool(options and options[0])
     from framediff.html_bridge import HtmlBrowser
     from framediff.lazy_webui import TrainViewCache
     from framediff.visual import detector_labels
@@ -54,6 +55,13 @@ def process(task):
     key = hashlib.sha256(json.dumps(row, sort_keys=True).encode()).hexdigest()
     work = Path(folder) / 'assets' / key
     record = work / 'record.json'
+    if reuse_only and row.get('lazy_contract'):
+        # No existing RGB to relabel: keep deferred preparation deferred.
+        return {**row,'visual_geometry_contract':VISUAL_GEOMETRY_CONTRACT,
+                'detector_label_contract':DETECTOR_LABEL_CONTRACT,
+                'lazy_settings':{**row['lazy_settings'],
+                    'visual_geometry_contract':VISUAL_GEOMETRY_CONTRACT,
+                    'detector_label_contract':DETECTOR_LABEL_CONTRACT,'min_elements':0}}
     if record.exists():
         saved = json.loads(record.read_text())
         if Path(saved['image']).is_file() and Path(saved['audit_html']).is_file():
@@ -94,13 +102,18 @@ def process(task):
             with PIL.Image.open(io.BytesIO(png)) as new:
                 reused_pixels = old.size == new.size and old.tobytes() == new.convert('RGB').tobytes()
         # Never attach fresh boxes to a different historical screenshot.
-        (work / 'image.png').write_bytes(image.read_bytes() if reused_pixels else png)
-        (work / 'page.html').write_bytes(html.read_bytes())
+        if reuse_only:
+            if not reused_pixels:
+                raise ValueError('Saved screenshot differs from measured HTML; reuse-images-only forbids replacement')
+        else:
+            (work / 'image.png').write_bytes(image.read_bytes() if reused_pixels else png)
+            (work / 'page.html').write_bytes(html.read_bytes())
         labels, audit = generated['elements'], generated['label_audit']
     result = {k: row[k] for k in ('id', 'group', 'split', 'source_sha', 'page_id', 'view') if k in row}
     result.update(contract=CONTRACT, visual_geometry_contract=VISUAL_GEOMETRY_CONTRACT,
                   detector_label_contract=DETECTOR_LABEL_CONTRACT, viewport=viewport,
-                  image=str(work / 'image.png'), audit_html=str(work / 'page.html'),
+                  image=str(image.resolve() if reuse_only else work / 'image.png'),
+                  audit_html=str(html.resolve() if reuse_only else work / 'page.html'),
                   elements=labels, label_audit=audit, reused_pixels=reused_pixels)
     temp = record.with_suffix('.tmp')
     temp.write_text(json.dumps(result, ensure_ascii=False))
@@ -114,6 +127,8 @@ def main():
     parser.add_argument('--out', required=True)
     parser.add_argument('--sizes', type=int, nargs='+', default=[7000, 56169])
     parser.add_argument('--workers', type=int, default=8)
+    parser.add_argument('--reuse-images-only',action='store_true',
+                        help='Reference existing RGB/HTML, reject mismatches, retain lazy train descriptors')
     args = parser.parse_args()
     if args.workers < 1:
         parser.error('workers must be positive')
@@ -140,6 +155,7 @@ def main():
               'code': {name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in [
                   ('script', Path(__file__)),
                   ('visual', Path(__file__).resolve().parents[1] / 'framediff/visual.py')]}}
+    if args.reuse_images_only:config['reuse_images_only']=True
     config_path = out / 'relabel-config.json'
     if config_path.exists() and not compatible_config(json.loads(config_path.read_text()), config):
         raise ValueError('Source/code changed; choose a new output root')
@@ -157,7 +173,7 @@ def main():
             while cursor < len(keys) or pending:
                 while cursor < len(keys) and len(pending) < args.workers * 2:
                     key = keys[cursor]; cursor += 1
-                    pending.append((key, pool.submit(process_checked, (unique[key], str(out)))))
+                    pending.append((key, pool.submit(process_checked, (unique[key], str(out),args.reuse_images_only))))
                 key, future = pending.popleft()
                 result, error = future.result()
                 if error is None:

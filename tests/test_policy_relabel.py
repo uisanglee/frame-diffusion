@@ -2,6 +2,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import copy
 import json
+import importlib.util
 
 import pytest
 
@@ -11,6 +12,31 @@ from framediff.plans import dom_tree
 from framediff.visual import annotate, VISUAL_GEOMETRY_CONTRACT
 from framediff.policy_relabel import refresh_row, relabel
 from framediff.ir import write_jsonl, read_jsonl
+
+
+def test_detector_relabel_reuse_images_only(tmp_path):
+    spec=importlib.util.spec_from_file_location('detector_relabel',Path(__file__).resolve().parents[1]/'scripts/relabel_detector_data.py')
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    row=fixture(tmp_path)
+    # Script pairs the cached screenshot with the same-stem HTML.
+    html=Path(row['target_image']).with_suffix('.html')
+    html.write_bytes(Path(row['target_html']).read_bytes())
+    source={'id':'page/clean','group':'page','source_sha':'page','split':'val',
+            'image':row['target_image'],'viewport':row['viewport']}
+    before=Path(row['target_image']).read_bytes()
+    result=module.process((source,str(tmp_path/'out'),True))
+    assert result['image']==str(Path(row['target_image']).resolve())
+    assert result['audit_html']==str(html.resolve())
+    assert not list((tmp_path/'out').rglob('*.png'))
+    assert Path(row['target_image']).read_bytes()==before
+    assert module.process((source,str(tmp_path/'out'),True))==result
+    html.write_text('<body>different</body>')
+    with pytest.raises(ValueError,match='forbids replacement'):
+        module.process((source,str(tmp_path/'mismatch'),True))
+    lazy={**source,'lazy_contract':'test','lazy_settings':{}}
+    result=module.process((lazy,str(tmp_path/'lazy'),True))
+    assert result['lazy_settings']['visual_geometry_contract']==VISUAL_GEOMETRY_CONTRACT
+    assert not (tmp_path/'lazy').exists()
 
 
 def test_live_failure_reporting(tmp_path,monkeypatch,capsys):
