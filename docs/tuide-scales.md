@@ -32,6 +32,8 @@ at LR 1e-4, stage 2 up to 15,000 steps at LR 1e-5, validation every 500 steps,
 2,000 validation samples, early-stop patience 10. Each stage loads its own
 `last.pt` if present; stage 2 otherwise initializes from that scale's stage 1 best.
 Use a new output directory for a different scale or changed run settings.
+This training early-stop patience is based on validation loss; it is separate
+from the inference-time pixel goal described below.
 
 Override paths explicitly when necessary:
 
@@ -87,6 +89,31 @@ Override paths with `RAW_CHECKPOINT`, `DETECTOR_CHECKPOINT`, and
 Capacity runs share the same prepared JSONL, seed, steps and detector. An S RGB
 versus M/L abstract comparison changes both modality and capacity; use S RGB
 versus S abstract for the isolated abstraction ablation.
+
+### Inference-time pixel goal
+
+Both screenshot and TUIDE abstract rollouts stop early by default when at least
+99% of full-resolution pixels in the current browser render match the target
+screenshot within a normalized RGB tolerance of 0.005 **in every channel**.
+The check runs before the first policy action and after subsequent actions,
+including the final action permitted by `REPAIR_STEPS` (20 by default).
+`REPAIR_STEPS` remains a maximum, not a guaranteed number of edits. There is no
+image-error-worsening rollback; the scroll-preservation guard is separate.
+Evaluation results record `goal_reached`, `stop_reason`,
+`pixel_match_fraction`, and the number/time of pixel-goal checks. This is a
+pixel-count rule, not TinySVG's Gaussian-score rule in the public code.
+
+In its normal, non-scaling evaluation path, `run_visual_web.sh` accepts
+`PIXEL_GOAL_FRACTION` (default `0.99`) and `PIXEL_GOAL_TOLERANCE` (default
+`0.005`). For example, to evaluate with a 99.5% match requirement, add
+`PIXEL_GOAL_FRACTION=0.995` to the command's environment. For a fixed-step
+comparison, set `PIXEL_GOAL_FRACTION=-1`. Direct
+`visual-evaluate` and `visual-test-rollout` calls use the corresponding
+`--pixel-goal-fraction` and `--pixel-goal-tolerance` flags. The
+`run_tuide_scales.sh` path (also used when `TUIDE_SCALES=1`) uses the CLI
+defaults and does not forward these environment overrides. Run comparisons
+with the same pixel-goal settings. Using `--resume` with changed settings in
+an existing evaluation directory is not supported.
 
 Train a matched RGB policy using `POLICY_MODES=screenshot`:
 
@@ -159,8 +186,8 @@ representation from an already trained policy. Default old checkpoints remain
 loadable as occupancy+boundary. Evaluation automatically reads the representation
 from the checkpoint; it needs no representation override. Use the same fixed
 test states, detector threshold, repair-step budget and seeds for every run.
-Stopping/rollback checks use the same canonical occupancy+boundary distance,
-independent of the input representation, and teacher generation is unchanged.
+Inference stopping uses the same full-resolution target-versus-current RGB
+pixel goal for every input representation, and teacher generation is unchanged.
 Equal optimizer-step budgets do not imply equal FLOPs: report wall time and
 parameter counts too. Use multiple seeds for the final comparison.
 

@@ -202,7 +202,7 @@ def test_cached_prepare_train_resume_and_rollout(tmp_path,representation):
     row=rows[0]
     with HtmlBrowser() as browser:
         html,stats,_=rollout(browser,Path(row['current_html']).read_text(),row['current'],row['viewport'],
-            row['target_image'],net,steps=1,oracle_elements=row['target_elements'])
+                row['target_image'],net,steps=1,oracle_elements=row['target_elements'],pixel_goal_fraction=-1)
         assert stats['actions']==1 and stats['browser_screenshots']==0
         assert stats['stop_reason']=='steps' and stats['pair_image_encodings']==1
 

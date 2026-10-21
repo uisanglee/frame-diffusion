@@ -86,7 +86,8 @@ def test_preparation_online_training_resume_and_rollout(tmp_path,monkeypatch):
     # about the two-step smoke-trained checkpoint.
     monkeypatch.setattr(TreePolicy,'predict',lambda self,*a,**k:test['replacement_edit'])
     main(['visual-test-rollout','--data',str(frozen/'policy-test.jsonl'),'--pages',str(frozen/'pages-test.jsonl'),
-          '--raw-checkpoint',str(checkpoint),'--out',str(tmp_path/'eval'),'--device','cpu','--steps','1'])
+              '--raw-checkpoint',str(checkpoint),'--out',str(tmp_path/'eval'),'--device','cpu','--steps','1',
+              '--pixel-goal-fraction','-1'])
     result=list(read_jsonl(tmp_path/'eval/results.jsonl'))[0]
     assert result['failed'] is False
     assert result['final_box_iou']==pytest.approx(1.)

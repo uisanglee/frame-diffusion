@@ -127,9 +127,13 @@ def add_parsers(sub):
     p.add_argument('--abstract-only',action='store_true',help='Evaluate abstraction policy alone, including capacity comparisons')
     p.add_argument('--device',default='auto');p.add_argument('--threshold',type=float,default=.4)
     p.add_argument('--goal-threshold',type=float,default=-1,
-                   help='RGB MAE termination threshold; -1 disables for fixed-budget comparisons')
+                   help='Legacy RGB MAE stop, used only when --pixel-goal-fraction -1')
     p.add_argument('--abstract-goal-threshold',type=float,default=-1,
-                   help='Semantic mask MAE termination threshold; calibrate on validation only; -1 disables')
+                   help='Reserved for compatibility; use the pixel goal for TUIDE')
+    p.add_argument('--pixel-goal-fraction',type=float,default=.99,
+                   help='Stop when this fraction of full-resolution RGB pixels matches; -1 disables')
+    p.add_argument('--pixel-goal-tolerance',type=float,default=.005,
+                   help='Maximum normalized difference allowed in every RGB channel of a matching pixel')
     p.add_argument('--time-budget',type=float,default=0.,help='Per-method seconds including target preprocessing; soft operation-boundary limit')
     p.add_argument('--oracle-ablation',action='store_true',help='Controlled visual-build-data pages ONLY')
     p.add_argument('--resume',action='store_true')
@@ -144,7 +148,12 @@ def add_parsers(sub):
     p.add_argument('--raw-checkpoint');p.add_argument('--abstract-checkpoint');p.add_argument('--detector-checkpoint')
     p.add_argument('--device',default='auto');p.add_argument('--threshold',type=float,default=.4)
     p.add_argument('--goal-threshold',type=float,default=-1)
-    p.add_argument('--abstract-goal-threshold',type=float,default=-1)
+    p.add_argument('--abstract-goal-threshold',type=float,default=-1,
+                   help='Reserved for compatibility; use the pixel goal for TUIDE')
+    p.add_argument('--pixel-goal-fraction',type=float,default=.99,
+                   help='Stop when this fraction of full-resolution RGB pixels matches; -1 disables')
+    p.add_argument('--pixel-goal-tolerance',type=float,default=.005,
+                   help='Maximum normalized difference allowed in every RGB channel of a matching pixel')
     p.add_argument('--time-budget',type=float,default=0.)
     p.add_argument('--resume',action='store_true')
     for k,v in [('steps',20),('repeats',1),('limit',0),('cpu-threads',4)]:p.add_argument('--'+k,type=int,default=v)
@@ -196,6 +205,13 @@ def run(args):
     for key in ('goal_threshold','abstract_goal_threshold'):
         value=getattr(args,key,-1)
         if value!=-1 and not 0<=value<=1:raise ValueError(key+' must be -1 or in [0,1]')
+    if args.command in ('visual-evaluate','visual-test-rollout') and getattr(args,'abstract_goal_threshold',-1)!=-1:
+        raise ValueError('TUIDE uses --pixel-goal-fraction and --pixel-goal-tolerance; set --abstract-goal-threshold -1')
+    if args.command in ('visual-evaluate','visual-test-rollout'):
+        fraction=getattr(args,'pixel_goal_fraction',.99)
+        if fraction!=-1 and not 0<=fraction<=1:raise ValueError('pixel-goal-fraction must be -1 or in [0,1]')
+        if not 0<=getattr(args,'pixel_goal_tolerance',.005)<=1:
+            raise ValueError('pixel-goal-tolerance must be in [0,1]')
     if getattr(args,'limit',0)<0:raise ValueError('limit must be nonnegative')
     if getattr(args,'warmup',0)<0:raise ValueError('warmup must be nonnegative')
     if not 0<=getattr(args,'max_source_mae',1.)<=1:raise ValueError('max-source-mae must be in [0,1]')

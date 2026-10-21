@@ -79,7 +79,7 @@ def test_rollout_returns_initial_when_shared_rule_hides_below_fold(tmp_path):
         policy=TreePolicy(TreeConfig(mode='screenshot',size=32,hidden=16,layers=1,heads=2,
             token_grid=2,max_nodes=32,stylesheets=True,action_contract=css_owners.CONTRACT),False)
         policy.eval();policy.predict=lambda *a,**k:[owner,'height','0px','']
-        result,stats,_=rollout(b,dom['html'],tree,[400,200],str(image),policy,steps=1)
+        result,stats,_=rollout(b,dom['html'],tree,[400,200],str(image),policy,steps=1,pixel_goal_fraction=-1)
         assert not stats['failed'],stats
         assert stats['scroll_guard_rolled_back'] and result==dom['html']
         assert stats['actions']==0 and stats['actions_before_scroll_rollback']==1

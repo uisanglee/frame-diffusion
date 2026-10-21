@@ -347,7 +347,7 @@ def test_new_modalities_rollout_capture_counts(tmp_path,monkeypatch):
                     'semantic-mask-pair-diff-v1' if mode=='abstract' else 'rgb-pair-diff-v1'))
             policy=VisualPolicy(cfg,False).eval()
             _,stats,_=rollout(browser,snapshot['html'],tree,[320,240],str(target),policy,
-                parser=object(),steps=2)
+                parser=object(),steps=2,pixel_goal_fraction=-1)
             assert stats['actions']==2 and stats['stop_reason']=='steps'
             assert stats['pair_image_encodings']==2 and stats['dom_queries']==2
             assert stats['browser_screenshots']==(2 if mode=='screenshot' else 0)
@@ -492,7 +492,7 @@ def test_rollout_uses_one_target_parse_and_real_feedback(tmp_path,monkeypatch):
         for mode in ('screenshot','abstract'):
             policy=ScriptedPolicy(mode,index)
             result,stats,_=rollout(browser,dom['html'],tree,[320,240],str(target_path),policy,object(),steps=3,
-                                   diagnostic_target_boxes=boxes)
+                                   diagnostic_target_boxes=boxes,pixel_goal_fraction=-1)
             assert stats['actions']==1 and stats['stop_reason']=='policy_stop'
             assert stats['target_image_encodings']==1 and stats['current_image_encodings']==2
             assert stats['browser_screenshots']==(2 if mode=='screenshot' else 0)

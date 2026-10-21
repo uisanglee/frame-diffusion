@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from PIL import Image
 
 from framediff import css_owners
 from framediff.tree_edits import repair_path, FIELDS
@@ -14,6 +15,55 @@ body {margin:0} .card {width:240px;height:40px}
 .card {width:200px}
 @media (max-width: 100px) {.card {width:99px!important}}
 </style></head><body><section class="container"><div class="card">A</div><div class="card">B</div></section></body></html>'''
+
+
+def test_pixel_goal_counts_whole_rgb_pixels():
+    from framediff.visual_experiment import pixel_match_fraction
+    target=Image.new('RGB',(10,10),(20,30,40))
+    current=target.copy()
+    current.putpixel((0,0),(22,30,40))
+    assert pixel_match_fraction(target,current)==pytest.approx(.99)
+    current.putpixel((1,0),(20,32,40))
+    assert pixel_match_fraction(target,current)==pytest.approx(.98)
+    current.putpixel((0,0),(21,30,40))
+    current.putpixel((1,0),(20,31,40))
+    assert pixel_match_fraction(target,current)==1.
+    assert pixel_match_fraction(target,Image.new('RGB',(9,10)))==0.
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize('mode',['abstract','screenshot'])
+def test_pixel_goal_stops_before_edit_and_after_last_edit(tmp_path,mode):
+    from framediff.html_bridge import HtmlBrowser
+    from framediff.plans import dom_tree
+    from framediff.tree_policy import TreeConfig,TreePolicy
+    from framediff.visual import annotate,elements
+    from framediff.visual_experiment import rollout
+    target=tmp_path/'target.png'
+    with HtmlBrowser() as browser:
+        dom=browser.snapshot('<style>.card{width:120px;height:30px;background:red}</style><div class="card"></div>',
+                             [320,180],max_nodes=12)
+        tree,boxes,_=dom_tree(dom);annotate(browser,tree)
+        browser.page.screenshot(path=str(target),animations='disabled')
+        clean=browser.page.content();parsed=css_owners.read(browser,tree)
+        owner=next(i for i,item in enumerate(parsed['owners']) if item.get('selector')=='.card')
+        oracle=elements(tree,boxes,[320,180]) if mode=='abstract' else None
+        policy=TreePolicy(TreeConfig(mode=mode,size=32,hidden=16,layers=1,heads=2,
+            token_grid=2,max_nodes=12,stylesheets=True,action_contract=css_owners.CONTRACT,
+            existing_values_only=True),False).eval()
+        policy.predict=lambda *args,**kwargs:pytest.fail('Already matching image must stop before inference')
+        unchanged,stats,_=rollout(browser,clean,tree,[320,180],str(target),policy,
+                                   oracle_elements=oracle,steps=3)
+        assert unchanged==clean and stats['goal_reached'] and stats['actions']==0
+        assert stats['stop_reason']=='pixel_goal' and stats['pixel_match_fraction']==1.
+        css_owners.execute(browser,parsed['owners'],[owner,'width','80px',''])
+        broken=browser.page.content();policy.predict=lambda *args,**kwargs:[owner,'width','120px','']
+        repaired,stats,_=rollout(browser,broken,tree,[320,180],str(target),policy,
+                                 oracle_elements=oracle,steps=1)
+        assert stats['goal_reached'] and stats['actions']==1
+        assert stats['stop_reason']=='pixel_goal' and stats['pixel_goal_checks']==2
+        browser.load(repaired,[320,180])
+        assert css_owners.read(browser,tree)['state'][owner][FIELDS.index('width')]==['120px','']
 
 
 @pytest.mark.browser
@@ -95,25 +145,23 @@ def test_owner_online_samples_and_policy_rollout(tmp_path):
     policy.predict=lambda *args,**kw:row['replacement_edit']
     with HtmlBrowser() as browser:
         result,stats,_=rollout(browser,row['current_html_text'],tree,[500,300],str(image),policy,
-            oracle_elements=target['target_elements'],steps=1)
+            oracle_elements=target['target_elements'],steps=1,pixel_goal_fraction=-1)
         assert stats['history'][0]['css_owner']['kind']=='rule'
         browser.load(result,[500,300]);state=css_owners.read(browser,tree)['state']
         index,field,value,priority=row['replacement_edit']
         assert state[index][FIELDS.index(field)]==[value,priority]
 
-    # A replacement that makes the target abstraction worse is rolled back,
-    # and the best HTML (the clean initial state here) is returned.
+    # A visually worse action is retained, then the next fixed step runs.
     winner=next(i for i,o in enumerate(parsed['owners']) if o.get('selector')=='.container .card')
     policy.predict=lambda *args,**kw:[winner,'width','450px','']
     with HtmlBrowser() as browser:
         result,stats,_=rollout(browser,html.read_text(),tree,[500,300],str(image),policy,
-            oracle_elements=target['target_elements'],steps=2)
-        assert stats['attempted_actions']==1 and stats['actions']==0
-        assert stats['rolled_back_actions']==1 and stats['stop_reason']=='abstract_mae_rollback'
-        assert stats['history'][0]['accepted'] is False
-        assert stats['history'][0]['goal_mae_after']>stats['history'][0]['goal_mae_before']
+            oracle_elements=target['target_elements'],steps=2,pixel_goal_fraction=-1)
+        assert stats['attempted_actions']==2 and stats['actions']==2
+        assert stats['rolled_back_actions']==0 and stats['stop_reason']=='steps'
+        assert all(event['accepted'] for event in stats['history'])
         browser.load(result,[500,300])
-        assert css_owners.read(browser,tree)['state']==parsed['state']
+        assert css_owners.read(browser,tree)['state'][winner][FIELDS.index('width')]==['450px','']
 
 
 @pytest.mark.browser

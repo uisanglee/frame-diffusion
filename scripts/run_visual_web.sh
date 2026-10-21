@@ -83,6 +83,8 @@ python -m framediff visual-evaluate --data "$prepared" \
   --device "${DEVICE:-cuda}" --steps "${REPAIR_STEPS:-20}" --repeats "${REPEATS:-3}" \
   --time-budget "${TIME_BUDGET:-0}" --goal-threshold "${GOAL_THRESHOLD:--1}" \
   --abstract-goal-threshold "${ABSTRACT_GOAL_THRESHOLD:--1}" \
+  --pixel-goal-fraction "${PIXEL_GOAL_FRACTION:-0.99}" \
+  --pixel-goal-tolerance "${PIXEL_GOAL_TOLERANCE:-0.005}" \
   --limit "${PAGE_LIMIT:-0}" "${extra[@]}" --resume
 metrics=()
 if [[ -n "${OFFICIAL_REPO:-}" && "${WEB_DATASET:-design2code}" != webui ]]; then metrics+=(--official-repo "$OFFICIAL_REPO"); fi

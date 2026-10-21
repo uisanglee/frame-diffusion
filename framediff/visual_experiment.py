@@ -6,6 +6,7 @@ import random
 import statistics
 import time
 
+import numpy as np
 from PIL import Image
 import torch
 
@@ -24,13 +25,23 @@ def sync(device):
     if str(device).startswith('cuda'):torch.cuda.synchronize(device)
 
 
+def pixel_match_fraction(target,current,tolerance=.005):
+    """Fraction of RGB pixels whose every channel is within the tolerance."""
+    a=np.asarray(target.convert('RGB') if isinstance(target,Image.Image) else target,dtype=np.int16)
+    b=np.asarray(current.convert('RGB'),dtype=np.int16)
+    if a.shape!=b.shape:return 0.
+    return float((np.abs(a-b).max(axis=2)<=tolerance*255).mean())
+
+
 def rollout(browser,html,tree,viewport,target_path,policy,parser=None,threshold=.4,
-            steps=10,time_budget=0,oracle_elements=None,diagnostic_target_boxes=None,goal_threshold=-1):
+            steps=10,time_budget=0,oracle_elements=None,diagnostic_target_boxes=None,goal_threshold=-1,
+            pixel_goal_fraction=.99,pixel_goal_tolerance=.005):
     """Keep partial work and costs even when an execution/verification fails."""
     stats={};started=time.perf_counter();before=browser.executions;shots=browser.screenshots
     try:
         return _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,steps,time_budget,
-                        oracle_elements,diagnostic_target_boxes,goal_threshold,stats)
+                        oracle_elements,diagnostic_target_boxes,goal_threshold,
+                        pixel_goal_fraction,pixel_goal_tolerance,stats)
     except Exception as exc:
         # A failed render may have a dead page. In that case keep the input,
         # but never invent zero execution costs for work already performed.
@@ -48,34 +59,38 @@ def rollout(browser,html,tree,viewport,target_path,policy,parser=None,threshold=
 
 
 def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
-             steps,time_budget,oracle_elements,diagnostic_target_boxes,goal_threshold,stats):
+             steps,time_budget,oracle_elements,diagnostic_target_boxes,goal_threshold,
+             pixel_goal_fraction,pixel_goal_tolerance,stats):
     """Only the explicitly enabled oracle ablation accepts target elements.
 
-    Autoregressive policies have no learned STOP. Optional parent-first probing
-    uses the available target observation, never oracle boxes/CSS for ranking.
+    Autoregressive policies have no learned STOP. Both modalities apply one
+    predicted CSS action per step without an image-error rollback.
     Wall-clock budgets are soft and checked between operations.
     """
     device=next(policy.parameters()).device;cfg=policy.cfg
+    if cfg.mode=='abstract' and goal_threshold!=-1:
+        raise ValueError('TUIDE uses the pixel goal; abstract MAE goal_threshold must be -1')
+    if pixel_goal_fraction!=-1 and not 0<=pixel_goal_fraction<=1:
+        raise ValueError('pixel_goal_fraction must be -1 or in [0,1]')
+    if not 0<=pixel_goal_tolerance<=1:
+        raise ValueError('pixel_goal_tolerance must be in [0,1]')
     before=browser.executions;shots=browser.screenshots;sync(device);start=time.perf_counter()
     stats.update({'target_abstraction_seconds':0.,'target_encoding_seconds':0.,'current_render_seconds':0.,
            'current_encoding_seconds':0.,'policy_seconds':0.,'layout_seconds':0.,
            'abstraction_calls':0,'current_image_encodings':0,'target_image_encodings':0,
            'actions':0,'mode':cfg.mode,'stop_reason':'steps','history':[],
            'observation_contract':cfg.observation_contract,'goal_threshold':goal_threshold,
+           'pixel_goal_fraction':pixel_goal_fraction,'pixel_goal_tolerance':pixel_goal_tolerance,
+           'pixel_match_fraction':None,'pixel_goal_checks':0,'pixel_goal_seconds':0.,'goal_reached':False,
            'pair_encoding_seconds':0.,'pair_image_encodings':0,'dom_queries':0,'failed':False,'error':None})
-    # The deployed TUIDE policy is the abstract replacement policy.  Its edit is
-    # committed only when the resulting abstraction does not move farther from
-    # the target. Parent-first additionally requires strict improvement for
-    # either modality; other RGB/legacy policies retain their original behavior.
-    parent_first=getattr(cfg,'parent_first',False)
-    if parent_first and (cfg.policy_head!='replacement' or not getattr(cfg,'stylesheets',False)):
-        raise ValueError('Parent-first rollout requires replacement stylesheet policy')
-    monotonic_abstract=(cfg.mode=='abstract' and cfg.policy_head=='replacement') or parent_first
-    blocked_owners=set()
-    stats.update(parent_first=parent_first,parent_first_probes=0,
+    stats.update(parent_first=getattr(cfg,'parent_first',False),parent_first_probes=0,
                  acceptance_metric='semantic_mae' if cfg.semantic else 'image_mae')
-    stats.update(monotonic_abstract_mae=monotonic_abstract,attempted_actions=0,
+    stats.update(monotonic_abstract_mae=False,attempted_actions=0,
                  rolled_back_actions=0,best_state_restored=False)
+    source_target=None
+    if cfg.mode=='screenshot' or pixel_goal_fraction>=0:
+        with Image.open(target_path) as image:source_target=image.convert('RGB')
+    goal_target=np.asarray(source_target,dtype=np.int16) if pixel_goal_fraction>=0 else None
     t=time.perf_counter()
     if cfg.mode=='abstract':
         if oracle_elements is None:
@@ -87,8 +102,7 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
         target=abstract_image(items,viewport,cfg.size)
         sync(device);stats['target_abstraction_seconds']=time.perf_counter()-t
         stats['predicted_elements']=len(items)
-    else:
-        with Image.open(target_path) as image:target=image.convert('RGB')
+    else:target=source_target
     from .visual import BOUNDARY_CONTRACT,abstraction_tensor
     target_tensor=(abstraction_tensor(items,viewport,cfg) if cfg.semantic else image_tensor(target,cfg.size))[None].to(device)
     metric_boundaries=cfg.observation_contract==BOUNDARY_CONTRACT if cfg.semantic else False
@@ -124,11 +138,7 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
     t=time.perf_counter();scroll_before=scroll_snapshot(browser)
     stats['scroll_guard_seconds']=time.perf_counter()-t
     stats['_scroll_verification_pending']=True
-    best_html=html;best_goal_mae=None;current_goal_mae=None
-    probe_budget=cfg.parent_first_max_probes if parent_first else steps
-    for step in range(probe_budget if steps>0 else 0):
-        if parent_first and stats['actions']>=steps:
-            stats['stop_reason']='steps';break
+    for step in range(max(0,steps)):
         if time_budget and time.perf_counter()-start>=time_budget:stats['stop_reason']='time_budget';break
         t=time.perf_counter();boxes=browser.tagged_boxes(ids);boxes[root]=[0,0,*viewport]
         stats['dom_queries']+=1
@@ -136,10 +146,20 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
         from .explicit_html import feedback_metadata
         feedback=feedback_metadata(browser,current_tree)
         t=time.perf_counter()
-        if cfg.mode=='screenshot':
+        current_rgb=None
+        if cfg.mode=='screenshot' or pixel_goal_fraction>=0:
             from .explicit_html import feedback_screenshot
             png=feedback_screenshot(browser,animations='disabled');browser.screenshots+=1
-            with Image.open(io.BytesIO(png)) as image:current_image=image.convert('RGB')
+            with Image.open(io.BytesIO(png)) as image:current_rgb=image.convert('RGB')
+        if pixel_goal_fraction>=0:
+            match=pixel_match_fraction(goal_target,current_rgb,pixel_goal_tolerance)
+            stats['pixel_match_fraction']=match;stats['pixel_goal_checks']+=1
+            stats['pixel_goal_seconds']+=time.perf_counter()-t
+            if match>=pixel_goal_fraction:
+                stats['history'].append({'step':step,'action':None,'boxes':boxes,
+                    'pixel_match_fraction':match,'elapsed_seconds':time.perf_counter()-start})
+                stats['stop_reason']='pixel_goal';stats['goal_reached']=True;break
+        if cfg.mode=='screenshot':current_image=current_rgb
         elif cfg.semantic:
             current_items=elements(current_tree,boxes,viewport,feedback.get('current_clip_boxes'))
             current_image=abstraction_tensor(current_items,viewport,cfg)
@@ -150,11 +170,7 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
         if cfg.policy_head in ('autoregressive','replacement'):
             current_metric=(semantic_masks(current_items,viewport,cfg.size,boundaries=metric_boundaries)[None].to(device) if separate_metric else current_tensor)
             goal_mae=observation_mae(target_metric,current_metric,cfg.semantic)
-            current_goal_mae=goal_mae
-            if monotonic_abstract and (best_goal_mae is None or goal_mae<best_goal_mae):
-                best_goal_mae=goal_mae;best_html=current_html
-                if 'initial_goal_mae' not in stats:stats['initial_goal_mae']=goal_mae
-            if goal_threshold>=0 and goal_mae<=goal_threshold:
+            if pixel_goal_fraction<0 and cfg.mode!='abstract' and goal_threshold>=0 and goal_mae<=goal_threshold:
                 stats['history'].append({'step':step,'action':None,'boxes':boxes,
                     'goal_mae':goal_mae,'elapsed_seconds':time.perf_counter()-start})
                 stats['stop_reason']='goal';break
@@ -182,19 +198,7 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
                 pair=policy.encode_pair(target_tensor,current_tensor)
                 sync(device);pair_elapsed=time.perf_counter()-pair_start
                 stats['pair_encoding_seconds']+=pair_elapsed
-                if parent_first:
-                    from .parent_first import owner_order
-                    legal=policy.tokenizer.allowed([],len(state),state=state,
-                        size_limits=batch.get('explicit_owner_limits',[{}])[0])
-                    legal_ids={int(policy.tokenizer.tokens[v][1:]) for v in legal}
-                    candidates=[i for i in owner_order(tree,owner_state['owners'])
-                                if i in legal_ids and i not in blocked_owners]
-                    if not candidates:
-                        stats['stop_reason']='parent_first_no_improving_proposal';break
-                    chosen=candidates[0]
-                    action=policy.predict(batch,target_tensor,current_tensor,[state],pair,allowed_owners=[chosen])
-                    stats['parent_first_probes']+=1
-                else:action=policy.predict(batch,target_tensor,current_tensor,[state],pair)
+                action=policy.predict(batch,target_tensor,current_tensor,[state],pair)
                 stats['pair_image_encodings']+=1;stats['target_image_encodings']+=1
             elif cfg.policy_head=='autoregressive':
                 sync(device);pair_start=time.perf_counter()
@@ -239,77 +243,20 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
             history.update(rejected_action=action,action=None,rejection=str(exc))
             stats['rejected_size_actions']=stats.get('rejected_size_actions',0)+1
             stats['layout_seconds']+=time.perf_counter()-t
-            if parent_first:
-                browser.load(current_html,viewport);blocked_owners.add(action[0])
-                history['accepted']=False
-                continue
             stats.update(failed=True,error=str(exc),stop_reason='invalid_action')
             break
         candidate_html=browser.page.content();stats['layout_seconds']+=time.perf_counter()-t
-        if monotonic_abstract:
-            # Evaluate the actual post-edit browser layout.  This is deliberately
-            # based only on the same target abstraction available to the policy;
-            # no oracle boxes, CSS target state, or RGB target score is consulted.
-            t=time.perf_counter();candidate_boxes=browser.tagged_boxes(ids);candidate_boxes[root]=[0,0,*viewport]
-            stats['dom_queries']+=1
-            candidate_tree=refresh_geometry(copy.deepcopy(current_tree),candidate_boxes)
-            from .explicit_html import feedback_metadata
-            candidate_feedback=feedback_metadata(browser,candidate_tree)
-            stats['layout_seconds']+=time.perf_counter()-t
-            t=time.perf_counter()
-            candidate_items=elements(candidate_tree,candidate_boxes,viewport,candidate_feedback.get('current_clip_boxes'))
-            if cfg.mode=='screenshot':
-                from .explicit_html import feedback_screenshot
-                candidate_png=feedback_screenshot(browser,animations='disabled');browser.screenshots+=1
-                with Image.open(io.BytesIO(candidate_png)) as im:
-                    candidate_tensor=image_tensor(im.convert('RGB'),cfg.size)[None].to(device)
-            elif cfg.semantic:
-                candidate_image=semantic_masks(candidate_items,viewport,cfg.size,
-                    boundaries=metric_boundaries)
-                candidate_tensor=candidate_image[None].to(device)
-            else:
-                candidate_image=abstract_image(candidate_items,viewport,cfg.size)
-                candidate_tensor=image_tensor(candidate_image,cfg.size)[None].to(device)
-            candidate_mae=observation_mae(target_metric,candidate_tensor,cfg.semantic)
-            stats['current_render_seconds']+=time.perf_counter()-t
-            history['goal_mae_after']=candidate_mae
-            # A tiny tolerance prevents floating-point jitter from triggering a
-            # rollback. Equal-distance edits are allowed, as the guard is meant
-            # to reject worsening actions rather than introduce a new STOP label.
-            if candidate_mae>goal_mae+1e-8 or (parent_first and candidate_mae>=goal_mae-1e-8):
-                t=time.perf_counter();browser.load(current_html,viewport)
-                stats['layout_seconds']+=time.perf_counter()-t
-                stats['rolled_back_actions']+=1;history['accepted']=False
-                history['rollback_reason']='abstract_mae_worsened'
-                if parent_first:
-                    history['rollback_reason']='parent_first_no_strict_improvement'
-                    blocked_owners.add(action[0])
-                    continue
-                stats['stop_reason']='abstract_mae_rollback'
-                break
-            history['accepted']=True;current_html=candidate_html;current_tree=candidate_tree
-            current_goal_mae=candidate_mae
-            stats['actions']+=1
-            if parent_first:blocked_owners.clear()  # Recheck ancestors after a layout change.
-            if best_goal_mae is None or candidate_mae<best_goal_mae:
-                best_goal_mae=candidate_mae;best_html=candidate_html
-            if goal_threshold>=0 and candidate_mae<=goal_threshold:
-                stats['stop_reason']='goal';break
-        else:
-            current_html=candidate_html;stats['actions']+=1
-    else:
-        if parent_first and steps>0:stats['stop_reason']='parent_first_probe_budget'
-    terminal_html=browser.page.content()
-    if monotonic_abstract:
-        stats['terminal_goal_mae']=current_goal_mae
-        # Equal-distance edits are permitted during the trajectory, but the
-        # returned artifact is always the strictly best state seen so far.
-        if terminal_html!=best_html:
-            t=time.perf_counter();browser.load(best_html,viewport)
-            stats['layout_seconds']+=time.perf_counter()-t
-            stats['best_state_restored']=True
-        current_html=best_html;stats['best_goal_mae']=best_goal_mae
-    else:current_html=terminal_html
+        history['accepted']=True;current_html=candidate_html;stats['actions']+=1
+    if pixel_goal_fraction>=0 and stats['stop_reason']=='steps' and stats['actions']:
+        from .explicit_html import feedback_screenshot
+        t=time.perf_counter();png=feedback_screenshot(browser,animations='disabled');browser.screenshots+=1
+        with Image.open(io.BytesIO(png)) as image:
+            match=pixel_match_fraction(goal_target,image.convert('RGB'),pixel_goal_tolerance)
+        stats['pixel_match_fraction']=match;stats['pixel_goal_checks']+=1
+        stats['pixel_goal_seconds']+=time.perf_counter()-t
+        if match>=pixel_goal_fraction:
+            stats['stop_reason']='pixel_goal';stats['goal_reached']=True
+    current_html=browser.page.content()
     t=time.perf_counter()
     scroll_report=compare_scroll(scroll_before,scroll_snapshot(browser))
     stats['scroll_preservation']=scroll_report
@@ -320,7 +267,7 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
         stats['actions_before_scroll_rollback']=stats['actions']
         stats['actions']=0
         stats['best_state_restored']=False
-        stats['best_goal_mae']=stats.get('initial_goal_mae')
+        stats['goal_reached']=False
     else:stats['scroll_guard_rolled_back']=False
     stats['scroll_guard_seconds']+=time.perf_counter()-t
     stats.pop('_scroll_verification_pending',None)
@@ -411,7 +358,8 @@ def evaluate(args):
                         html,stats,target=rollout(browser,Path(record['tagged_html']).read_text(),record['current'],
                             record['viewport'],record['screenshot'],methods[method],parser,args.threshold,args.steps,args.time_budget,
                             oracle,record.get('evaluation_target_boxes'),
-                            getattr(args,'abstract_goal_threshold',-1) if methods[method].cfg.semantic else args.goal_threshold)
+                            getattr(args,'abstract_goal_threshold',-1) if methods[method].cfg.semantic else args.goal_threshold,
+                            getattr(args,'pixel_goal_fraction',.99),getattr(args,'pixel_goal_tolerance',.005))
                         if stats.get('failed'):error=stats.get('error') or 'Rollout failed'
                     except Exception as exc:error=str(exc)
                     if 'seconds' not in stats:stats['seconds']=time.perf_counter()-started

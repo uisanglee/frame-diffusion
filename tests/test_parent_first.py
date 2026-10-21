@@ -26,7 +26,7 @@ def test_order_uses_hierarchy_not_dom_array_order():
 @pytest.mark.parametrize('parent_wrong',[False,True])
 @pytest.mark.parametrize('mode,representation', [('screenshot','occupancy-boundary'),
     *[('abstract',r) for r in ('occupancy-boundary','abstract-rgb','occupancy','boundary')]])
-def test_rollout_skips_correct_parent_and_repairs_parent_before_child(tmp_path,parent_wrong,mode,representation):
+def test_rollout_uses_fixed_steps_even_with_parent_first_checkpoint(tmp_path,parent_wrong,mode,representation):
     torch.set_num_threads(1)
     html=f'''<body style="margin:0"><div id="parent" style="width:{180 if parent_wrong else 200}px;
     height:100px;background:red"><div id="child" style="width:40px;height:30px;background:blue"></div></div></body>'''
@@ -48,19 +48,21 @@ def test_rollout_skips_correct_parent_and_repairs_parent_before_child(tmp_path,p
             token_grid=2,max_nodes=16,stylesheets=True,existing_values_only=True,parent_first=True,
             action_contract=css_owners.CONTRACT,abstraction_representation=representation),False)
         net.eval()
+        planned=[p,c] if parent_wrong else [c,c]
         def predict(*args,allowed_owners=None,**kwargs):
-            owner=allowed_owners[0]
+            assert allowed_owners is None
+            owner=planned.pop(0)
             return [owner,'width','200px' if owner==p else '80px','']
         net.predict=predict
-        final,stats,_=rollout(browser,initial,copy.deepcopy(tree),[300,180],str(target),net,steps=10,
-                            oracle_elements=clean_items if mode=='abstract' else None)
+        final,stats,_=rollout(browser,initial,copy.deepcopy(tree),[300,180],str(target),net,steps=2,
+                            oracle_elements=clean_items if mode=='abstract' else None,pixel_goal_fraction=-1)
         assert not stats['failed'],stats
         accepted=[h['action'][0] for h in stats['history'] if h.get('accepted')]
-        assert accepted==([p,c] if parent_wrong else [c]),stats
+        assert accepted==([p,c] if parent_wrong else [c,c]),stats
         browser.load(final,[300,180])
         assert browser.page.locator('#parent > #child').count()==1
         assert browser.page.locator('#child').bounding_box()['width']==80
-        assert stats['parent_first_probes']>=len(accepted)
+        assert stats['parent_first_probes']==0 and stats['stop_reason']=='steps'
 
 
 @pytest.mark.browser

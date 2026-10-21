@@ -152,7 +152,9 @@ def evaluate_page(args,row,page,out,browser,methods,parser):
             try:
                 html,stats,_=rollout(browser,initial_html,copy.deepcopy(tree),viewport,row['target_image'],policy,
                     parser if policy.cfg.mode=='abstract' else None,args.threshold,args.steps,args.time_budget,
-                    goal_threshold=(args.abstract_goal_threshold if policy.cfg.mode=='abstract' else args.goal_threshold))
+                    goal_threshold=(args.abstract_goal_threshold if policy.cfg.mode=='abstract' else args.goal_threshold),
+                    pixel_goal_fraction=getattr(args,'pixel_goal_fraction',.99),
+                    pixel_goal_tolerance=getattr(args,'pixel_goal_tolerance',.005))
                 if stats.get('failed'):error=stats.get('error') or 'Rollout failed'
             except Exception as exc:error=str(exc)
             html_path=work/f'{method}-r{repeat}.html';html_path.write_text(html)
@@ -175,7 +177,12 @@ def evaluate_page(args,row,page,out,browser,methods,parser):
                 scroll_guard_rolled_back=stats.get('scroll_guard_rolled_back',False),
                 scroll_guard_seconds=stats.get('scroll_guard_seconds',0.),
                 browser_executions=stats.get('browser_executions',0),
-                browser_screenshots=stats.get('browser_screenshots',0))
+                browser_screenshots=stats.get('browser_screenshots',0),
+                goal_reached=stats.get('goal_reached',False),
+                stop_reason=stats.get('stop_reason'),
+                pixel_match_fraction=stats.get('pixel_match_fraction'),
+                pixel_goal_checks=stats.get('pixel_goal_checks',0),
+                pixel_goal_seconds=stats.get('pixel_goal_seconds',0.))
             record={'id':row['id'],'page_id':page_id,
                 'logical_page_id':row.get('page_id',page_id),'view':row.get('view','legacy'),
                 'method':method,'repeat':repeat,
@@ -216,6 +223,12 @@ def evaluate(args):
     for key in ('goal_threshold','abstract_goal_threshold'):
         value=getattr(args,key,-1)
         if value!=-1 and not 0<=value<=1:raise ValueError(key+' must be -1 or in [0,1]')
+    if args.abstract_checkpoint and args.abstract_goal_threshold!=-1:
+        raise ValueError('TUIDE uses the pixel goal; set --abstract-goal-threshold -1')
+    fraction=getattr(args,'pixel_goal_fraction',.99)
+    if fraction!=-1 and not 0<=fraction<=1:raise ValueError('pixel-goal-fraction must be -1 or in [0,1]')
+    if not 0<=getattr(args,'pixel_goal_tolerance',.005)<=1:
+        raise ValueError('pixel-goal-tolerance must be in [0,1]')
     workers=getattr(args,'workers',1)
     batch_size=getattr(args,'inference_batch_size',4)
     wait_ms=getattr(args,'batch_wait_ms',10.)
@@ -288,6 +301,9 @@ def evaluate(args):
                     'seconds','browser_executions','browser_screenshots'):
             item[key]=statistics.mean(r[key] for r in selected)
         item['geometry_improvement_rate']=statistics.mean(r['final_box_iou']>r['initial_box_iou'] for r in selected)
+        item['pixel_goal_rate']=statistics.mean(r.get('goal_reached',False) for r in selected)
+        checked=[r['pixel_match_fraction'] for r in selected if r.get('pixel_match_fraction') is not None]
+        item['mean_pixel_match_fraction']=statistics.mean(checked) if checked else None
         item['scroll_rollback_rate']=statistics.mean(r.get('scroll_guard_rolled_back',False) for r in selected)
         item['parent_first']=any(r.get('parent_first',False) for r in selected)
         item['parent_first_probes']=statistics.mean(r.get('parent_first_probes',0) for r in selected)
@@ -309,10 +325,10 @@ def evaluate(args):
     write_json(out/'coverage.json',coverage)
     lines=['# Frozen held-out WebUI CSS rollout','',
            'Fixed test corruptions only; no VLM generation and no target state is used for action selection.','',
-           '| Method | n | failed | initial IoU | final IoU | pixel MAE | symbolic before | symbolic after | actions | attempted | rollback | seconds |',
-           '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|']
+           '| Method | n | failed | pixel goal rate | initial IoU | final IoU | pixel MAE | symbolic before | symbolic after | actions | attempted | rollback | seconds |',
+           '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|']
     for s in summary:
-        lines.append(f'| {s["method"]} | {s["n"]} | {s["failure_rate"]:.3f} | {s["initial_box_iou"]:.4f} | '
+        lines.append(f'| {s["method"]} | {s["n"]} | {s["failure_rate"]:.3f} | {s["pixel_goal_rate"]:.3f} | {s["initial_box_iou"]:.4f} | '
                      f'{s["final_box_iou"]:.4f} | {s["pixel_mae"]:.4f} | {s["initial_symbolic_distance"]:.3f} | '
                      f'{s["final_symbolic_distance"]:.3f} | {s["actions"]:.2f} | {s["attempted_actions"]:.2f} | '
                      f'{s["rolled_back_actions"]:.2f} | {s["seconds"]:.3f} |')
