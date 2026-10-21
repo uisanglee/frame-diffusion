@@ -362,7 +362,20 @@ def observation_mae(target,current,semantic=False):
 
 
 def semantic_channels(cfg):
+    representation=getattr(cfg,'abstraction_representation',None)
+    if representation is not None:
+        return {'abstract-rgb':3,'occupancy':4,'boundary':4,'occupancy-boundary':8}[representation]
     return SEMANTIC_CHANNELS if cfg.observation_contract==BOUNDARY_CONTRACT else 4
+
+
+def abstraction_tensor(items,viewport,cfg):
+    """Policy observation only; geometry checks always use canonical masks."""
+    representation=getattr(cfg,'abstraction_representation',None)
+    if representation=='abstract-rgb':
+        return image_tensor(abstract_image(items,viewport,cfg.size),cfg.size)
+    if representation=='boundary':
+        return semantic_masks(items,viewport,cfg.size)[4:]
+    return semantic_masks(items,viewport,cfg.size,boundaries=semantic_channels(cfg)==8)
 
 
 def current_features(tree, boxes, viewport, max_nodes):

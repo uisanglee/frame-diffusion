@@ -18,7 +18,7 @@ from .ir import read_json, read_jsonl, write_json
 from .model import Block, ModelConfig
 from .train import seed_all, select_device
 from .tree_edits import CONTRACT, FIELDS, EditTokenizer, apply_state, extract, repair_path
-from .visual import SpatialEncoder, elements, semantic_masks, image_tensor,BOUNDARY_CONTRACT,SEMANTIC_CHANNELS
+from .visual import SpatialEncoder, elements, image_tensor,BOUNDARY_CONTRACT
 from .visual_data import validate_splits
 from .web_experiment import digest, guard_run
 
@@ -57,11 +57,16 @@ class TreeConfig:
     existing_values_only: bool = False
     safe_sizes: bool = False
     abstraction_contract: str = BOUNDARY_CONTRACT
+    abstraction_representation: str = 'occupancy-boundary'
     parent_first: bool = False
     parent_first_max_probes: int = 200
     visual_geometry_contract: str | None = None
 
     def __post_init__(self):
+        if self.abstraction_representation not in ('abstract-rgb','occupancy','boundary','occupancy-boundary'):
+            raise ValueError('Unknown abstraction representation')
+        if self.mode=='screenshot' and self.abstraction_representation!='occupancy-boundary':
+            raise ValueError('Abstraction representation applies only to abstract policies')
         from .visual import VISUAL_GEOMETRY_CONTRACT
         if self.visual_geometry_contract not in (None,VISUAL_GEOMETRY_CONTRACT):
             raise ValueError('Unknown visual geometry contract')
@@ -88,7 +93,8 @@ class TreeConfig:
 class TreePolicy(nn.Module):
     def __init__(self, cfg, pretrained=True):
         super().__init__(); self.cfg=cfg; self.tokenizer=EditTokenizer(cfg.max_nodes,cfg.fields)
-        self.vision=SpatialEncoder(cfg.hidden,cfg.token_grid,pretrained,3*SEMANTIC_CHANNELS if cfg.semantic else 9)
+        from .visual import semantic_channels
+        self.vision=SpatialEncoder(cfg.hidden,cfg.token_grid,pretrained,3*semantic_channels(cfg) if cfg.semantic else 9)
         self.token=nn.Embedding(len(self.tokenizer.tokens),cfg.hidden)
         self.byte=nn.Embedding(257,cfg.hidden,padding_idx=0)
         self.css_encoder=nn.GRU(cfg.hidden,cfg.hidden,batch_first=True)
@@ -239,6 +245,7 @@ def tree_batch(rows,device,max_nodes):
 
 
 def batch_inputs(net,rows,device,predicted=False):
+    from .visual import abstraction_tensor
     cfg=net.cfg;targets=[];currents=[]
     from .visual import label_contract
     if label_contract(rows)!=cfg.visual_geometry_contract:
@@ -251,8 +258,8 @@ def batch_inputs(net,rows,device,predicted=False):
                 elif row.get('predicted_target_elements'):items=read_json(row['predicted_target_elements'])
                 else:raise ValueError('Missing frozen-detector cache')
             else: items=row['target_elements']
-            targets.append(semantic_masks(items,row['viewport'],cfg.size))
-            currents.append(semantic_masks(elements(row['current'],row['current_boxes'],row['viewport'],row.get('current_clip_boxes')),row['viewport'],cfg.size))
+            targets.append(abstraction_tensor(items,row['viewport'],cfg))
+            currents.append(abstraction_tensor(elements(row['current'],row['current_boxes'],row['viewport'],row.get('current_clip_boxes')),row['viewport'],cfg))
         else:
             targets.append(image_tensor(row['target_image'],cfg.size));currents.append(image_tensor(row['current_image'],cfg.size))
     batch=tree_batch(rows,device,cfg.max_nodes)
@@ -367,7 +374,8 @@ def train(args):
                'normalized_training_pages':len({r['id'].rsplit('/',1)[0] for r in training})},flush=True)
     validate_splits(training+validation)
     if any(r['split']!='train' for r in training) or any(r['split']!='val' for r in validation): raise ValueError('Wrong split files')
-    cfg=TreeConfig(**{k:getattr(args,k) for k in ('mode','size','hidden','layers','heads','max_nodes','token_grid')})
+    cfg=TreeConfig(**{k:getattr(args,k) for k in ('mode','size','hidden','layers','heads','max_nodes','token_grid')},
+                   abstraction_representation=getattr(args,'abstraction_representation','occupancy-boundary'))
     from .visual import label_contract
     cfg.visual_geometry_contract=label_contract(training+validation)
     from .safe_sizes import CONTRACT as SAFE_SIZES_CONTRACT
@@ -412,6 +420,8 @@ def train(args):
             raise ValueError('Validation uses old corruption; rerun prepare_stylesheet_policy.sh in a new output directory (reuse target assets/cache)')
     out=Path(args.out).resolve();settings={k:v for k,v in vars(args).items() if k not in ('out','steps','resume','init_checkpoint','policy_scale')}
     config=asdict(cfg)
+    if cfg.abstraction_representation=='occupancy-boundary':
+        config.pop('abstraction_representation');settings.pop('abstraction_representation',None)
     if cfg.visual_geometry_contract is None:config.pop('visual_geometry_contract')
     if not cfg.parent_first:
         config.pop('parent_first');settings.pop('parent_first',None)

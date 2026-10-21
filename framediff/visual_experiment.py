@@ -89,8 +89,11 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
         stats['predicted_elements']=len(items)
     else:
         with Image.open(target_path) as image:target=image.convert('RGB')
-    from .visual import semantic_channels
-    target_tensor=(semantic_masks(items,viewport,cfg.size,boundaries=semantic_channels(cfg)==8) if cfg.semantic else image_tensor(target,cfg.size))[None].to(device)
+    from .visual import BOUNDARY_CONTRACT,abstraction_tensor
+    target_tensor=(abstraction_tensor(items,viewport,cfg) if cfg.semantic else image_tensor(target,cfg.size))[None].to(device)
+    metric_boundaries=cfg.observation_contract==BOUNDARY_CONTRACT if cfg.semantic else False
+    separate_metric=cfg.semantic and getattr(cfg,'abstraction_representation',None) not in (None,'occupancy-boundary')
+    target_metric=(semantic_masks(items,viewport,cfg.size,boundaries=metric_boundaries)[None].to(device) if separate_metric else target_tensor)
     target_tokens=None
     if cfg.policy_head not in ('autoregressive','replacement'):
         t=time.perf_counter()
@@ -137,13 +140,16 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
             from .explicit_html import feedback_screenshot
             png=feedback_screenshot(browser,animations='disabled');browser.screenshots+=1
             with Image.open(io.BytesIO(png)) as image:current_image=image.convert('RGB')
-        elif cfg.semantic:current_image=semantic_masks(elements(current_tree,boxes,viewport,feedback.get('current_clip_boxes')),viewport,cfg.size,boundaries=semantic_channels(cfg)==8)
+        elif cfg.semantic:
+            current_items=elements(current_tree,boxes,viewport,feedback.get('current_clip_boxes'))
+            current_image=abstraction_tensor(current_items,viewport,cfg)
         else:current_image=abstract_image(elements(current_tree,boxes,viewport,feedback.get('current_clip_boxes')),viewport,cfg.size)
         stats['current_render_seconds']+=time.perf_counter()-t
         t=time.perf_counter()
         current_tensor=(current_image if cfg.semantic else image_tensor(current_image,cfg.size))[None].to(device)
         if cfg.policy_head in ('autoregressive','replacement'):
-            goal_mae=observation_mae(target_tensor,current_tensor,cfg.semantic)
+            current_metric=(semantic_masks(current_items,viewport,cfg.size,boundaries=metric_boundaries)[None].to(device) if separate_metric else current_tensor)
+            goal_mae=observation_mae(target_metric,current_metric,cfg.semantic)
             current_goal_mae=goal_mae
             if monotonic_abstract and (best_goal_mae is None or goal_mae<best_goal_mae):
                 best_goal_mae=goal_mae;best_html=current_html
@@ -259,12 +265,12 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
                     candidate_tensor=image_tensor(im.convert('RGB'),cfg.size)[None].to(device)
             elif cfg.semantic:
                 candidate_image=semantic_masks(candidate_items,viewport,cfg.size,
-                    boundaries=semantic_channels(cfg)==8)
+                    boundaries=metric_boundaries)
                 candidate_tensor=candidate_image[None].to(device)
             else:
                 candidate_image=abstract_image(candidate_items,viewport,cfg.size)
                 candidate_tensor=image_tensor(candidate_image,cfg.size)[None].to(device)
-            candidate_mae=observation_mae(target_tensor,candidate_tensor,cfg.semantic)
+            candidate_mae=observation_mae(target_metric,candidate_tensor,cfg.semantic)
             stats['current_render_seconds']+=time.perf_counter()-t
             history['goal_mae_after']=candidate_mae
             # A tiny tolerance prevents floating-point jitter from triggering a

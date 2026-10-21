@@ -48,16 +48,17 @@ def test_grammar_rejects_invalid_width_and_unbounded_expression():
     assert tok.ids['N3'] not in tok.allowed([],3)
 
 
-def test_token_ce_gradient_and_checkpoint(tmp_path):
+@pytest.mark.parametrize('representation,channels', [('abstract-rgb',3),('occupancy',4),('boundary',4),('occupancy-boundary',8)])
+def test_token_ce_gradient_and_checkpoint(tmp_path,representation,channels):
     from framediff.tree_policy import KIND,TreeConfig,TreePolicy
     from framediff.ir import node
     from framediff.visual import current_features,visual_batch,load_policy
     torch.set_num_threads(2)
-    cfg=TreeConfig(size=32,hidden=16,layers=1,heads=2,token_grid=2,max_nodes=8)
+    cfg=TreeConfig(size=32,hidden=16,layers=1,heads=2,token_grid=2,max_nodes=8,abstraction_representation=representation)
     net=TreePolicy(cfg,False)
     tree={'version':1,'nodes':[node('root',None,'page'),node('a','root','card')]}
     batch=visual_batch([current_features(tree,{'root':[0,0,100,100],'a':[0,0,50,50]},[100,100],8)],'cpu')
-    image=torch.randn(1,8,32,32)
+    image=torch.randn(1,channels,32,32)
     loss,count=net.loss(batch,image,image,[empty_state(2)],[[1,'width','50%','']])
     assert torch.isfinite(loss) and count==8
     labels=torch.tensor([net.tokenizer.encode([1,'width','50%',''],2)])
@@ -69,9 +70,29 @@ def test_token_ce_gradient_and_checkpoint(tmp_path):
     checkpoint=tmp_path/'policy.pt'
     torch.save({'kind':KIND,'config':asdict(cfg),'model':net.state_dict()},checkpoint)
     restored,_=load_policy(checkpoint,'cpu')
+    assert restored.cfg.abstraction_representation==representation
     assert torch.allclose(loss,restored.loss(batch,image,image,[empty_state(2)],[[1,'width','50%','']])[0])
     action=restored.predict(batch,image,image,[empty_state(2)])
     assert action[0]==1 and action[1] in FIELDS
+
+
+def test_ablation_masks_and_legacy_config():
+    from framediff.tree_policy import TreeConfig
+    from framediff.visual import abstraction_tensor,semantic_masks,abstract_image,image_tensor
+    items=[{'label':1,'box':[8,8,40,40]},{'label':1,'box':[20,20,50,50]}]
+    masks=semantic_masks(items,[64,64],64)
+    for representation,expected in [('occupancy',masks[:4]),('boundary',masks[4:]),
+                                    ('occupancy-boundary',masks),
+                                    ('abstract-rgb',image_tensor(abstract_image(items,[64,64],64),64))]:
+        cfg=TreeConfig(size=64,abstraction_representation=representation)
+        assert torch.equal(abstraction_tensor(items,[64,64],cfg),expected)
+    # Per-box boundaries retain internal edges even where filled boxes overlap.
+    assert masks[4,20,25]>0 and masks[0,20,25]>0
+    old=asdict(TreeConfig());old.pop('abstraction_representation')
+    assert TreeConfig(**old)==TreeConfig()
+    assert TreeConfig(abstraction_representation='boundary')!=TreeConfig()
+    with pytest.raises(ValueError):TreeConfig(abstraction_representation='invalid')
+    with pytest.raises(ValueError):TreeConfig(mode='screenshot',abstraction_representation='boundary')
 
 
 def test_symbolic_metrics_accept_any_distance_reducing_edit(monkeypatch):
@@ -127,7 +148,8 @@ def test_exact_css_replacement_restores_percent_absence_shorthand_and_reflow(tmp
 
 
 @pytest.mark.browser
-def test_cached_prepare_train_resume_and_rollout(tmp_path):
+@pytest.mark.parametrize('representation',['abstract-rgb','occupancy','boundary','occupancy-boundary'])
+def test_cached_prepare_train_resume_and_rollout(tmp_path,representation):
     from framediff.html_bridge import HtmlBrowser
     from framediff.plans import dom_tree
     from framediff.visual import annotate,elements,load_policy
@@ -163,10 +185,16 @@ def test_cached_prepare_train_resume_and_rollout(tmp_path):
     common=['--train',str(prepared/'policy-train.jsonl'),'--val',str(prepared/'policy-val.jsonl'),
             '--out',str(tmp_path/'policy'),'--mode','abstract','--size','32','--hidden','16','--layers','1',
             '--heads','2','--max-nodes','16','--token-grid','2','--device','cpu','--cpu-threads','2',
-            '--batch-size','1','--accumulation','1','--val-samples','1','--eval-every','1','--no-pretrained']
+            '--batch-size','1','--accumulation','1','--val-samples','1','--eval-every','1','--no-pretrained',
+            '--abstraction-representation',representation]
     main(['visual-tree-train',*common,'--steps','1'])
     main(['visual-tree-train',*common,'--steps','2','--resume',str(tmp_path/'policy/last.pt')])
     net,ck=load_policy(tmp_path/'policy/last.pt','cpu');assert ck['step']==2
+    assert net.cfg.abstraction_representation==representation
+    with pytest.raises(ValueError):
+        main(['visual-tree-train',*common,'--abstraction-representation',
+              'boundary' if representation!='boundary' else 'occupancy',
+              '--steps','3','--resume',str(tmp_path/'policy/last.pt')])
     metrics=list(read_jsonl(tmp_path/'policy/validation.jsonl'))[-1]
     assert 'action_accuracy' not in metrics
     # Execute a known valid predicted edit, not a target-box-ranked candidate.

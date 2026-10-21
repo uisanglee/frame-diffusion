@@ -5,6 +5,35 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import pytest
+
+
+@pytest.mark.parametrize('representation',['abstract-rgb','occupancy','boundary','occupancy-boundary'])
+def test_ablation_script_both_stages_and_resume(tmp_path,representation):
+    source=Path(__file__).resolve().parents[1]/'scripts'
+    scripts=tmp_path/'scripts';scripts.mkdir()
+    for name in ('train_tuide_scale.sh','train_numeric_policy.sh'):
+        shutil.copyfile(source/name,scripts/name)
+    binary=tmp_path/'bin';binary.mkdir()
+    stub=binary/'python'
+    stub.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n');stub.chmod(0o755)
+    detector=tmp_path/'detector.pt';detector.touch()
+    shared=tmp_path/'shared'
+    for split in ('train','val'):
+        folder=shared/f'predicted-{split}';folder.mkdir(parents=True)
+        (folder/'data.jsonl').write_text('{}\n')
+    out=tmp_path/'output'
+    env={**os.environ,'PATH':str(binary)+os.pathsep+os.environ['PATH'],
+         'POLICY_MODES':'abstract','ABSTRACTION_REPRESENTATION':representation}
+    command=['bash',str(scripts/'train_tuide_scale.sh'),'s','data',str(detector),str(shared),str(out)]
+    result=subprocess.run(command,env=env,check=True,capture_output=True,text=True).stdout
+    assert result.count('--abstraction-representation\n'+representation+'\n')==2
+    assert '--init-checkpoint\n'+str(out/'replacement/abstract-stage1/best.pt') in result
+    for stage in (1,2):
+        folder=out/f'replacement/abstract-stage{stage}';folder.mkdir(parents=True)
+        (folder/'last.pt').touch()
+    resumed=subprocess.run(command,env=env,check=True,capture_output=True,text=True).stdout
+    assert resumed.count('--resume\n')==2 and '--init-checkpoint' not in resumed
 
 
 DEFAULTS = dict(STAGE='all', POLICY_SCALE='s', POLICY_MODES='abstract screenshot',

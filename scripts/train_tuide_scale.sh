@@ -16,6 +16,14 @@ export POLICY_MODES=${POLICY_MODES:-abstract}
 case "$POLICY_MODES" in abstract|screenshot) ;; *) echo 'Choose POLICY_MODES=abstract or screenshot' >&2; exit 2;; esac
 suffix=""
 [[ "${PARENT_FIRST:-0}" == 1 ]] && suffix=-parent-first
+export ABSTRACTION_REPRESENTATION=${ABSTRACTION_REPRESENTATION:-occupancy-boundary}
+case "$ABSTRACTION_REPRESENTATION" in
+  occupancy-boundary) ;;
+  abstract-rgb|occupancy|boundary)
+    [[ "$POLICY_MODES" == abstract ]] || { echo 'Representation ablation requires abstract mode' >&2; exit 2; }
+    suffix="$suffix-$ABSTRACTION_REPRESENTATION" ;;
+  *) echo 'Invalid ABSTRACTION_REPRESENTATION' >&2; exit 2;;
+esac
 export POLICY_RUN_DIR=${5:-runs/tuide-safe-size-margin-$scale-$POLICY_MODES$suffix}
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 export DEVICE=${DEVICE:-cuda}

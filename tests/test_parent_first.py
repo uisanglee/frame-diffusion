@@ -24,8 +24,9 @@ def test_order_uses_hierarchy_not_dom_array_order():
 
 @pytest.mark.browser
 @pytest.mark.parametrize('parent_wrong',[False,True])
-@pytest.mark.parametrize('mode',['screenshot','abstract'])
-def test_rollout_skips_correct_parent_and_repairs_parent_before_child(tmp_path,parent_wrong,mode):
+@pytest.mark.parametrize('mode,representation', [('screenshot','occupancy-boundary'),
+    *[('abstract',r) for r in ('occupancy-boundary','abstract-rgb','occupancy','boundary')]])
+def test_rollout_skips_correct_parent_and_repairs_parent_before_child(tmp_path,parent_wrong,mode,representation):
     torch.set_num_threads(1)
     html=f'''<body style="margin:0"><div id="parent" style="width:{180 if parent_wrong else 200}px;
     height:100px;background:red"><div id="child" style="width:40px;height:30px;background:blue"></div></div></body>'''
@@ -45,7 +46,7 @@ def test_rollout_skips_correct_parent_and_repairs_parent_before_child(tmp_path,p
         assert edit[0]==(p if parent_wrong else c) and gain>0
         net=TreePolicy(TreeConfig(mode=mode,size=64,hidden=16,layers=1,heads=2,
             token_grid=2,max_nodes=16,stylesheets=True,existing_values_only=True,parent_first=True,
-            action_contract=css_owners.CONTRACT),False)
+            action_contract=css_owners.CONTRACT,abstraction_representation=representation),False)
         net.eval()
         def predict(*args,allowed_owners=None,**kwargs):
             owner=allowed_owners[0]

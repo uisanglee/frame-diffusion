@@ -115,6 +115,55 @@ geometry, repair time, failures, training compute and policy parameter counts.
 
 ## Direct CLI
 
+### Input-representation ablation
+
+`ABSTRACTION_REPRESENTATION` in `train_tuide_scale.sh` (or
+`--abstraction-representation` in `visual-tree-train`) selects:
+
+| Value | One observation | Target/current/absolute-difference input |
+| --- | --- | --- |
+| `abstract-rgb` | Fixed class-colored filled boxes, ImageNet-normalized RGB | 9 channels |
+| `occupancy` | Four class-specific filled masks | 12 channels |
+| `boundary` | Four class-specific per-box boundary masks | 12 channels |
+| `occupancy-boundary` (default) | Both mask sets | 24 channels |
+
+Boundary-only is not an edge detector on the original screenshot: it retains
+each detected/DOM box boundary, including internal boundaries of overlapping
+same-class boxes. RGB uses the same boxes with deterministic drawing order,
+not the original webpage RGB. It can hide overlapping elements; masks preserve
+class-wise occupancy/edges. All variants use the same ResNet-18 architecture
+except its input convolution, followed by the same repair decoder. Thus this
+tests the representation, not a wholly different encoder architecture.
+
+Reuse the same prepared policy data, detector checkpoint and frozen predicted
+target cache. No relabeling or image regeneration is needed for this ablation.
+Use a separate output directory per representation. For example, after setting
+`POLICY_DATA` to the existing `.../7000/css`, `DETECTOR` to its detector `best.pt`,
+and `SHARED_RUN` to the existing directory containing `predicted-train/data.jsonl`
+and `predicted-val/data.jsonl`, run all four sequentially:
+
+```bash
+for rep in abstract-rgb occupancy boundary occupancy-boundary; do
+  env CUDA_VISIBLE_DEVICES=2 POLICY_MODES=abstract \
+    ABSTRACTION_REPRESENTATION="$rep" BATCH_SIZE=4 ACCUMULATION=2 \
+    SEED=42 POLICY_STAGE1_STEPS=30000 POLICY_STAGE2_STEPS=15000 \
+    EARLY_STOP_PATIENCE=0 \
+    bash scripts/train_tuide_scale.sh s "$POLICY_DATA" "$DETECTOR" "$SHARED_RUN" \
+      "runs/tuide-input-ablation/7000/$rep" || break
+done
+```
+
+Stage 2 initializes from the same representation's stage 1. Existing `last.pt`
+resumes only a matching configuration; do not initialize a different
+representation from an already trained policy. Default old checkpoints remain
+loadable as occupancy+boundary. Evaluation automatically reads the representation
+from the checkpoint; it needs no representation override. Use the same fixed
+test states, detector threshold, repair-step budget and seeds for every run.
+Stopping/rollback checks use the same canonical occupancy+boundary distance,
+independent of the input representation, and teacher generation is unchanged.
+Equal optimizer-step budgets do not imply equal FLOPs: report wall time and
+parameter counts too. Use multiple seeds for the final comparison.
+
 `visual-tree-train --policy-scale s|m|l` resolves the preset before run/checkpoint
 validation and overrides explicit `--hidden`, `--layers`, `--heads` values.
 Without a preset the existing defaults/custom dimensions remain supported.

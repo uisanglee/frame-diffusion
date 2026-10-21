@@ -9,6 +9,11 @@ rendered=$1
 detector=$2
 run=$3
 policy_run=${POLICY_RUN_DIR:-$run}
+representation=${ABSTRACTION_REPRESENTATION:-occupancy-boundary}
+case "$representation" in
+  abstract-rgb|occupancy|boundary|occupancy-boundary) ;;
+  *) echo 'Invalid ABSTRACTION_REPRESENTATION' >&2; exit 2;;
+esac
 scale_options=()
 if [[ -n "${POLICY_SCALE:-}" ]]; then
   case "$POLICY_SCALE" in s|m|l) scale_options=(--policy-scale "$POLICY_SCALE");;
@@ -59,6 +64,12 @@ for head in ${POLICY_HEADS:-replacement}; do
     [[ "$head" == replacement ]] || { echo 'Use replacement head; old gain/set-loss policies are retired.' >&2; exit 2; }
     [[ "$mode" == screenshot || "$mode" == abstract ]] || { echo "Invalid POLICY_MODES item: $mode" >&2; exit 2; }
     label=raw
+    representation_options=()
+    if [[ "$mode" == abstract ]]; then
+      representation_options=(--abstraction-representation "$representation")
+    elif [[ "$representation" != occupancy-boundary ]]; then
+      echo 'ABSTRACTION_REPRESENTATION requires POLICY_MODES=abstract' >&2; exit 2
+    fi
     [[ "$mode" == abstract ]] && label=abstract
     stages=(1)
     [[ "$mode" == abstract ]] && stages+=(2)
@@ -81,7 +92,7 @@ for head in ${POLICY_HEADS:-replacement}; do
       fi
       if [[ -f "$output/last.pt" ]]; then options=(--resume "$output/last.pt"); fi
       python -m framediff visual-tree-train --train "$train" --val "$val" --out "$output" \
-        --mode "$mode" --device "${DEVICE:-cuda}" ${owner_options[@]+"${owner_options[@]}"} ${scale_options[@]+"${scale_options[@]}"} \
+        --mode "$mode" --device "${DEVICE:-cuda}" ${representation_options[@]+"${representation_options[@]}"} ${owner_options[@]+"${owner_options[@]}"} ${scale_options[@]+"${scale_options[@]}"} \
         --steps "$steps" --lr "$lr" ${condition[@]+"${condition[@]}"} ${online[@]+"${online[@]}"} \
         --batch-size "${BATCH_SIZE:-2}" --accumulation "${ACCUMULATION:-4}" \
         --seed "${SEED:-42}" \

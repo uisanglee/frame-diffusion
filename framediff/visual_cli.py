@@ -88,6 +88,7 @@ def add_parsers(sub):
         else:
             p.add_argument('--mode',choices=['screenshot','abstract'],required=True)
             if name=='visual-tree-train':
+                p.add_argument('--abstraction-representation',choices=['abstract-rgb','occupancy','boundary','occupancy-boundary'],default='occupancy-boundary',help='Abstract policy input representation; does not change labels or actions')
                 p.add_argument('--policy-scale',choices=['s','m','l'],
                                help='TUIDE capacity preset; overrides hidden/layers/heads, leaves data and action space unchanged')
                 p.add_argument('--stylesheets',action='store_true',help='Train CSS owner decoder; requires v2 prepared labels')
