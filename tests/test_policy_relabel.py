@@ -232,6 +232,10 @@ def test_lazy_reuses_existing_normalization_without_render_or_corruption(tmp_pat
     upgraded,error=_task((descriptor,tmp_path/'new',64,True,tmp_path/'legacy'))
     assert error is None
     result=cache.get(upgraded,policy=True)
+    assert cache.last_profile['status']=='disk_miss'
+    assert cache.last_profile['parent_cache_status']=='disk_hit'
+    assert cache.last_profile['label_refresh_s']>0
+    assert cache.last_profile['parent_cache_profile']['disk_validation_s']>0
     assert result['visual_geometry_contract']==VISUAL_GEOMETRY_CONTRACT
     assert 'current_image' not in result and 'current_html' not in result
     assert Path(row['current_image']).is_file()  # Published legacy cache is untouched.
@@ -240,6 +244,7 @@ def test_lazy_reuses_existing_normalization_without_render_or_corruption(tmp_pat
     monkeypatch.setattr('framediff.policy_relabel.refresh_row',forbidden)
     cache=TrainViewCache(cache_dir=tmp_path/'legacy')
     assert cache.get(upgraded,policy=True)==result
+    assert cache.last_profile['status']=='disk_hit'
     cache.close()
 
 

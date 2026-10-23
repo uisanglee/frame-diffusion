@@ -215,6 +215,7 @@ def test_online_step_profile_summarizes_parallel_sample_time():
     assert result['stage_seconds_max_per_sample']['cache_prepare_s']==2.
     assert result['cache_status_counts']=={'disk_hit':1,'disk_miss':1}
     assert result['cache_phase_seconds_sum']['render_s']==1.2
+    assert result['parent_cache_status_counts']=={}
 
 
 @pytest.mark.browser

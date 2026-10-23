@@ -249,7 +249,12 @@ class TrainViewCache:
                 previous=TrainViewCache(cache_dir=relabel['cache_dir'])
                 try:
                     original=previous.get(relabel['source'],policy=True)
+                    profile['parent_cache_status']=previous.last_profile['status']
+                    profile['parent_cache_s']=previous.last_profile['total_s']
+                    profile['parent_cache_profile']=copy.deepcopy(previous.last_profile)
+                    refresh_started=time.perf_counter()
                     result=refresh_row(original,work/'visual-labels',relabel['size'],clean_only=True)
+                    profile['label_refresh_s']=time.perf_counter()-refresh_started
                 finally:previous.close()
                 profile['relabel_s']=time.perf_counter()-phase_started
             else:
