@@ -250,6 +250,9 @@ def test_cold_relabel_skips_obsolete_seed_and_preserves_new_labels(tmp_path,monk
         assert new.last_profile['parent_cache_status']=='disk_miss'
         parent=new.last_profile['parent_cache_profile']
         assert parent['normalize_s']>0
+        assert parent['normalize_profile']['final_scroll_verification_s']>=0
+        assert parent['normalize_profile']['bulk_viewport_trial_s']>=0
+        assert new.last_profile['label_refresh_profile']['candidate_inspection_s']>=0
         assert 'relabel_s' not in parent
         assert Path(result['target_image']).read_bytes()==Path(baseline['target_image']).read_bytes()
         for field in ('target_elements','target_declaration_state','visible_candidates',

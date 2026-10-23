@@ -56,3 +56,14 @@ def test_scroll_only_failure_uses_full_fallback(tmp_path):
         assert qa['accepted'] and qa['partial_normalization'],qa
         assert qa['full_scroll_fallback'] and qa['scroll_verification_trials']>2,qa
         assert any(r['field']=='width' for r in qa['rejected_fields'])
+
+
+def test_accepted_bulk_trial_reuses_loaded_page_for_scroll_check(tmp_path):
+    with HtmlBrowser() as browser:
+        html='<html><body style="margin:0"><div data-fd-id="card" style="width:100px;height:40px;background:red">A</div></body></html>'
+        qa=convert(browser,html,[400,200],tmp_path,action_ids=['card'])
+        assert qa['accepted'],qa
+        assert qa['verification_trials']==2  # baseline replay + one bulk candidate
+        assert qa['scroll_verification_trials']==2
+        assert not qa['full_scroll_fallback']
+        assert qa['timing_s']['final_scroll_verification_s']>=0

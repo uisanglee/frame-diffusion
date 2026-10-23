@@ -82,7 +82,9 @@ def preparation_fingerprint():
         hashes['tree_normalize.py']='99abfa568147b5581248b90f477b920c26202fd5dffa02f9059135ea5eb5cc7f'
     # Audited storage-only change: screenshot retention does not change the
     # prepared training example. Unknown future edits still invalidate caches.
-    if hashes['safe_sizes.py']=='1acceb2dff0b09384551c9c63276ceb3d4807dab1de160075129a97d4532b4a5':
+    if hashes['safe_sizes.py'] in (
+        '1acceb2dff0b09384551c9c63276ceb3d4807dab1de160075129a97d4532b4a5',
+        'b0c56243599c502f92c977eb6aa53312b127fde3fea3a4a768aac4fb39299a53'):
         hashes['safe_sizes.py']='82670e65a792de714d8cb44f27f3514d717cce013a28d59e0d95c56cbaa4fbd2'
     online_sha=hashlib.sha256(''.join(ast.dump(n) for n in semantic).encode()).hexdigest()
     # Instance-local LRU ownership, browser release, and timing-only sampler
@@ -275,8 +277,11 @@ class TrainViewCache:
                     profile['parent_cache_s']=previous.last_profile['total_s']
                     profile['parent_cache_profile']=copy.deepcopy(previous.last_profile)
                     refresh_started=time.perf_counter()
-                    result=refresh_row(original,work/'visual-labels',relabel['size'],clean_only=True)
+                    refresh_profile={}
+                    result=refresh_row(original,work/'visual-labels',relabel['size'],
+                                       clean_only=True,profile=refresh_profile)
                     profile['label_refresh_s']=time.perf_counter()-refresh_started
+                    profile['label_refresh_profile']=refresh_profile
                 finally:previous.close()
                 profile['relabel_s']=time.perf_counter()-phase_started
             else:
@@ -293,6 +298,11 @@ class TrainViewCache:
                 if error:raise ValueError(f'Lazy normalization failed: {error}')
                 result=seed
                 profile['normalize_s']=time.perf_counter()-phase_started
+                reports=list((work/'labels').rglob('report.json'))
+                if reports:
+                    try:
+                        profile['normalize_profile']=json.loads(reports[0].read_text()).get('timing_s',{})
+                    except (OSError,ValueError):pass
             elif not policy:result=rendered['detection'][0]
             phase_started=time.perf_counter()
             if os.environ.get('TUIDE_SAVE_DIAGNOSTICS','0')!='1':
