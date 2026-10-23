@@ -230,6 +230,55 @@ def test_lazy_policy_disk_cache_survives_process_cache(tmp_path,monkeypatch):
 
 
 @pytest.mark.browser
+def test_cold_relabel_skips_obsolete_seed_and_preserves_new_labels(tmp_path,monkeypatch):
+    from framediff.lazy_webui import TrainViewCache
+    from framediff.policy_relabel import _task,refresh_row
+    row=lazy_descriptor(tmp_path)
+    monkeypatch.setenv('TUIDE_SHARED_CACHE',str(tmp_path/'baseline-shared'))
+    old=TrainViewCache(cache_dir=tmp_path/'baseline-old')
+    try:baseline_source=old.get(row,policy=True)
+    finally:old.close()
+    baseline=refresh_row(baseline_source,tmp_path/'baseline-labels',64,clean_only=True)
+
+    monkeypatch.setenv('TUIDE_SHARED_CACHE',str(tmp_path/'lean-shared'))
+    upgraded,error=_task((row,tmp_path/'new',64,True,tmp_path/'uncached-old'))
+    assert error is None
+    new=TrainViewCache(cache_dir=tmp_path/'new-relabel')
+    try:
+        result=new.get(upgraded,policy=True)
+        assert new.last_profile['status']=='disk_miss'
+        assert new.last_profile['parent_cache_status']=='disk_miss'
+        parent=new.last_profile['parent_cache_profile']
+        assert parent['normalize_s']>0
+        assert 'relabel_s' not in parent
+        assert Path(result['target_image']).read_bytes()==Path(baseline['target_image']).read_bytes()
+        for field in ('target_elements','target_declaration_state','visible_candidates',
+                      'current_boxes','css_owners','visual_geometry_contract'):
+            assert result[field]==baseline[field]
+    finally:new.close()
+    previous=TrainViewCache(cache_dir=tmp_path/'uncached-old')
+    try:
+        assert not (previous.cache_dir/previous._key(row,True)).exists()
+        assert (previous.cache_dir/previous._key(row,True,clean_relabel_source=True)).is_dir()
+    finally:previous.close()
+    from framediff.tree_online import OnlineSampler,target_pool
+    pool=target_pool([upgraded],cache_dir=tmp_path/'new-relabel')
+    abstract=OnlineSampler(pool,'abstract',max_noise=1)
+    screenshot=OnlineSampler(pool,'screenshot',max_noise=1)
+    try:
+        abstract_row=abstract.generate(0)
+        abstract.close()
+        screenshot_row=screenshot.generate(0)
+        assert abstract_row['replacement_edit']==screenshot_row['replacement_edit']
+        assert abstract_row['current_boxes']==screenshot_row['current_boxes']
+        assert 'current_image' not in abstract_row
+        assert screenshot_row['current_image'].startswith(b'\x89PNG')
+    finally:
+        abstract.close();screenshot.close()
+        abstract.view_cache.close();screenshot.view_cache.close()
+
+
+@pytest.mark.browser
 def test_shared_cache_imports_existing_without_rendering(tmp_path,monkeypatch):
     import shutil
     from framediff.lazy_webui import TrainViewCache

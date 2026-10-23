@@ -74,7 +74,11 @@ def preparation_fingerprint():
               and not (isinstance(node,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='_sampler' for t in node.targets))]
     hashes={name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in names}
     # Optional seed-file retention changes storage only; preserve existing keys.
-    if hashes['tree_normalize.py']=='5f2f562d97282db97fcbe96f6ab5cb2bfccfd347519eaeba3973a810bde6315c':
+    if hashes['tree_normalize.py'] in (
+        '5f2f562d97282db97fcbe96f6ab5cb2bfccfd347519eaeba3973a810bde6315c',
+        '3056b5d0cc463639d8c4dd534c091684a1d93edac1a447ae90b0140408c2236b'):
+        # The second revision adds only an opt-in lean source for *new* relabel
+        # cache keys; ordinary normalized rows retain their old semantics.
         hashes['tree_normalize.py']='99abfa568147b5581248b90f477b920c26202fd5dffa02f9059135ea5eb5cc7f'
     # Audited storage-only change: screenshot retention does not change the
     # prepared training example. Unknown future edits still invalidate caches.
@@ -109,11 +113,28 @@ class TrainViewCache:
             if directory is not None:directory.cleanup()
         self.entries.clear()
 
-    def _key(self,row,policy):
+    def _key(self,row,policy,clean_relabel_source=False):
         source=row['lazy_source'];settings=row['lazy_settings']
         payload=(DISK_CACHE_CONTRACT,source['id'],source['source_sha'],
                  repr(sorted(settings.items())),policy,preparation_fingerprint())
+        if clean_relabel_source:payload+=('clean-relabel-source-v1',)
         return hashlib.sha256(repr(payload).encode()).hexdigest()
+
+    def get_relabel_source(self,row):
+        """Reuse a complete old entry; otherwise prepare only the clean state.
+
+        The new label pass performs its own visibility inspection, so building
+        the old seed corruption and old visibility witnesses would be wasted.
+        A distinct key keeps this lean entry from replacing an old training
+        cache entry that still needs those fields.
+        """
+        key=self._key(row,True)
+        if self.cache_dir is not None:
+            paths=[self.cache_dir/key]
+            if self.legacy_cache_dir!=self.cache_dir:paths.append(self.legacy_cache_dir/key)
+            if any(self._load_disk(path) is not None for path in paths):
+                return self.get(row,policy=True)
+        return self.get(row,policy=True,clean_relabel_source=True)
 
     @staticmethod
     def _relocate(value,old,new):
@@ -141,13 +162,14 @@ class TrainViewCache:
             return result
         except (OSError,ValueError,KeyError,TypeError,json.JSONDecodeError):return None
 
-    def get(self, row, policy=False):
+    def get(self, row, policy=False, clean_relabel_source=False):
+        if clean_relabel_source and not policy:raise ValueError('Clean relabel source requires policy data')
         started=time.perf_counter()
         if self.cache_dir is None:
-            result=self._get(row,policy)
+            result=self._get(row,policy,clean_relabel_source)
             self.last_profile['total_s']=time.perf_counter()-started
             return result
-        key=self._key(row,policy)
+        key=self._key(row,policy,clean_relabel_source)
         lock_started=time.perf_counter()
         with (self.cache_dir/f'{key}.lock').open('a') as lock:
             fcntl.flock(lock,fcntl.LOCK_EX)
@@ -161,7 +183,7 @@ class TrainViewCache:
                 # locked, its old staging directories are safe to reclaim.
                 for stale in self.cache_dir.glob(f'.{key}.*'):
                     if stale.is_dir() and not stale.is_symlink():shutil.rmtree(stale)
-                result=self._get(row,policy)
+                result=self._get(row,policy,clean_relabel_source)
                 self.last_profile.update(lock_wait_s=lock_wait_s,legacy_import_s=legacy_import_s,
                                          total_s=time.perf_counter()-started)
                 return result
@@ -197,7 +219,7 @@ class TrainViewCache:
         finally:
             if stage.exists():shutil.rmtree(stage)
 
-    def _get(self, row, policy=False):
+    def _get(self, row, policy=False, clean_relabel_source=False):
         from .visual_data import _render_page
         from .tree_normalize import _prepare_page
         from .web_experiment import digest
@@ -209,7 +231,7 @@ class TrainViewCache:
         if source['split']!='train':raise ValueError('Only train views may be lazy')
         if digest(source['html'])!=source['source_sha']:raise ValueError('Lazy source HTML changed')
         profile['source_hash_s']=time.perf_counter()-phase_started
-        key=self._key(row,policy)
+        key=self._key(row,policy,clean_relabel_source)
         if key in self.entries and self.cache_dir is None:
             profile['status']='memory_hit'
             self.entries.move_to_end(key);return copy.deepcopy(self.entries[key][1])
@@ -248,7 +270,7 @@ class TrainViewCache:
                 from .policy_relabel import refresh_row
                 previous=TrainViewCache(cache_dir=relabel['cache_dir'])
                 try:
-                    original=previous.get(relabel['source'],policy=True)
+                    original=previous.get_relabel_source(relabel['source'])
                     profile['parent_cache_status']=previous.last_profile['status']
                     profile['parent_cache_s']=previous.last_profile['total_s']
                     profile['parent_cache_profile']=copy.deepcopy(previous.last_profile)
@@ -266,7 +288,8 @@ class TrainViewCache:
                 phase_started=time.perf_counter()
                 seed,page,error=_prepare_page((args,work/'labels','train',index,source['id'],
                     rendered['policy'][0],{source['id']:rendered['page']}),
-                    persist_seed=os.environ.get('TUIDE_SAVE_DIAGNOSTICS','0')=='1')
+                    persist_seed=os.environ.get('TUIDE_SAVE_DIAGNOSTICS','0')=='1' and not clean_relabel_source,
+                    clean_relabel_source=clean_relabel_source)
                 if error:raise ValueError(f'Lazy normalization failed: {error}')
                 result=seed
                 profile['normalize_s']=time.perf_counter()-phase_started

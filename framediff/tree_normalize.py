@@ -43,7 +43,9 @@ def _guard_normalization_run(out,config,resume):
 
 
 
-def _prepare_page(task, persist_seed=True):
+def _prepare_page(task, persist_seed=True, clean_relabel_source=False):
+    if clean_relabel_source and persist_seed:
+        raise ValueError('Clean relabel source does not generate a seed corruption')
     args, out, split, index, page_id, row, pages = task
     latest=getattr(args,'latest_visual_labels',False)
     expected_contract=VISUAL_GEOMETRY_CONTRACT if latest else row.get('visual_geometry_contract')
@@ -125,33 +127,39 @@ def _prepare_page(task, persist_seed=True):
                 target_html=str(normalized),target_image=str(folder/'after.png'),
                 target_elements=target_elements,css_owners=parsed['owners'],
                 target_declaration_state=parsed['state'],normalization_contract=CONTRACT,**feedback)
-            # target_pool caches visibility probes; train and evaluation
-            # use only this verified normalized clean program.
-            stage='visible_candidate_inspection'
-            write_json(folder/'inspection-input.json',seed)
-            inspection=[]
-            try:
-                pool=target_pool([{**seed,'split':'train'}],cache_dir=out/'.online-target-cache',
-                                 observation_size=args.observation_size,diagnostics=inspection)
-            finally:
-                if any(r['reason']=='no_editable_css' for r in inspection):
-                    from .candidate_diagnostics import inspect_saved_target
-                    try:
-                        detail=inspect_saved_target(seed,folder)
-                        for r in inspection:
-                            if r['reason']=='no_editable_css':r['eligibility']=detail
-                    except Exception as exc:
-                        for r in inspection:r['eligibility_error']=f'{type(exc).__name__}: {exc}'
-                write_json(folder/'candidate-inspection.json',inspection)
-            stage='seed_corruption'
-            sampler=OnlineSampler(pool,'screenshot',seed=args.seed,max_noise=1)
-            new=sampler.generate(index)
-            initial=folder/'initial.html';png=folder/'initial.png'
-            if persist_seed:
-                initial.write_text(new.pop('current_html_text'));png.write_bytes(new['current_image'])
-                new.update(current_html=str(initial),current_image=str(png))
+            if clean_relabel_source:
+                # A subsequent full-DOM relabel probes visibility under its
+                # new geometry. Old-label witnesses and a throwaway seed edit
+                # are neither consumed nor safe to substitute for those probes.
+                new={**seed,'declaration_state':copy.deepcopy(parsed['state'])}
             else:
-                new.pop('current_html_text',None);new.pop('current_image',None)
+                # target_pool caches visibility probes; train and evaluation
+                # use only this verified normalized clean program.
+                stage='visible_candidate_inspection'
+                write_json(folder/'inspection-input.json',seed)
+                inspection=[]
+                try:
+                    pool=target_pool([{**seed,'split':'train'}],cache_dir=out/'.online-target-cache',
+                                     observation_size=args.observation_size,diagnostics=inspection)
+                finally:
+                    if any(r['reason']=='no_editable_css' for r in inspection):
+                        from .candidate_diagnostics import inspect_saved_target
+                        try:
+                            detail=inspect_saved_target(seed,folder)
+                            for r in inspection:
+                                if r['reason']=='no_editable_css':r['eligibility']=detail
+                        except Exception as exc:
+                            for r in inspection:r['eligibility_error']=f'{type(exc).__name__}: {exc}'
+                    write_json(folder/'candidate-inspection.json',inspection)
+                stage='seed_corruption'
+                sampler=OnlineSampler(pool,'screenshot',seed=args.seed,max_noise=1)
+                new=sampler.generate(index)
+                initial=folder/'initial.html';png=folder/'initial.png'
+                if persist_seed:
+                    initial.write_text(new.pop('current_html_text'));png.write_bytes(new['current_image'])
+                    new.update(current_html=str(initial),current_image=str(png))
+                else:
+                    new.pop('current_html_text',None);new.pop('current_image',None)
             new.update(split=split,normalization_stats=stats,
                        normalization_contract=CONTRACT)
             page={k:pages[page_id][k] for k in ('id','group','split','source_sha','viewport')}
