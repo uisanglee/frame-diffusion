@@ -193,6 +193,77 @@ def test_reuse_split_metadata_is_read_only_and_resumable(tmp_path):
     assert failure.returncode!=0 and 'differs' in failure.stderr
 
 
+def test_policy_relabel_reuses_labels_without_reprocessing_or_overwriting(tmp_path):
+    script=(Path(__file__).resolve().parents[1]/'scripts/prepare_webui_scales.sh').read_text()
+    branch=script.split('elif [[ "${RELABEL_POLICY_ONLY:-0}" == 1 ]]; then',1)[1].split('\nelse\nlabel_options=',1)[0]
+    code=branch.split('python - "$REUSE_SPLITS/master/labels" "$data/master/labels" <<\'PY\'\n',1)[1].split('\nPY\n',1)[0]
+    assert branch.count('visual-policy-relabel')==1
+    assert '--rendered "$REUSE_SPLITS/master/css"' in branch
+    source=tmp_path/'old/master/labels';source.mkdir(parents=True)
+    names=[f'{kind}-{split}.jsonl' for split in ('train','val','test')
+           for kind in ('policy','pages')]
+    names += [f'rejections-{split}.jsonl' for split in ('train','val','test')]
+    for name in names:(source/name).write_text('{"id":"existing"}\n')
+    original={name:(source/name).read_bytes() for name in names}
+    target=tmp_path/'new/master/labels'
+    command=[sys.executable,'-',str(source),str(target)]
+    def run():
+        return subprocess.run(command,input=code,text=True,capture_output=True)
+    first=run()
+    assert first.returncode==0,first.stderr
+    assert target.is_dir() and not target.is_symlink()
+    assert all((target/name).is_symlink() and (target/name).resolve()==source/name for name in names)
+    (target/'record.json').write_text('keep')
+    second=run()
+    assert second.returncode==0,second.stderr
+    assert (target/'record.json').read_text()=='keep'
+    assert all((source/name).read_bytes()==content for name,content in original.items())
+    partial=tmp_path/'partial/master/labels';partial.mkdir(parents=True)
+    (partial/names[0]).write_text('{}\n')
+    result=subprocess.run([sys.executable,'-',str(source),str(partial)],input=code,
+                          text=True,capture_output=True)
+    assert result.returncode!=0 and 'Partial existing label directory' in result.stderr
+
+
+def test_reused_labels_feed_subset_while_css_val_remains_training_input(tmp_path):
+    from types import SimpleNamespace
+    from framediff.webui_scaling import subset
+
+    old=tmp_path/'old/master/labels'
+    old.mkdir(parents=True)
+    root=tmp_path/'new'
+    (root/'master/rendered').mkdir(parents=True)
+    (root/'master/css').mkdir(parents=True)
+    (root/'10/source').mkdir(parents=True)
+    (root/'config.json').write_text(json.dumps({'sizes':[10]}))
+    selected=[]
+    for split in ('train','val','test'):
+        row={'id':f'{split}/view','page_id':split,'split':split,'source_sha':split}
+        selected.append(row)
+        for kind in ('policy','pages'):
+            (old/f'{kind}-{split}.jsonl').write_text(json.dumps({**row,'origin':'old-labels'})+'\n')
+            (root/'master/css'/f'{kind}-{split}.jsonl').write_text(
+                json.dumps({**row,'origin':'new-css'})+'\n')
+            (root/'master/rendered'/f'{kind}-{split}.jsonl').write_text(json.dumps(row)+'\n')
+        (root/'master/rendered'/f'detector-{split}.jsonl').write_text(json.dumps(row)+'\n')
+        (old/f'rejections-{split}.jsonl').write_text('')
+        (root/'master/css'/f'rejections-{split}.jsonl').write_text('')
+    (root/'10/source/manifest.jsonl').write_text(''.join(json.dumps(row)+'\n' for row in selected))
+
+    script=(Path(__file__).resolve().parents[1]/'scripts/prepare_webui_scales.sh').read_text()
+    branch=script.split('elif [[ "${RELABEL_POLICY_ONLY:-0}" == 1 ]]; then',1)[1].split('\nelse\nlabel_options=',1)[0]
+    code=branch.split('python - "$REUSE_SPLITS/master/labels" "$data/master/labels" <<\'PY\'\n',1)[1].split('\nPY\n',1)[0]
+    result=subprocess.run([sys.executable,'-',str(old),str(root/'master/labels')],
+                          input=code,text=True,capture_output=True)
+    assert result.returncode==0,result.stderr
+    subset(SimpleNamespace(data=str(root)))
+    label=json.loads((root/'10/labels/policy-val.jsonl').read_text())
+    css=json.loads((root/'10/css/policy-val.jsonl').read_text())
+    assert label['origin']=='old-labels' and css['origin']=='new-css'
+    assert (root/'10/coverage.json').is_file()
+    assert not (old/'prepare-report.json').exists()
+
+
 def test_explicit_overrides_are_preserved(tmp_path):
     overrides=dict(STAGE='evaluate',POLICY_SCALE='m',POLICY_MODES='abstract',
                    VAL_SAMPLES='0',REPEATS='1',ROLLOUT_WORKERS='8',ROLLOUT_BATCH_SIZE='2')

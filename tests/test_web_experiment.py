@@ -66,6 +66,11 @@ def test_design2code_prompts_and_text_extraction():
     assert '<html>CURRENT</html>' in revised
     assert 'Hello world\nGo' in revised
     assert 'H\ne\nl\nl\no' not in revised
+    for prompt in (initial,revised):
+        assert 'structured hierarchy of HTML elements' in prompt
+        assert 'CSS rules in a <style> block' in prompt
+        assert 'CSS selectors that correspond to the HTML structure' in prompt
+        assert 'Pay attention to things like size, text, position, and color' not in prompt
 
 
 HTML = '''<html><head><style>body{margin:0;min-height:200px}main{position:absolute;left:10px;top:20px;

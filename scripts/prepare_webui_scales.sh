@@ -139,11 +139,47 @@ if [[ "${REBUILD_HELDOUT:-0}" == 1 ]]; then
 elif [[ "${RELABEL_POLICY_ONLY:-0}" == 1 ]]; then
   [[ -n "${REUSE_SPLITS:-}" ]] || { echo 'RELABEL_POLICY_ONLY requires REUSE_SPLITS' >&2; exit 2; }
   export TUIDE_SHARED_CACHE="${TUIDE_SHARED_CACHE:-$repo_root/data/webui-shared-cache}"
-  for kind in labels css; do
-    python -m framediff visual-policy-relabel \
-      --rendered "$REUSE_SPLITS/master/$kind" --out "$data/master/$kind" \
-      --workers "${PREPARE_WORKERS:-4}" --observation-size "${IMAGE_SIZE:-384}" --resume
-  done
+  # Frozen policy rows are relabeled independently from the original css rows.
+  # Keep normalized labels for subset coverage/provenance without re-rendering
+  # their unused seed corruptions. Never symlink the directory itself: subset
+  # writes prepare-report.json into the destination directory.
+  python - "$REUSE_SPLITS/master/labels" "$data/master/labels" <<'PY'
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+
+source, target = (Path(arg).resolve() for arg in sys.argv[1:])
+if source == target or source in target.parents or target in source.parents:
+    raise SystemExit('Reused labels need a separate output directory')
+required = [f'{kind}-{split}.jsonl' for split in ('train', 'val', 'test')
+            for kind in ('policy', 'pages')]
+required += [f'rejections-{split}.jsonl' for split in ('train', 'val', 'test')]
+for name in required:
+    if not (source / name).is_file():
+        raise SystemExit(f'Missing normalized-label manifest: {source / name}')
+if target.exists() or target.is_symlink():
+    if target.is_symlink() or not target.is_dir():
+        raise SystemExit(f'Invalid existing label directory: {target}')
+    missing = [name for name in required if not (target / name).is_file()]
+    if missing:
+        raise SystemExit(f'Partial existing label directory: {target}; missing {missing}')
+    print(f'Keeping existing normalized labels: {target}', flush=True)
+else:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f'.{target.name}.', dir=target.parent))
+    try:
+        for name in required:
+            (staging / name).symlink_to(source / name)
+        staging.rename(target)
+    except BaseException:
+        shutil.rmtree(staging)
+        raise
+    print(f'Reusing normalized-label manifests without relabel: {source}', flush=True)
+PY
+  python -m framediff visual-policy-relabel \
+    --rendered "$REUSE_SPLITS/master/css" --out "$data/master/css" \
+    --workers "${PREPARE_WORKERS:-4}" --observation-size "${IMAGE_SIZE:-384}" --resume
 else
 label_options=()
 case "${LATEST_VISUAL_LABELS:-0}" in

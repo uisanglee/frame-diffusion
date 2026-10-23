@@ -41,7 +41,7 @@ def text_augmented_prompt(texts):
         'If it involves any images, use "rick.jpg" as the placeholder.\n'
         'Some images on the webpage are replaced with a blue rectangle as the placeholder, use "rick.jpg" for those as well.\n'
         'Do not hallucinate any dependencies to external files. You do not need to include JavaScript scripts for dynamic interactions.\n'
-        'Pay attention to things like size, text, position, and color of all the elements, as well as the overall layout.\n'
+        'Represent the webpage as a structured hierarchy of HTML elements, and define their layout and styling with CSS rules in a <style> block. Use CSS selectors that correspond to the HTML structure.\n'
         'Respond with the content of the HTML+CSS file (directly start with the code, do not add any additional explanation):\n'
     )
 
@@ -56,6 +56,6 @@ def revision_prompt(current_html, texts):
         'I also provide you all the texts that I want to include in the webpage here:\n'
         + texts + '\n\n'
         'Please compare the two webpages and refer to the provided text elements to be included, and revise the original HTML implementation to make it look exactly like the reference webpage. Make sure the code is syntactically correct and can render into a well-formed webpage. You can use "rick.jpg" as the placeholder image file.\n'
-        'Pay attention to things like size, text, position, and color of all the elements, as well as the overall layout.\n'
+        'Represent the webpage as a structured hierarchy of HTML elements, and define their layout and styling with CSS rules in a <style> block. Use CSS selectors that correspond to the HTML structure.\n'
         'Respond directly with the content of the new revised and improved HTML file without any extra explanations:\n'
     )
