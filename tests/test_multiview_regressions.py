@@ -180,10 +180,9 @@ def test_detector_prefetch_resume_preserves_consumed_rng(tmp_path):
 
 
 @pytest.mark.browser
-def test_lazy_online_worker_reuses_browser_across_cache_hits(tmp_path,monkeypatch):
+def test_lazy_online_worker_reuses_browser_across_cache_hits(tmp_path):
     from framediff.browser import enable_worker_browser,close_worker_browser
     from framediff.tree_online import OnlineSampler,target_pool
-    monkeypatch.setenv('ONLINE_PROFILE','1')
     row=lazy_descriptor(tmp_path)
     enable_worker_browser()
     sampler=OnlineSampler(target_pool([row],cache_dir=tmp_path/'cache'),'screenshot',max_noise=1)
@@ -193,8 +192,7 @@ def test_lazy_online_worker_reuses_browser_across_cache_hits(tmp_path,monkeypatc
         second=sampler.generate(1)
         assert sampler.browser.browser is browser and browser.is_connected()
         assert first['replacement_edit'] and second['replacement_edit']
-        assert first['online']['cache_profile']['status']=='disk_miss'
-        assert second['online']['cache_profile']['status']=='disk_hit'
+        assert 'cache_profile' not in first['online'] and 'cache_profile' not in second['online']
     finally:
         sampler.close();sampler.view_cache.close();close_worker_browser()
     assert not browser.is_connected()
@@ -207,9 +205,6 @@ def test_lazy_policy_disk_cache_survives_process_cache(tmp_path,monkeypatch):
     first=TrainViewCache(capacity=1,cache_dir=root)
     try:
         prepared=first.get(row,policy=True)
-        assert first.last_profile['status']=='disk_miss'
-        assert first.last_profile['render_s']>0
-        assert first.last_profile['normalize_s']>0
     finally:first.close()
     assert prepared['visible_candidates'] and prepared['target_declaration_state']
     assert Path(prepared['target_html']).is_file() and Path(prepared['target_image']).is_file()
@@ -224,8 +219,6 @@ def test_lazy_policy_disk_cache_survives_process_cache(tmp_path,monkeypatch):
     second=TrainViewCache(capacity=1,cache_dir=root)
     try:
         assert second.get(row,policy=True)==prepared
-        assert second.last_profile['status']=='disk_hit'
-        assert second.last_profile['disk_validation_s']>0
     finally:second.close()
 
 
@@ -246,14 +239,7 @@ def test_cold_relabel_skips_obsolete_seed_and_preserves_new_labels(tmp_path,monk
     new=TrainViewCache(cache_dir=tmp_path/'new-relabel')
     try:
         result=new.get(upgraded,policy=True)
-        assert new.last_profile['status']=='disk_miss'
-        assert new.last_profile['parent_cache_status']=='disk_miss'
-        parent=new.last_profile['parent_cache_profile']
-        assert parent['normalize_s']>0
-        assert parent['normalize_profile']['final_scroll_verification_s']>=0
-        assert parent['normalize_profile']['bulk_viewport_trial_s']>=0
-        assert new.last_profile['label_refresh_profile']['candidate_inspection_s']>=0
-        assert 'relabel_s' not in parent
+        assert (new.cache_dir/new._key(upgraded,True)).is_dir()
         assert Path(result['target_image']).read_bytes()==Path(baseline['target_image']).read_bytes()
         for field in ('target_elements','target_declaration_state','visible_candidates',
                       'current_boxes','css_owners','visual_geometry_contract'):

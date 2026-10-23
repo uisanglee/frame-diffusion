@@ -112,8 +112,8 @@ owner/property and caches edits witnessed to change both layout and the clipped
 occupancy/boundary tensor. Pages without a witnessed candidate are excluded.
 This is finite probing, not a proof that no conceivable CSS value could work.
 It does not invent overrides. Gap-only pages have no supported mutation sites.
-Inspect online_teacher_property_distribution,
-symbolic_by_predicted_property and freeze-report property counts for coverage.
+Inspect `symbolic_by_predicted_property` and freeze-report property counts for
+coverage; the per-step online teacher histogram is no longer logged.
 
 The action/state schema changed. Do not resume old policy weights or reuse
 eight-field labels. Reuse the original non-flat HTML/images and detector weights,

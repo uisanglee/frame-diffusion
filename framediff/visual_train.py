@@ -451,10 +451,8 @@ def _train(args,stack):
         stack.callback(render_stream.close)
     if device.startswith('cuda'):torch.cuda.reset_peak_memory_stats(device)
     for step in range(start+1,args.steps+1):
-        step_started=time.perf_counter()
-        net.train();opt.zero_grad(set_to_none=True);total=0.;step_parts={};data_wait=0.
+        net.train();opt.zero_grad(set_to_none=True);total=0.;step_parts={}
         for _ in range(args.accumulation):
-            wait_started=time.perf_counter()
             batch=render_stream.take() if render_stream else (sample_policy_rows(policy_pools,args.batch_size,rng) if policy_pools else
                    sample_page_views(view_pools,args.batch_size,rng))
             if is_detector and render_stream is None:
@@ -472,7 +470,6 @@ def _train(args,stack):
                         else:raise RuntimeError('32 consecutive lazy detector preparation failures; inspect lazy-rejections.jsonl')
                     materialized.append(row)
                 batch=materialized
-            data_wait+=time.perf_counter()-wait_started
             with amp():
                 if is_detector:value=detection_loss(net,batch,device);parts={}
                 elif cfg['training_scheme']=='balanced-v1':
@@ -484,14 +481,12 @@ def _train(args,stack):
             for key,part in parts.items():step_parts[key]=step_parts.get(key,0.)+float(part.detach())/args.accumulation
         torch.nn.utils.clip_grad_norm_(net.parameters(),1.);opt.step()
         if step%args.log_every==0 or step==args.steps:
-            row={'step':step,'loss':float(total),'elapsed_s':time.perf_counter()-started}
+            elapsed=time.perf_counter()-started
+            row={'step':step,'loss':float(total),'elapsed_s':elapsed}
             if device.startswith('cuda'):
-                row.update(cuda_allocated_bytes=torch.cuda.memory_allocated(device),
-                           cuda_reserved_bytes=torch.cuda.memory_reserved(device),
-                           peak_cuda_allocated_bytes=torch.cuda.max_memory_allocated(device))
+                row['peak_cuda_allocated_bytes']=torch.cuda.max_memory_allocated(device)
             if is_detector:
-                row.update(data_wait_s=data_wait,step_seconds=time.perf_counter()-step_started)
-                row['images_per_second']=args.batch_size*args.accumulation/row['step_seconds']
+                row['images_per_second']=(step-start)*args.batch_size*args.accumulation/max(elapsed,1e-9)
             row.update({f'{key}_loss':value for key,value in sorted(step_parts.items())})
             with (out/'train.jsonl').open('a') as stream:
                 import json

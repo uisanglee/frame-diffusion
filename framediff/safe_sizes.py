@@ -2,7 +2,6 @@
 import os
 import shutil
 import tempfile
-import time
 from pathlib import Path
 from .explicit_html import SIZE_SNAPSHOT_JS,SIZE_BOXES_JS,compare_renders
 from .box_scroll_guard import capture,compare
@@ -49,17 +48,13 @@ def _convert(browser,html,viewport,out,mode='sizes',max_pixel_mae=.01,max_box_er
              action_ids=None,target_tree=None,observation_size=384):
     if mode!='sizes':raise ValueError('Safe flow normalization only supports sizes')
     out=Path(out);out.mkdir(parents=True,exist_ok=True)
-    started=time.perf_counter();timing={}
     browser.load(html,viewport)
     before_png,_=browser.stable_capture(action_ids)
     snapshot=browser.page.evaluate(SIZE_SNAPSHOT_JS,action_ids)
     baseline=browser.page.content()
     before=browser.page.evaluate(SIZE_BOXES_JS)
-    timing['initial_viewport_s']=time.perf_counter()-started
-    phase=time.perf_counter()
     ids=set(action_ids or [r['fd_id'] for r in before if r.get('fd_id')])
     original_scroll=capture(browser,out/'scroll-before')
-    timing['initial_scroll_s']=time.perf_counter()-phase
     viewport_trials=0;scroll_trials=0
     def assess_viewport(source):
         nonlocal viewport_trials
@@ -79,12 +74,9 @@ def _convert(browser,html,viewport,out,mode='sizes',max_pixel_mae=.01,max_box_er
                        ids,max_box_error,max_pixel_mae)
         qa['scroll_pixel_preservation']=scroll;qa['accepted'] &= scroll['accepted']
         return qa,png
-    phase=time.perf_counter()
     initial,_=assess_full(baseline)
-    timing['reload_verification_s']=time.perf_counter()-phase
     if not initial['accepted']:
-        report={**initial,'error':'Original HTML is not stable across reloads','failure_stage':'original_reload',
-                'timing_s':{**timing,'total_s':time.perf_counter()-started}}
+        report={**initial,'error':'Original HTML is not stable across reloads','failure_stage':'original_reload'}
         write_json(out/'report.json',report);return report
 
     def materialize(ops):
@@ -101,7 +93,7 @@ def _convert(browser,html,viewport,out,mode='sizes',max_pixel_mae=.01,max_box_er
           }
         }''',dict(ops=ops,contract=CONTRACT))
         return browser.page.content()
-    phase=time.perf_counter();ops=[]
+    ops=[]
     for a in snapshot['candidates']:
         for field in a['editable']:
             if field in ('width','height'):
@@ -112,15 +104,11 @@ def _convert(browser,html,viewport,out,mode='sizes',max_pixel_mae=.01,max_box_er
                 if value is None:continue
                 values={}
             ops.append(dict(id=a['id'],field=field,values={**values,field:value}))
-    timing['operation_build_s']=time.perf_counter()-phase
     # Intermediate field selection normally needs only the viewport check.
     # The chosen final document must still pass the exact full scroll guard.
-    phase=time.perf_counter()
     candidate=materialize(ops);quick,quick_png=assess_viewport(candidate)
-    timing['bulk_viewport_trial_s']=time.perf_counter()-phase
     accepted=ops;rejected=[]
     if not quick['accepted']:
-        phase=time.perf_counter()
         accepted=[]
         for op in ops:
             if viewport_trials>=128:
@@ -128,18 +116,14 @@ def _convert(browser,html,viewport,out,mode='sizes',max_pixel_mae=.01,max_box_er
             trial=materialize([*accepted,op]);result,_=assess_viewport(trial)
             if result['accepted']:accepted.append(op)
             else:rejected.append({**op,'reason':'changes_render_or_scroll'})
-        timing['field_viewport_trials_s']=time.perf_counter()-phase
-    phase=time.perf_counter()
     if quick['accepted']:
         # The bulk trial left this exact candidate loaded. Recheck its scroll
         # positions without rebuilding and reloading the same HTML twice.
         qa,png=assess_full(candidate,prior=(quick,quick_png))
     else:
         candidate=materialize(accepted);qa,png=assess_full(candidate)
-    timing['final_scroll_verification_s']=time.perf_counter()-phase
     full_fallback=False
     if not qa['accepted']:
-        phase=time.perf_counter()
         # A field that is harmless in the initial viewport may still damage a
         # below-fold or nested-scroll state.  Only this uncommon case pays for
         # the old per-field full-scroll verification.
@@ -151,14 +135,12 @@ def _convert(browser,html,viewport,out,mode='sizes',max_pixel_mae=.01,max_box_er
             if result['accepted']:accepted.append(op)
             else:rejected.append({**op,'reason':'changes_render_or_scroll'})
         candidate=materialize(accepted);qa,png=assess_full(candidate)
-        timing['full_scroll_fallback_s']=time.perf_counter()-phase
     report={**qa,'normalization_strategy':CONTRACT,'normalized_elements':len({a['id'] for a in accepted}),
             'normalized_ids':sorted({a['id'] for a in accepted}),'partial_normalization':bool(rejected),
             'verification_trials':viewport_trials,'scroll_verification_trials':scroll_trials,
             'full_scroll_fallback':full_fallback,'rejected_fields':rejected,
             'preserved_elements':snapshot['skipped'],
             'mode':'sizes','viewport':viewport,'failure_stage':None if qa['accepted'] else 'normalization_preservation'}
-    report['timing_s']={**timing,'total_s':time.perf_counter()-started}
     write_json(out/'report.json',report)
     (out/'before.png').write_bytes(before_png);(out/'after.png').write_bytes(png)
     (out/('normalized.html' if qa['accepted'] else 'rejected.html')).write_text(candidate)

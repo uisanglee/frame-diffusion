@@ -66,4 +66,3 @@ def test_accepted_bulk_trial_reuses_loaded_page_for_scroll_check(tmp_path):
         assert qa['verification_trials']==2  # baseline replay + one bulk candidate
         assert qa['scroll_verification_trials']==2
         assert not qa['full_scroll_fallback']
-        assert qa['timing_s']['final_scroll_verification_s']>=0

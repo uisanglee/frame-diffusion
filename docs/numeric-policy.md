@@ -118,10 +118,10 @@ if host RAM is limited. Samples retry at most --online-attempts (default 8), the
 fail explicitly. Shutdown cancels queued work and closes worker browsers after
 an in-progress browser call finishes/times out.
 
-Logs include online_samples, online_retries, data_wait_s, producer_seconds,
-online_teacher_remove_rate and online_mean_remaining_edits. Timing/rate counters
-restart on resume; online_samples is the persisted global cursor. Producer time
-is summed worker effort, not wall time. More workers do not guarantee a speedup.
+Training logs retain loss, validation metrics, elapsed time, examples per second,
+peak GPU allocation, the persisted `online_samples` cursor, and timeout/generation
+skip counts. Per-sample cache and browser timing profiles are no longer recorded.
+More workers do not guarantee a speedup.
 
 Use --init-checkpoint and a NEW output directory to warm-start from an existing
 declaration-tree policy. Do not --resume an offline run as online: the sampling

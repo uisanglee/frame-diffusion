@@ -104,8 +104,7 @@ This defines a value-repair training task: reverse labels are SET, so the expect
 that the model learned REMOVE. REMOVE remains executable for existing unwanted
 declarations, but v3 value-only training does not supervise that capability.
 Pages without supported effective values can be excluded; inspect coverage.
-Logs include `online_teacher_rule_rate`,
-`online_teacher_remove_rate` and `online_probe_rejections`. Validation reports
+Per-step online probe/teacher diagnostics are no longer logged. Validation reports
 token CE and sample counts separately for inline/SET, inline/REMOVE, rule/SET and
 rule/REMOVE in `validation_by_teacher`. Inspect `freeze-report.json` for coverage;
 a corpus with few editable embedded rules can still have little rule coverage.

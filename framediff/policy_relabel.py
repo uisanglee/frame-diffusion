@@ -2,7 +2,6 @@
 import copy
 import hashlib
 import json
-import time
 from collections import Counter
 from pathlib import Path
 
@@ -74,7 +73,7 @@ def failure_reason(exc):
     return 'other'
 
 
-def refresh_row(row, out, size=384, clean_only=False, profile=None):
+def refresh_row(row, out, size=384, clean_only=False):
     """No HTML/image replacement or teacher search; reject inconsistent assets."""
     from .explicit_html import feedback_metadata
     from .tree_online import abstraction, changed, target_pool
@@ -84,42 +83,27 @@ def refresh_row(row, out, size=384, clean_only=False, profile=None):
     for key in ('predicted_target_abstract','predicted_target_elements','parser_provenance','parser_sha'):
         result.pop(key,None)
     tree=copy.deepcopy(row['current'])
-    timings={} if profile is not None else None
-    def measure(name,started):
-        if timings is not None:timings[name]=timings.get(name,0.0)+time.perf_counter()-started
     with HtmlBrowser() as browser:
         observations={};preservation={}
         for prefix in (('target',) if clean_only else ('target','current')):
-            phase=time.perf_counter()
             browser.load(Path(row[prefix+'_html']).read_text(),row['viewport'])
-            measure(prefix+'_load_s',phase)
-            phase=time.perf_counter()
             annotate(browser,tree,visual_boxes=True)
-            measure(prefix+'_annotate_s',phase)
-            phase=time.perf_counter()
             mask,boxes,items=abstraction(browser,tree,row['viewport'],size)
-            measure(prefix+'_abstraction_s',phase)
             # Header-only check; existing image is not decoded or recaptured.
             with Image.open(row[prefix+'_image']) as saved:
                 if saved.size!=tuple(row['viewport']):
                     raise ValueError(f'{prefix}: image dimensions mismatch')
-            phase=time.perf_counter()
             preservation[prefix]=geometry_preservation(row,prefix,boxes,items)
-            measure(prefix+'_geometry_check_s',phase)
-            phase=time.perf_counter()
             parsed=css_owners.read(browser,tree)
-            measure(prefix+'_css_parse_s',phase)
             if parsed['owners']!=row['css_owners']:
                 raise ValueError(f'{prefix}: CSS owners changed')
             field='target_declaration_state' if prefix=='target' else 'declaration_state'
             if parsed['state']!=row[field]:raise ValueError(f'{prefix}: CSS state changed')
             observations[prefix]=(mask,boxes,items)
             if prefix=='current' or clean_only:
-                phase=time.perf_counter()
                 result['current']=refresh_geometry(tree,boxes)
                 result['current_boxes']=boxes
                 result.update(feedback_metadata(browser,result['current']))
-                measure(prefix+'_feedback_s',phase)
         target=observations['target']
         current=observations.get('current',target)
         if not clean_only:
@@ -138,11 +122,8 @@ def refresh_row(row, out, size=384, clean_only=False, profile=None):
         result[prefix+'_abstract']=str(path)
     result.setdefault('online',{}).update(abstraction_max_difference=float((target[0]-current[0]).abs().max()))
     # Recheck clean-target eligibility under the new observation definition.
-    phase=time.perf_counter()
     checked=target_pool([{**result,'split':'train'}],cache_dir=out.parent/'.inspection',observation_size=size)[0]
-    measure('candidate_inspection_s',phase)
     result['visible_candidates']=checked['visible_candidates']
-    if profile is not None:profile.update(timings)
     result['relabel_audit']={'pixels_equal':None,'pixel_comparison_performed':False,
                             'render_preservation':preservation,'teacher_preserved':True,
                             'target_boxes':target[1]}

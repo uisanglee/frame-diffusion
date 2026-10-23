@@ -32,41 +32,6 @@ POLICY_SCALES = {
 }
 
 
-def online_step_profile(step, rows, data_wait_s, step_seconds):
-    """Summarize one optimizer step without conflating parallel producer time with wall time."""
-    stages={};cache_status_counts={};cache_status_seconds_sum={};cache_phase_seconds_sum={}
-    parent_cache_status_counts={};parent_cache_phase_seconds_sum={}
-    for row in rows:
-        for name,seconds in row['online']['profile_s'].items():
-            stages.setdefault(name,[]).append(seconds)
-        cache=row['online'].get('cache_profile')
-        if cache:
-            status=cache['status']
-            cache_status_counts[status]=cache_status_counts.get(status,0)+1
-            cache_status_seconds_sum[status]=cache_status_seconds_sum.get(status,0.)+cache['total_s']
-            for name,seconds in cache.items():
-                if name.endswith('_s'):
-                    cache_phase_seconds_sum[name]=cache_phase_seconds_sum.get(name,0.)+seconds
-            parent_status=cache.get('parent_cache_status')
-            if parent_status:
-                parent_cache_status_counts[parent_status]=parent_cache_status_counts.get(parent_status,0)+1
-                for name,seconds in cache['parent_cache_profile'].items():
-                    if name.endswith('_s'):
-                        parent_cache_phase_seconds_sum[name]=parent_cache_phase_seconds_sum.get(name,0.)+seconds
-    return {'step':step,'samples':len(rows),'step_seconds':step_seconds,
-            'data_wait_s':data_wait_s,
-            'non_data_wait_s':max(0.,step_seconds-data_wait_s),
-            'producer_seconds_sum':sum(row['online']['seconds'] for row in rows),
-            'cache_status_counts':cache_status_counts,
-            'cache_status_seconds_sum':cache_status_seconds_sum,
-            'cache_phase_seconds_sum':cache_phase_seconds_sum,
-            'parent_cache_status_counts':parent_cache_status_counts,
-            'parent_cache_phase_seconds_sum':parent_cache_phase_seconds_sum,
-            'stage_seconds_sum':{name:sum(values) for name,values in stages.items()},
-            'stage_seconds_mean_per_sample':{name:sum(values)/len(rows) for name,values in stages.items()},
-            'stage_seconds_max_per_sample':{name:max(values) for name,values in stages.items()}}
-
-
 def resolve_policy_scale(args):
     """Resolve a named capacity before checkpoint/config validation."""
     scale = getattr(args, 'policy_scale', None)
@@ -536,7 +501,6 @@ def train(args):
         print(row,flush=True)
     with contextlib.ExitStack() as stack:
         stream=None
-        profile_online=online and os.environ.get('ONLINE_PROFILE','0')=='1'
         if online:
             from .tree_online import OnlineStream
             cursor=ck.get('online_cursor') if args.resume else 0
@@ -547,41 +511,19 @@ def train(args):
         # load_state_dict has copied/restored these tensors. Keeping the loaded
         # checkpoint retains a second CPU copy throughout resumed training.
         del ck
-        wait_seconds=0.;producer_seconds=0.;sample_count=0;retry_count=0;remove_count=0;remaining_total=0;recent_errors=[]
-        rule_count=0;probe_rejections=0
-        property_counts={field:0 for field in cfg.fields};path_length_total=0;mutation_total=0
         if device.startswith('cuda'):torch.cuda.reset_peak_memory_stats(device)
         started=time.perf_counter()
         for step in range(start+1,args.steps+1):
-            step_started=time.perf_counter();step_wait_seconds=0.;step_profile_rows=[]
             net.train();optimizer.zero_grad(set_to_none=True);total=0.
             for _ in range(args.accumulation):
-                wait_start=time.perf_counter()
                 rows=stream.take(args.batch_size) if stream else [rng.choice(training) for _ in range(args.batch_size)]
                 if lazy_detector is not None:
                     predictions=prediction_cache.predict(lazy_detector,[row['target_image'] for row in rows])
                     for row,prediction in zip(rows,predictions):row['lazy_predicted_elements']=prediction
-                waited=time.perf_counter()-wait_start
-                wait_seconds+=waited;step_wait_seconds+=waited
-                if stream:
-                    for row in rows:
-                        info=row['online'];sample_count+=1;retry_count+=info['retries']
-                        remove_count+=not row['replacement_edit'][2]
-                        remaining_total+=row['symbolic_distance']
-                        property_counts[row['replacement_edit'][1]]+=1
-                        path_length_total+=info['path_length'];mutation_total+=len(info['corruptions'])
-                        producer_seconds+=info['seconds']
-                        recent_errors=(recent_errors+info['errors'])[-5:]
-                        rule_count+=info.get('teacher_owner')=='rule'
-                        probe_rejections+=info.get('probe_rejections',0)
-                        if profile_online:step_profile_rows.append(row)
                 with amp(): value,_=loss(rows)
                 if not torch.isfinite(value): raise RuntimeError('Nonfinite token CE')
                 (value/args.accumulation).backward();total+=float(value.detach())/args.accumulation
             nn.utils.clip_grad_norm_(net.parameters(),1.);optimizer.step()
-            if profile_online:
-                log('online-profile.jsonl',online_step_profile(
-                    step,step_profile_rows,step_wait_seconds,time.perf_counter()-step_started))
             if step%args.log_every==0 or step==args.steps:
                 elapsed=time.perf_counter()-started;session_examples=(step-start)*args.batch_size*args.accumulation
                 metrics={'step':step,'loss':total,'token_ce':total,'elapsed_s':elapsed,
@@ -589,31 +531,11 @@ def train(args):
                          'examples_seen':step*args.batch_size*args.accumulation,
                          'examples_per_second':session_examples/max(elapsed,1e-9)}
                 if device.startswith('cuda'):
-                    metrics.update(peak_cuda_bytes=torch.cuda.max_memory_allocated(device),
-                                   cuda_allocated_bytes=torch.cuda.memory_allocated(device),
-                                   cuda_reserved_bytes=torch.cuda.memory_reserved(device))
-                if lazy_detector is not None:
-                    metrics.update(target_prediction_cache_hits=prediction_cache.hits,
-                                   target_prediction_cache_misses=prediction_cache.misses)
+                    metrics['peak_cuda_bytes']=torch.cuda.max_memory_allocated(device)
                 if stream:
-                    metrics.update(online_corruption_contract=expected_corruption,
-                        online_sampling_contract=sampling_contract,
-                        online_samples=stream.cursor,online_timeout_skips=stream.timeout_skips,
+                    metrics.update(online_samples=stream.cursor,online_timeout_skips=stream.timeout_skips,
                         online_generation_skips=stream.generation_skips,
-                        online_timeout_retries=stream.timeout_retries,
-                        online_failed_attempts_by_view=dict(stream.failure_views),
-                        online_accepted_by_view=dict(stream.accepted_views),
-                        online_teacher_field_counts=dict(stream.teacher_fields),
-                        data_wait_s=wait_seconds,
-                        producer_seconds=producer_seconds,online_retries=retry_count,
-                        online_teacher_remove_rate=remove_count/max(1,sample_count),
-                        online_mean_remaining_edits=remaining_total/max(1,sample_count),
-                        online_mean_path_length=path_length_total/max(1,sample_count),
-                        online_mean_mutations=mutation_total/max(1,sample_count),
-                        online_teacher_property_distribution={field:property_counts[field]/max(1,sample_count) for field in cfg.fields},
-                        online_recent_errors=recent_errors)
-                    if cfg.stylesheets:metrics.update(online_teacher_rule_rate=rule_count/max(1,sample_count),
-                        online_probe_rejections=probe_rejections)
+                        online_timeout_retries=stream.timeout_retries)
                 log('train.jsonl',metrics)
             if step%args.eval_every==0 or step==args.steps:
                 net.eval();weighted=0.;count=0
@@ -643,10 +565,8 @@ def train(args):
                 if cfg.parent_first:metrics['parent_first']=True
                 if cfg.stylesheets:metrics['validation_by_teacher']=breakdown
                 if metric_rows:
-                    metric_started=time.perf_counter()
                     metrics.update(symbolic_policy_metrics(net,metric_rows,metric_targets,device,
                                                            args.predicted_targets,amp))
-                    metrics['symbolic_metric_seconds']=time.perf_counter()-metric_started
                 log('train.jsonl',metrics)
                 with (out/'validation.jsonl').open('a') as validation_file: validation_file.write(json.dumps(metrics)+'\n')
                 state={'kind':KIND,'config':config,'model':net.state_dict(),'optimizer':optimizer.state_dict(),
