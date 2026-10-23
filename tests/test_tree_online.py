@@ -169,7 +169,8 @@ def test_legacy_pool_inspects_external_only_pages_and_keeps_editable_css(tmp_pat
 
 
 @pytest.mark.browser
-def test_fresh_path_states_and_paired_modalities(corpus):
+def test_fresh_path_states_and_paired_modalities(corpus,monkeypatch):
+    monkeypatch.setenv('ONLINE_PROFILE','1')
     pool=target_pool([corpus['train']]);abstract=OnlineSampler(pool,'abstract',max_noise=5)
     raw=OnlineSampler(pool,'screenshot',max_noise=5)
     original=Path(pool[0]['target_html']).read_bytes()
@@ -186,6 +187,9 @@ def test_fresh_path_states_and_paired_modalities(corpus):
         assert same['replacement_edit']==rows[2]['replacement_edit']
         assert same['current_image'].startswith(b'\x89PNG')
         assert same['online']['screenshot_captures']==1
+        assert same['online']['profile_s']['screenshot_capture_s']>0
+        assert same['online']['profile_s']['corruption_probes_s']>0
+        assert sum(same['online']['profile_s'].values())==pytest.approx(same['online']['seconds'],rel=0.01)
         assert all(r['online']['screenshot_captures']==0 for r in rows)
         for row in rows:
             assert row['replacement_edit'] in repair_path(row['declaration_state'],clean)
@@ -194,6 +198,19 @@ def test_fresh_path_states_and_paired_modalities(corpus):
             assert state==clean
         assert Path(pool[0]['target_html']).read_bytes()==original
     finally: abstract.close();raw.close()
+
+
+def test_online_step_profile_summarizes_parallel_sample_time():
+    from framediff.tree_policy import online_step_profile
+    rows=[{'online':{'seconds':3.,'profile_s':{'cache_prepare_s':1.,'screenshot_capture_s':2.}}},
+          {'online':{'seconds':5.,'profile_s':{'cache_prepare_s':2.,'screenshot_capture_s':3.}}}]
+    result=online_step_profile(1,rows,4.,6.)
+    assert result['samples']==2
+    assert result['data_wait_s']==4.
+    assert result['non_data_wait_s']==2.
+    assert result['producer_seconds_sum']==8.  # Worker times can exceed wall time.
+    assert result['stage_seconds_mean_per_sample']['screenshot_capture_s']==2.5
+    assert result['stage_seconds_max_per_sample']['cache_prepare_s']==2.
 
 
 @pytest.mark.browser
@@ -283,8 +300,9 @@ def test_timeout_retry_preserves_sample_index(monkeypatch):
 
 @pytest.mark.browser
 @pytest.mark.parametrize('mode',['abstract','screenshot'])
-def test_online_training_resume_keeps_fixed_validation(corpus,tmp_path,mode):
+def test_online_training_resume_keeps_fixed_validation(corpus,tmp_path,mode,monkeypatch):
     from framediff.cli import main
+    if mode=='screenshot':monkeypatch.setenv('ONLINE_PROFILE','1')
     validation_before=(tmp_path/'policy-val.jsonl').read_bytes()
     args=['visual-tree-train','--train',str(tmp_path/'policy-train.jsonl'),
           '--val',str(tmp_path/'policy-val.jsonl'),'--out',str(tmp_path/'run'),
@@ -300,6 +318,11 @@ def test_online_training_resume_keeps_fixed_validation(corpus,tmp_path,mode):
     assert torch.load(checkpoint,weights_only=True)['online_cursor']==2
     metrics=list(read_jsonl(tmp_path/'run/train.jsonl'))
     assert [r['online_samples'] for r in metrics if 'online_samples' in r]==[1,2]
+    if mode=='screenshot':
+        profiles=list(read_jsonl(tmp_path/'run/online-profile.jsonl'))
+        assert [row['step'] for row in profiles]==[1,2]
+        assert all(row['samples']==1 and row['stage_seconds_sum']['screenshot_capture_s']>0
+                   for row in profiles)
     assert (tmp_path/'policy-val.jsonl').read_bytes()==validation_before
 
 

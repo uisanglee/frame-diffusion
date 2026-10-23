@@ -5,6 +5,7 @@ Optional normalization corruption restores recorded original declarations.
 """
 import contextlib
 import json
+import os
 import random
 import time
 from dataclasses import asdict, dataclass
@@ -29,6 +30,21 @@ POLICY_SCALES = {
     'm': {'hidden': 256, 'layers': 6, 'heads': 8},
     'l': {'hidden': 512, 'layers': 8, 'heads': 8},
 }
+
+
+def online_step_profile(step, rows, data_wait_s, step_seconds):
+    """Summarize one optimizer step without conflating parallel producer time with wall time."""
+    stages={}
+    for row in rows:
+        for name,seconds in row['online']['profile_s'].items():
+            stages.setdefault(name,[]).append(seconds)
+    return {'step':step,'samples':len(rows),'step_seconds':step_seconds,
+            'data_wait_s':data_wait_s,
+            'non_data_wait_s':max(0.,step_seconds-data_wait_s),
+            'producer_seconds_sum':sum(row['online']['seconds'] for row in rows),
+            'stage_seconds_sum':{name:sum(values) for name,values in stages.items()},
+            'stage_seconds_mean_per_sample':{name:sum(values)/len(rows) for name,values in stages.items()},
+            'stage_seconds_max_per_sample':{name:max(values) for name,values in stages.items()}}
 
 
 def resolve_policy_scale(args):
@@ -500,6 +516,7 @@ def train(args):
         print(row,flush=True)
     with contextlib.ExitStack() as stack:
         stream=None
+        profile_online=online and os.environ.get('ONLINE_PROFILE','0')=='1'
         if online:
             from .tree_online import OnlineStream
             cursor=ck.get('online_cursor') if args.resume else 0
@@ -516,6 +533,7 @@ def train(args):
         if device.startswith('cuda'):torch.cuda.reset_peak_memory_stats(device)
         started=time.perf_counter()
         for step in range(start+1,args.steps+1):
+            step_started=time.perf_counter();step_wait_seconds=0.;step_profile_rows=[]
             net.train();optimizer.zero_grad(set_to_none=True);total=0.
             for _ in range(args.accumulation):
                 wait_start=time.perf_counter()
@@ -523,7 +541,8 @@ def train(args):
                 if lazy_detector is not None:
                     predictions=prediction_cache.predict(lazy_detector,[row['target_image'] for row in rows])
                     for row,prediction in zip(rows,predictions):row['lazy_predicted_elements']=prediction
-                wait_seconds+=time.perf_counter()-wait_start
+                waited=time.perf_counter()-wait_start
+                wait_seconds+=waited;step_wait_seconds+=waited
                 if stream:
                     for row in rows:
                         info=row['online'];sample_count+=1;retry_count+=info['retries']
@@ -535,10 +554,14 @@ def train(args):
                         recent_errors=(recent_errors+info['errors'])[-5:]
                         rule_count+=info.get('teacher_owner')=='rule'
                         probe_rejections+=info.get('probe_rejections',0)
+                        if profile_online:step_profile_rows.append(row)
                 with amp(): value,_=loss(rows)
                 if not torch.isfinite(value): raise RuntimeError('Nonfinite token CE')
                 (value/args.accumulation).backward();total+=float(value.detach())/args.accumulation
             nn.utils.clip_grad_norm_(net.parameters(),1.);optimizer.step()
+            if profile_online:
+                log('online-profile.jsonl',online_step_profile(
+                    step,step_profile_rows,step_wait_seconds,time.perf_counter()-step_started))
             if step%args.log_every==0 or step==args.steps:
                 elapsed=time.perf_counter()-started;session_examples=(step-start)*args.batch_size*args.accumulation
                 metrics={'step':step,'loss':total,'token_ce':total,'elapsed_s':elapsed,

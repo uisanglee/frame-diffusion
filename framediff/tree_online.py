@@ -399,6 +399,10 @@ class OnlineSampler:
 
     def generate(self,index):
         rng=random.Random(task_seed(self.seed,index));errors=[];started=time.perf_counter()
+        profile=os.environ.get('ONLINE_PROFILE','0')=='1'
+        timings={}
+        def record(name,since):
+            if profile:timings[name]=timings.get(name,0.)+time.perf_counter()-since
         for attempt in range(self.attempts):
             if self.stop is not None and self.stop.is_set(): raise RuntimeError('Online producer stopped')
             # Pages are the statistical units. Select a page first, then one
@@ -406,6 +410,7 @@ class OnlineSampler:
             # six times more than pages with one capture.
             target=rng.choice(self.by_page[rng.choice(self.page_ids)])
             try:
+                phase_start=time.perf_counter()
                 descriptor=target if target.get('lazy_contract') else None
                 if descriptor:
                     # Materialization owns a Playwright runtime; close ours first.
@@ -419,6 +424,8 @@ class OnlineSampler:
                         raise ValueError('Lazy policy cache lacks inspected target metadata')
                     target=copy.deepcopy(prepared)
                     target['id']=descriptor['lazy_source']['id']
+                record('cache_prepare_s',phase_start)
+                phase_start=time.perf_counter()
                 if self.browser is None: self.browser=HtmlBrowser().__enter__()
                 else: self.browser.reset_context()
                 browser=self.browser;tree=target['current'];viewport=target['viewport']
@@ -441,10 +448,14 @@ class OnlineSampler:
                 def apply(edit):
                     return css_owners.execute(browser,owners,edit) if owner_mode else execute(browser,tree,edit)
                 def geometry():return browser.tagged_boxes([n['id'] for n in tree['nodes'][1:]])
+                record('browser_setup_s',phase_start)
+                phase_start=time.perf_counter()
                 size=target.get('corruption_observation_size',384)
                 clean_mask,clean_boxes,_=abstraction(browser,tree,viewport,size)
                 frame=clean_mask
                 state=state_now();noise=[];probe_rejections=0
+                record('clean_abstraction_s',phase_start)
+                phase_start=time.perf_counter()
                 for _ in range(rng.randint(1,self.max_noise)):
                     if self.stop is not None and self.stop.is_set(): raise RuntimeError('Online producer stopped')
                     for trial in range(24):
@@ -470,6 +481,8 @@ class OnlineSampler:
                         if (not changed(frame,after_mask) or (owner_mode and (before_values==css_owners.computed(browser,owners,mutation) or before_boxes==geometry()))):
                             apply([mutation[0],mutation[1],*old]);probe_rejections+=1;continue
                         frame=after_mask;state=state_now();noise.append(mutation);break
+                record('corruption_probes_s',phase_start)
+                phase_start=time.perf_counter()
                 path=repair_path(state,clean,rng.getrandbits(64))
                 if not path: raise ValueError('Corruption returned to clean program')
                 # Select an intermediate reverse-path state, not only the
@@ -483,6 +496,8 @@ class OnlineSampler:
                 if not remaining: raise ValueError('Sampled clean state has no next edit')
                 frame,boxes,_=abstraction(browser,tree,viewport,size)
                 if not changed(frame,clean_mask):raise ValueError('Remaining CSS differences have no abstraction effect')
+                record('reverse_path_s',phase_start)
+                phase_start=time.perf_counter()
                 # Reversing other edits can make a formerly active declaration
                 # invisible. Do not emit an unobservable next-action label.
                 teacher=None
@@ -498,6 +513,8 @@ class OnlineSampler:
                     from .parent_first import improving_teacher
                     teacher,gain=improving_teacher(browser,tree,viewport,size,state,remaining,clean_mask,owners)
                     if teacher is None:raise ValueError('No strictly improving parent-first reverse label')
+                record('teacher_probe_s',phase_start)
+                phase_start=time.perf_counter()
                 result={**target,'id':target['id']+f'/online-{index}',
                         'current':refresh_geometry(tree,boxes),'current_boxes':boxes,
                         'declaration_state':state,'target_declaration_state':clean,
@@ -509,11 +526,14 @@ class OnlineSampler:
                 if owner_mode:
                     result['css_owners']=owners
                     result['current_html_text']=browser.page.content()
+                record('sample_metadata_s',phase_start)
+                phase_start=time.perf_counter()
                 if self.mode=='screenshot':
                     # Bytes travel through a bounded queue, never thousands of
                     # transient files on disk. Target images are never recaptured.
                     from .explicit_html import feedback_screenshot
                     result['current_image']=feedback_screenshot(browser,animations='disabled')
+                record('screenshot_capture_s',phase_start)
                 result['online']={'index':index,'seed':task_seed(self.seed,index),'retries':attempt,
                                   'visible_candidate_count':len(target['visible_candidates']),
                                   'abstraction_max_difference':float((frame-clean_mask).abs().max()),
@@ -530,6 +550,10 @@ class OnlineSampler:
                     from .lazy_webui import portable_images
                     result=portable_images(result,('target_image',))
                     if descriptor.get('lazy_detector'):result['lazy_detector']=descriptor['lazy_detector']
+                if profile:
+                    total=time.perf_counter()-started
+                    result['online']['profile_s']={**timings,
+                        'unattributed_or_failed_attempts_s':max(0.,total-sum(timings.values()))}
                 return result
             except Exception as exc:
                 errors.append({'page':target['id'],'view':target.get('view','unknown'),
