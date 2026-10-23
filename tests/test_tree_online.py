@@ -202,8 +202,10 @@ def test_fresh_path_states_and_paired_modalities(corpus,monkeypatch):
 
 def test_online_step_profile_summarizes_parallel_sample_time():
     from framediff.tree_policy import online_step_profile
-    rows=[{'online':{'seconds':3.,'profile_s':{'cache_prepare_s':1.,'screenshot_capture_s':2.}}},
-          {'online':{'seconds':5.,'profile_s':{'cache_prepare_s':2.,'screenshot_capture_s':3.}}}]
+    rows=[{'online':{'seconds':3.,'profile_s':{'cache_prepare_s':1.,'screenshot_capture_s':2.},
+                     'cache_profile':{'status':'disk_hit','total_s':1.,'disk_validation_s':.8}}},
+          {'online':{'seconds':5.,'profile_s':{'cache_prepare_s':2.,'screenshot_capture_s':3.},
+                     'cache_profile':{'status':'disk_miss','total_s':2.,'render_s':1.2}}}]
     result=online_step_profile(1,rows,4.,6.)
     assert result['samples']==2
     assert result['data_wait_s']==4.
@@ -211,6 +213,8 @@ def test_online_step_profile_summarizes_parallel_sample_time():
     assert result['producer_seconds_sum']==8.  # Worker times can exceed wall time.
     assert result['stage_seconds_mean_per_sample']['screenshot_capture_s']==2.5
     assert result['stage_seconds_max_per_sample']['cache_prepare_s']==2.
+    assert result['cache_status_counts']=={'disk_hit':1,'disk_miss':1}
+    assert result['cache_phase_seconds_sum']['render_s']==1.2
 
 
 @pytest.mark.browser

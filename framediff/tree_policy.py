@@ -34,14 +34,25 @@ POLICY_SCALES = {
 
 def online_step_profile(step, rows, data_wait_s, step_seconds):
     """Summarize one optimizer step without conflating parallel producer time with wall time."""
-    stages={}
+    stages={};cache_status_counts={};cache_status_seconds_sum={};cache_phase_seconds_sum={}
     for row in rows:
         for name,seconds in row['online']['profile_s'].items():
             stages.setdefault(name,[]).append(seconds)
+        cache=row['online'].get('cache_profile')
+        if cache:
+            status=cache['status']
+            cache_status_counts[status]=cache_status_counts.get(status,0)+1
+            cache_status_seconds_sum[status]=cache_status_seconds_sum.get(status,0.)+cache['total_s']
+            for name,seconds in cache.items():
+                if name.endswith('_s'):
+                    cache_phase_seconds_sum[name]=cache_phase_seconds_sum.get(name,0.)+seconds
     return {'step':step,'samples':len(rows),'step_seconds':step_seconds,
             'data_wait_s':data_wait_s,
             'non_data_wait_s':max(0.,step_seconds-data_wait_s),
             'producer_seconds_sum':sum(row['online']['seconds'] for row in rows),
+            'cache_status_counts':cache_status_counts,
+            'cache_status_seconds_sum':cache_status_seconds_sum,
+            'cache_phase_seconds_sum':cache_phase_seconds_sum,
             'stage_seconds_sum':{name:sum(values) for name,values in stages.items()},
             'stage_seconds_mean_per_sample':{name:sum(values)/len(rows) for name,values in stages.items()},
             'stage_seconds_max_per_sample':{name:max(values) for name,values in stages.items()}}

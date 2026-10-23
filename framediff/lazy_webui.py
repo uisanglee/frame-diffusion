@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 from collections import OrderedDict
 from pathlib import Path
 from types import SimpleNamespace
@@ -80,9 +81,11 @@ def preparation_fingerprint():
     if hashes['safe_sizes.py']=='1acceb2dff0b09384551c9c63276ceb3d4807dab1de160075129a97d4532b4a5':
         hashes['safe_sizes.py']='82670e65a792de714d8cb44f27f3514d717cce013a28d59e0d95c56cbaa4fbd2'
     online_sha=hashlib.sha256(''.join(ast.dump(n) for n in semantic).encode()).hexdigest()
-    # Instance-local LRU ownership and browser release do not change labels.
+    # Instance-local LRU ownership, browser release, and timing-only sampler
+    # instrumentation do not change labels or prepared page contents.
     if online_sha in ('e98088a0e5027f27a10c2c038f23bb8d2a24227af7a4e294e5049ed9e7c8cfc4',
-                      '6e923210000160149956198f2df1e10d88086ec38b08ff38dbbc34fc7390aa17'):
+                      '6e923210000160149956198f2df1e10d88086ec38b08ff38dbbc34fc7390aa17',
+                      '95c26191b15f4c248138edb4380f8156812c757832f393ee5fbe89f74f84710f'):
         online_sha='e598fecb8a9bb423bba5e9cf118b338f89be0bbe3d83195d5512e4e7c2fbf53d'
     return {**hashes,
             'online_preparation':online_sha,
@@ -93,6 +96,7 @@ class TrainViewCache:
     def __init__(self, capacity=2, cache_dir=None):
         if capacity < 1: raise ValueError('Cache capacity must be positive')
         self.capacity=capacity;self.entries=OrderedDict()
+        self.last_profile=None
         self.cache_dir=Path(cache_dir).resolve() if cache_dir else None
         self.legacy_cache_dir=self.cache_dir
         shared=os.environ.get('TUIDE_SHARED_CACHE')
@@ -138,18 +142,29 @@ class TrainViewCache:
         except (OSError,ValueError,KeyError,TypeError,json.JSONDecodeError):return None
 
     def get(self, row, policy=False):
-        if self.cache_dir is None:return self._get(row,policy)
+        started=time.perf_counter()
+        if self.cache_dir is None:
+            result=self._get(row,policy)
+            self.last_profile['total_s']=time.perf_counter()-started
+            return result
         key=self._key(row,policy)
+        lock_started=time.perf_counter()
         with (self.cache_dir/f'{key}.lock').open('a') as lock:
             fcntl.flock(lock,fcntl.LOCK_EX)
             try:
+                lock_wait_s=time.perf_counter()-lock_started
+                import_started=time.perf_counter()
                 if self.legacy_cache_dir and self.legacy_cache_dir!=self.cache_dir:
                     self._import_legacy(key)
+                legacy_import_s=time.perf_counter()-import_started
                 # A killed writer cannot run its finally block. With this key
                 # locked, its old staging directories are safe to reclaim.
                 for stale in self.cache_dir.glob(f'.{key}.*'):
                     if stale.is_dir() and not stale.is_symlink():shutil.rmtree(stale)
-                return self._get(row,policy)
+                result=self._get(row,policy)
+                self.last_profile.update(lock_wait_s=lock_wait_s,legacy_import_s=legacy_import_s,
+                                         total_s=time.perf_counter()-started)
+                return result
             finally:fcntl.flock(lock,fcntl.LOCK_UN)
 
     def _import_legacy(self,key):
@@ -187,22 +202,31 @@ class TrainViewCache:
         from .tree_normalize import _prepare_page
         from .web_experiment import digest
         source=row['lazy_source'];settings=row['lazy_settings']
+        profile={'status':'unknown'}
+        self.last_profile=profile
+        phase_started=time.perf_counter()
         if row.get('lazy_contract')!=CONTRACT:raise ValueError('Unknown lazy train contract')
         if source['split']!='train':raise ValueError('Only train views may be lazy')
         if digest(source['html'])!=source['source_sha']:raise ValueError('Lazy source HTML changed')
+        profile['source_hash_s']=time.perf_counter()-phase_started
         key=self._key(row,policy)
         if key in self.entries and self.cache_dir is None:
+            profile['status']='memory_hit'
             self.entries.move_to_end(key);return copy.deepcopy(self.entries[key][1])
         disk=self.cache_dir/key if self.cache_dir is not None else None
         if disk is not None:
+            phase_started=time.perf_counter()
             result=self._load_disk(disk)
+            profile['disk_validation_s']=time.perf_counter()-phase_started
             if result is not None:
+                profile['status']='disk_hit'
                 self.entries[key]=(None,result)
                 while len(self.entries)>self.capacity:self.entries.popitem(last=False)
                 return copy.deepcopy(result)
             # Under the per-entry lock, discard only this invalid generated
             # entry. A new successful commit must not lose to corrupt data.
             if disk.exists():shutil.rmtree(disk)
+        profile['status']='disk_miss' if disk is not None else 'memory_miss'
         while len(self.entries)>=self.capacity:
             _,(directory,_)=self.entries.popitem(last=False)
             if directory is not None:directory.cleanup()
@@ -220,22 +244,29 @@ class TrainViewCache:
         try:
             relabel=settings.get('policy_relabel')
             if relabel and policy:
+                phase_started=time.perf_counter()
                 from .policy_relabel import refresh_row
                 previous=TrainViewCache(cache_dir=relabel['cache_dir'])
                 try:
                     original=previous.get(relabel['source'],policy=True)
                     result=refresh_row(original,work/'visual-labels',relabel['size'],clean_only=True)
                 finally:previous.close()
+                profile['relabel_s']=time.perf_counter()-phase_started
             else:
+                phase_started=time.perf_counter()
                 rendered,error,_=_render_page((args,work/'rendered',index,source))
                 if error:raise ValueError(f'Lazy render failed: {error}')
+                profile['render_s']=time.perf_counter()-phase_started
             if policy and not relabel:
+                phase_started=time.perf_counter()
                 seed,page,error=_prepare_page((args,work/'labels','train',index,source['id'],
                     rendered['policy'][0],{source['id']:rendered['page']}),
                     persist_seed=os.environ.get('TUIDE_SAVE_DIAGNOSTICS','0')=='1')
                 if error:raise ValueError(f'Lazy normalization failed: {error}')
                 result=seed
+                profile['normalize_s']=time.perf_counter()-phase_started
             elif not policy:result=rendered['detection'][0]
+            phase_started=time.perf_counter()
             if os.environ.get('TUIDE_SAVE_DIAGNOSTICS','0')!='1':
                 if policy:
                     # OnlineSampler starts from target_html and generates its
@@ -255,6 +286,7 @@ class TrainViewCache:
                 result=self._load_disk(disk)
                 if result is None:raise RuntimeError('Concurrent lazy train-view cache commit failed')
             self.entries[key]=(directory,result)
+            profile['commit_s']=time.perf_counter()-phase_started
             return copy.deepcopy(result)
         except BaseException:
             if directory is not None:directory.cleanup()

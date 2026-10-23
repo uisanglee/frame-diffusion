@@ -180,9 +180,10 @@ def test_detector_prefetch_resume_preserves_consumed_rng(tmp_path):
 
 
 @pytest.mark.browser
-def test_lazy_online_worker_reuses_browser_across_cache_hits(tmp_path):
+def test_lazy_online_worker_reuses_browser_across_cache_hits(tmp_path,monkeypatch):
     from framediff.browser import enable_worker_browser,close_worker_browser
     from framediff.tree_online import OnlineSampler,target_pool
+    monkeypatch.setenv('ONLINE_PROFILE','1')
     row=lazy_descriptor(tmp_path)
     enable_worker_browser()
     sampler=OnlineSampler(target_pool([row],cache_dir=tmp_path/'cache'),'screenshot',max_noise=1)
@@ -192,6 +193,8 @@ def test_lazy_online_worker_reuses_browser_across_cache_hits(tmp_path):
         second=sampler.generate(1)
         assert sampler.browser.browser is browser and browser.is_connected()
         assert first['replacement_edit'] and second['replacement_edit']
+        assert first['online']['cache_profile']['status']=='disk_miss'
+        assert second['online']['cache_profile']['status']=='disk_hit'
     finally:
         sampler.close();sampler.view_cache.close();close_worker_browser()
     assert not browser.is_connected()
@@ -202,7 +205,11 @@ def test_lazy_policy_disk_cache_survives_process_cache(tmp_path,monkeypatch):
     from framediff.lazy_webui import TrainViewCache
     row=lazy_descriptor(tmp_path);root=tmp_path/'persistent-lazy-cache'
     first=TrainViewCache(capacity=1,cache_dir=root)
-    try:prepared=first.get(row,policy=True)
+    try:
+        prepared=first.get(row,policy=True)
+        assert first.last_profile['status']=='disk_miss'
+        assert first.last_profile['render_s']>0
+        assert first.last_profile['normalize_s']>0
     finally:first.close()
     assert prepared['visible_candidates'] and prepared['target_declaration_state']
     assert Path(prepared['target_html']).is_file() and Path(prepared['target_image']).is_file()
@@ -215,7 +222,10 @@ def test_lazy_policy_disk_cache_survives_process_cache(tmp_path,monkeypatch):
     monkeypatch.setattr(visual_data,'_render_page',lambda *a,**k: (_ for _ in ()).throw(
         AssertionError('persistent lazy cache rerendered the page')))
     second=TrainViewCache(capacity=1,cache_dir=root)
-    try:assert second.get(row,policy=True)==prepared
+    try:
+        assert second.get(row,policy=True)==prepared
+        assert second.last_profile['status']=='disk_hit'
+        assert second.last_profile['disk_validation_s']>0
     finally:second.close()
 
 

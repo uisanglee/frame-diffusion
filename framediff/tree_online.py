@@ -412,10 +412,12 @@ class OnlineSampler:
             try:
                 phase_start=time.perf_counter()
                 descriptor=target if target.get('lazy_contract') else None
+                cache_profile=None
                 if descriptor:
                     # Materialization owns a Playwright runtime; close ours first.
                     self.close()
                     prepared=self.view_cache.get(descriptor,policy=True)
+                    if profile:cache_profile=dict(self.view_cache.last_profile)
                     # _prepare_page already performed and cached the expensive
                     # browser witness probes. Reusing its enriched row avoids
                     # running the same candidate inspection a second time.
@@ -554,6 +556,7 @@ class OnlineSampler:
                     total=time.perf_counter()-started
                     result['online']['profile_s']={**timings,
                         'unattributed_or_failed_attempts_s':max(0.,total-sum(timings.values()))}
+                    if cache_profile is not None:result['online']['cache_profile']=cache_profile
                 return result
             except Exception as exc:
                 errors.append({'page':target['id'],'view':target.get('view','unknown'),
