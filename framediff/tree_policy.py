@@ -5,7 +5,6 @@ Optional normalization corruption restores recorded original declarations.
 """
 import contextlib
 import json
-import os
 import random
 import time
 from dataclasses import asdict, dataclass
@@ -18,7 +17,7 @@ from torch.nn import functional as F
 from .ir import read_json, read_jsonl, write_json
 from .model import Block, ModelConfig
 from .train import seed_all, select_device
-from .tree_edits import CONTRACT, FIELDS, EditTokenizer, apply_state, extract, repair_path
+from .tree_edits import CONTRACT, FIELDS, EditTokenizer, extract, validate_edit
 from .visual import SpatialEncoder, elements, image_tensor,BOUNDARY_CONTRACT
 from .visual_data import validate_splits
 from .web_experiment import digest, guard_run
@@ -309,45 +308,60 @@ def validation_target_states(rows,out,data_signature,stylesheets):
 
 @torch.no_grad()
 def symbolic_policy_metrics(net,rows,target_states,device,predicted,amp):
-    """One-step tree-distance diagnostics with every valid reverse edit positive.
+    """One decoded action: faulty-site selection and numeric-normalized exact repair.
 
-    A prediction improves iff it reduces the number of declaration children that
-    differ from the clean target. It is not compared with one shuffled teacher.
+    Every differing owner/property is a correct target, independently of the
+    chosen teacher. Unchanged error count is not unchanged CSS or unchanged UI.
+    Legacy symbolic keys remain aliases, with an explicit metric contract.
     """
+    from .validation_metrics import CONTRACT as METRIC_CONTRACT, differing_sites, declaration_equal
     totals={'n':0,'improving':0,'worsening':0,'no_change':0,'invalid':0,
-            'gain':0.,'normalized_gain':0.,'distance':0.,'positive_actions':0.}
+            'target_correct':0,'gain':0.,'normalized_gain':0.,'distance':0.,'positive_actions':0.}
     fields=getattr(getattr(net,'cfg',None),'fields',FIELDS)
-    per_property={field:{'n':0,'improving':0} for field in fields}
+    per_property={field:{'n':0,'improving':0,'target_correct':0} for field in fields}
+    if len(rows)!=len(target_states):raise ValueError('Validation rows and target states differ in length')
     for row,target in zip(rows,target_states):
-        current=row['declaration_state'];before=len(repair_path(current,target,fields=fields))
+        current=row['declaration_state'];faults=differing_sites(current,target,fields);before=len(faults)
         if before<1:continue
         totals['n']+=1;totals['distance']+=before;totals['positive_actions']+=before
         try:
             inputs=batch_inputs(net,[row],device,predicted)
             with amp():action=net.predict(*inputs)
+            owner,field,value,priority=validate_edit(action,len(current),fields)
+            selected_fault=(owner,field) in faults
+            totals['target_correct']+=int(selected_fault)
+            entry=per_property[field];entry['n']+=1;entry['target_correct']+=int(selected_fault)
             from .explicit_html import check_record_edit
             check_record_edit(row,action)
-            after_state=apply_state(current,action,fields);after=len(repair_path(after_state,target,fields=fields))
-            gain=before-after;totals['gain']+=gain;totals['normalized_gain']+=gain/before
-            entry=per_property[action[1]];entry['n']+=1
+            remains_faulty=not declaration_equal([value,priority],target[owner][fields.index(field)])
+            # One action replaces one declaration. No full-state copy or browser
+            # call is needed to count its effect.
+            gain=int(selected_fault)-int(remains_faulty)
+            totals['gain']+=gain;totals['normalized_gain']+=gain/before
             if gain>0:totals['improving']+=1;entry['improving']+=1
             elif gain<0:totals['worsening']+=1
             else:totals['no_change']+=1
         except Exception:
             totals['invalid']+=1
     n=totals['n']
-    if not n:return {'symbolic_metric_n':0}
-    return {'symbolic_metric_n':n,
+    if not n:return {'symbolic_metric_n':0,'action_metric_contract':METRIC_CONTRACT,
+                     'action_target_accuracy':None,'exact_repair_action_rate':None}
+    return {'symbolic_metric_n':n,'action_metric_contract':METRIC_CONTRACT,
+            'action_target_accuracy':totals['target_correct']/n,
+            'exact_repair_action_rate':totals['improving']/n,
             'symbolic_improving_action_rate':totals['improving']/n,
             'symbolic_worsening_action_rate':totals['worsening']/n,
             'symbolic_no_change_action_rate':totals['no_change']/n,
+            'symbolic_error_count_unchanged_rate':totals['no_change']/n,
             'invalid_action_rate':totals['invalid']/n,
             'mean_symbolic_distance_reduction':totals['gain']/n,
             'mean_normalized_symbolic_distance_reduction':totals['normalized_gain']/n,
             'mean_symbolic_distance':totals['distance']/n,
             'mean_positive_action_count':totals['positive_actions']/n,
             'symbolic_by_predicted_property':{field:{'n':v['n'],
-                'improving_rate':v['improving']/v['n'] if v['n'] else None}
+                'improving_rate':v['improving']/v['n'] if v['n'] else None,
+                'target_accuracy':v['target_correct']/v['n'] if v['n'] else None,
+                'exact_repair_rate':v['improving']/v['n'] if v['n'] else None}
                 for field,v in per_property.items()}}
 
 

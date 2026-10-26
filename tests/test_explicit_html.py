@@ -1,5 +1,4 @@
 import pytest
-import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -170,6 +169,8 @@ def test_symbolic_validation_enforces_execution_size_floor(monkeypatch):
     result=policy.symbolic_policy_metrics(Net(),[row],[target],'cpu',False,contextlib.nullcontext)
     assert result['invalid_action_rate']==1
     assert result['symbolic_no_change_action_rate']==0
+    # Site selection is diagnosed independently of an illegal replacement value.
+    assert result['action_target_accuracy']==1 and result['exact_repair_action_rate']==0
 
 
 def test_greedy_decoder_cannot_finish_below_border_floor(monkeypatch):

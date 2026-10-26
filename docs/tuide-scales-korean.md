@@ -52,6 +52,25 @@ patience는 10입니다. 각 stage에 `last.pt`가 있으면 이를 불러옵니
 학습 조기 종료는 validation loss 기준이며, 아래의 **추론 중 픽셀 조기 종료와
 별개**입니다.
 
+Validation의 최적 체크포인트 선택과 학습 조기 종료에는 기존 token CE를 계속
+사용합니다. 기존 고정 128개 진단 샘플에서는 `action_target_accuracy`(예측한
+owner·속성이 실제 손상 위치 중 하나인 비율)와 `exact_repair_action_rate`(한
+액션으로 CSS 오류 개수를 줄인 비율)를 함께 기록합니다. 같은 예측을 재사용하므로
+추가 렌더링이나 detector 실행은 없습니다. `480px`와 `480.0px`처럼 같은 단위의
+숫자 표기는 동등하게 처리하며, 단위 없는 길이 0도 `0px`와 같습니다. 단위·퍼센트·
+키워드·`important` 차이는 유지합니다. 정답 teacher 하나뿐 아니라 현재 손상된
+모든 owner·속성을 올바른 수정 대상으로 인정합니다.
+
+`action_metric_contract=css-action-diagnostics-numeric-v1`으로 새 비교 기준을
+표시합니다. 기존 `symbolic_*`도 이 정규화를 적용하므로 문자열 그대로 비교하던
+이전 로그와 구분해야 합니다. `symbolic_error_count_unchanged_rate`는 기존
+`symbolic_no_change_action_rate`의 의미를 명확하게 나타낸 이름입니다. 오류 개수가
+그대로여도 CSS 값이나 화면은 부분 개선될 수 있습니다. 속성별 `n`은 모델의 예측
+횟수이며 손상 데이터 개수가 아닙니다. `target_accuracy`와 `exact_repair_rate`도
+각 속성의 예측 횟수를 분모로 씁니다. 실행할 수 없는 값은 정확 복구로 인정하지
+않지만, 유효한 손상 위치를 골랐다면 대상 선택은 맞을 수 있습니다. 기존 캐시와
+체크포인트를 사용해 재개할 수 있고 추가 전처리는 필요하지 않습니다.
+
 필요하면 경로를 명시적으로 지정할 수 있습니다.
 
 ```bash

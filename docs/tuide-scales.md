@@ -51,6 +51,26 @@ Use a new output directory for a different scale or changed run settings.
 This training early-stop patience is based on validation loss; it is separate
 from the inference-time pixel goal described below.
 
+Validation keeps token CE for best-checkpoint selection and early stopping.
+The existing fixed 128-state diagnostic subset additionally reports
+`action_target_accuracy` (the predicted owner/property is one of the currently
+faulty sites) and `exact_repair_action_rate` (one action removes a declaration
+error). These reuse the same single prediction, with no additional render or
+detector pass. Numeric spellings in the same unit, such as `480px`/`480.0px`,
+compare equally; unitless length zero also equals `0px`. Units, percentages,
+keywords and cascade priority remain distinct. Any faulty site is a correct
+target, not just the single recorded teacher's site.
+
+`action_metric_contract=css-action-diagnostics-numeric-v1` identifies this new
+comparison. Existing `symbolic_*` metrics also use this normalization; historical
+logs used literal strings. `symbolic_error_count_unchanged_rate` explicitly names
+the legacy `symbolic_no_change_action_rate`: unchanged error count can include
+partial CSS/visual improvement. Per-property `n` counts predicted sites, not
+ground-truth corruption frequencies; `target_accuracy` and `exact_repair_rate`
+use that property's prediction count. Invalid/unavailable predictions cannot
+count as exact repairs; a valid site with an execution-invalid value can still
+count as correct site selection. No new preprocessing or checkpoint is needed.
+
 Override paths explicitly when necessary:
 
 ```bash

@@ -297,6 +297,11 @@ def test_online_training_resume_keeps_fixed_validation(corpus,tmp_path,mode):
     assert torch.load(checkpoint,weights_only=True)['online_cursor']==2
     metrics=list(read_jsonl(tmp_path/'run/train.jsonl'))
     assert [r['online_samples'] for r in metrics if 'online_samples' in r]==[1,2]
+    validation=[r for r in metrics if 'validation_loss' in r]
+    assert [r['step'] for r in validation]==[1,2]
+    assert all(r['action_metric_contract']=='css-action-diagnostics-numeric-v1' for r in validation)
+    assert all('action_target_accuracy' in r and 'exact_repair_action_rate' in r for r in validation)
+    assert all(r['symbolic_error_count_unchanged_rate']==r['symbolic_no_change_action_rate'] for r in validation)
     assert not (tmp_path/'run/online-profile.jsonl').exists()
     assert all('data_wait_s' not in row and 'producer_seconds' not in row for row in metrics)
     assert (tmp_path/'policy-val.jsonl').read_bytes()==validation_before

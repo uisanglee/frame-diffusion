@@ -1,11 +1,12 @@
 import copy
 from dataclasses import asdict
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from framediff.tree_edits import (CONTRACT, FIELDS, EditTokenizer, apply_state, repair_path,
+from framediff.tree_edits import (FIELDS, EditTokenizer, apply_state, repair_path,
                                  extract, execute, prepare, value_valid)
 
 
@@ -113,6 +114,73 @@ def test_symbolic_metrics_accept_any_distance_reducing_edit(monkeypatch):
     assert metrics['symbolic_worsening_action_rate']==pytest.approx(1/3)
     assert metrics['mean_symbolic_distance_reduction']==0
     assert metrics['mean_positive_action_count']==1
+    assert metrics['action_target_accuracy']==pytest.approx(2/3)
+    assert metrics['exact_repair_action_rate']==pytest.approx(1/3)
+    assert metrics['symbolic_error_count_unchanged_rate']==pytest.approx(1/3)
+
+
+@pytest.mark.parametrize('left,right,equal',[
+    ('480px','480.0px',True),('+0480.00px','480px',True),('.5em','0.500em',True),
+    ('-0px','+0.0px',True),('0','0px',True),('0.0','0px',True),
+    ('0%','0px',False),('10%','10px',False),('1rem','1em',False),
+    ('1px','1.0000000000000001px',False),('auto','0px',False),
+    ('auto','auto',True),('calc(1px + 2px)','3px',False),
+])
+def test_validation_numeric_spelling_equivalence(left,right,equal):
+    from framediff.validation_metrics import declaration_equal
+    assert declaration_equal([left,''],[right,'']) is equal
+    assert not declaration_equal([left,''],[right,'important'])
+
+
+def test_action_metrics_separate_target_and_value_without_extra_inference(monkeypatch):
+    import contextlib
+    import framediff.tree_policy as policy
+    from framediff.html_bridge import HtmlBrowser
+    target=empty_state();target[1][0]=['480px',''];target[2][1]=['400px','important']
+    current=copy.deepcopy(target);current[1][0]=['240px',''];current[2][1]=['180px','important']
+    predictions=[
+        [1,'width','300px',''],             # Correct site, partial value improvement.
+        [1,'width','480.0px',''],           # Correct site and equivalent target value.
+        [2,'height','400.000px','important'], # Another correct site (not the recorded teacher).
+        [2,'margin-left','5px',''],         # A new error at an undamaged site.
+        [2,'height','400px',''],            # Correct site, wrong cascade priority.
+        [0,'width','480px',''],            # Invalid owner.
+    ]
+    rows=[{'declaration_state':copy.deepcopy(current),'replacement_edit':predictions[1]} for _ in predictions]
+    calls=[]
+    class Net:
+        def predict(self,*args):
+            action=predictions[len(calls)];calls.append(1);return action
+    monkeypatch.setattr(policy,'batch_inputs',lambda *args:(None,None,None,None))
+    monkeypatch.setattr(HtmlBrowser,'__enter__',lambda *a:pytest.fail('Diagnostics launched a browser'))
+    before=copy.deepcopy(rows)
+    metrics=policy.symbolic_policy_metrics(Net(),rows,[target]*len(rows),'cpu',False,contextlib.nullcontext)
+    assert rows==before and len(calls)==len(rows)
+    assert metrics['symbolic_metric_n']==6
+    assert metrics['action_target_accuracy']==pytest.approx(4/6)
+    assert metrics['exact_repair_action_rate']==pytest.approx(2/6)
+    assert metrics['symbolic_error_count_unchanged_rate']==pytest.approx(2/6)
+    assert metrics['symbolic_worsening_action_rate']==pytest.approx(1/6)
+    assert metrics['invalid_action_rate']==pytest.approx(1/6)
+    assert metrics['mean_symbolic_distance_reduction']==pytest.approx(1/6)
+    width=metrics['symbolic_by_predicted_property']['width']
+    assert width['n']==2 and width['target_accuracy']==1 and width['exact_repair_rate']==.5
+    unused=metrics['symbolic_by_predicted_property']['margin-right']
+    assert unused['n']==0 and unused['target_accuracy'] is None and unused['exact_repair_rate'] is None
+    assert metrics['action_metric_contract']=='css-action-diagnostics-numeric-v1'
+
+
+def test_validation_skips_states_with_only_numeric_spelling_differences(monkeypatch):
+    import contextlib
+    from framediff.tree_policy import symbolic_policy_metrics
+    target=empty_state();target[1][0]=['480px','']
+    current=copy.deepcopy(target);current[1][0]=['480.0px','']
+    class Net:
+        def predict(self,*args):pytest.fail('Equivalent clean state was decoded')
+    metrics=symbolic_policy_metrics(Net(),[{'declaration_state':current}],[target],
+                                    'cpu',False,contextlib.nullcontext)
+    assert metrics['symbolic_metric_n']==0
+    assert metrics['action_target_accuracy'] is None and metrics['exact_repair_action_rate'] is None
 
 
 HTML='''<html><head><style>body{margin:0} section{width:300px;display:flex} .card{height:50px}</style></head>
@@ -152,7 +220,7 @@ def test_exact_css_replacement_restores_percent_absence_shorthand_and_reflow(tmp
 def test_cached_prepare_train_resume_and_rollout(tmp_path,representation):
     from framediff.html_bridge import HtmlBrowser
     from framediff.plans import dom_tree
-    from framediff.visual import annotate,elements,load_policy
+    from framediff.visual import annotate,load_policy
     from framediff.ir import write_jsonl,read_jsonl
     from framediff.cli import main
     from framediff.visual_experiment import rollout
@@ -207,7 +275,6 @@ def test_cached_prepare_train_resume_and_rollout(tmp_path,representation):
         assert stats['stop_reason']=='steps' and stats['pair_image_encodings']==1
 
 
-from pathlib import Path
 def test_existing_value_decoder_blocks_new_overrides_but_keeps_remove():
     from framediff.tree_edits import EditTokenizer,FIELDS
     tok=EditTokenizer(8)
