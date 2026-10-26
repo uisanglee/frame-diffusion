@@ -35,6 +35,16 @@ CSS owner 최대 512개, 고정된 val/test 손상 데이터, 준비된 목표 �
 `stage`로 `working`과 `cache_wait`를 구분할 수 있습니다. CPU·메모리 여유가
 있을 때 `ONLINE_WORKERS`를 늘리고, `ONLINE_PREFETCH`로 대기 결과 수를 제한하세요.
 
+한 샘플을 재시도해도 동일 페이지·viewport에서 `working` 타임아웃이 반복되면
+`online_timeout_skip`에 `page`, `excluded_view: true`를 기록합니다. 제외 기록은
+공유 캐시의 `online-timeout-exclusions/`에 저장되어 abstract·screenshot 및
+학습 재개에서 재사용됩니다. 이후 선택은 브라우저 준비 전에 건너뛰며, 이미
+진행 중인 작업은 중단하지 않습니다. 다른 viewport는 유지하고 소스·전처리
+기준이 바뀌면 다시 시도합니다. 잠금 대기, 페이지가 확인되지 않은 worker 시작
+실패, 서로 다른 페이지에서 발생한 두 timeout은 페이지 제외로 처리하지 않습니다.
+특정 제외를 취소하려면 해당 JSON 기록을 삭제하세요. 기존 로그만으로는 페이지를
+식별할 수 없으므로 과거 timeout은 자동 등록되지 않습니다.
+
 기존 성공 공유 캐시는 그대로 재사용합니다. 수정 가능한 CSS가 없거나 고정된
 후보 검사에서 시각적 효과를 찾지 못한 확정 실패는 같은 소스·설정 키에
 캐시하여 반복 준비를 막습니다. 일시적인 브라우저·검사 오류는 다시 시도합니다.

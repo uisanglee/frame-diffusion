@@ -36,7 +36,7 @@ class _Job:
     def __init__(self,pool,number,function,args):
         self.pool=pool;self.number=number;self.function=function;self.args=args
         self.done=False;self.value=None;self.error=None
-        self.stage='queued';self.mark=time.monotonic();self.active_s=0.;self.wait_s=0.;self.path=None
+        self.stage='queued';self.mark=time.monotonic();self.active_s=0.;self.wait_s=0.;self.path=None;self.target=None
 
     def result(self,timeout=None):
         return self.pool.result(self,timeout)
@@ -91,7 +91,9 @@ class OnlineWorkerPool:
         kind,number,*payload=message;job=slot.job
         if job is None or job.number!=number: raise RuntimeError('Online worker result identity changed')
         if kind=='progress':
-            now,stage,path=payload;job.transition(stage,now);job.path=path
+            now,stage,path=payload
+            if stage=='target':job.target=path
+            else:job.transition(stage,now);job.path=path
         elif kind=='result':
             job.transition('complete',time.monotonic());job.value,job.error=payload;job.done=True;slot.job=None
         else: raise RuntimeError('Unknown online worker message')
@@ -134,6 +136,7 @@ class OnlineWorkerPool:
                 slot.stop.set();self._terminate([slot]);self.slots[i]=self._start()
                 if retry:
                     job.stage='queued';job.mark=time.monotonic();job.active_s=0.;job.wait_s=0.
+                    job.target=None
                     self.queue.appendleft(job)
                 else: job.done=True
                 self._dispatch();return

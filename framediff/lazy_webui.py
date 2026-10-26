@@ -96,7 +96,10 @@ def preparation_fingerprint():
                       'a7d8a859aa7a266b59e58daaeecacebad55aa24930b2b546c79f108a26776522',
                       # Fused observation and lock notifications preserve all
                       # candidates/labels; browser parity tests cover this path.
-                      '3dc80e62b2d374b3dc8fa7fb80a0ba547749d879d1b78b03e587331846b39d0d'):
+                      '3dc80e62b2d374b3dc8fa7fb80a0ba547749d879d1b78b03e587331846b39d0d',
+                      # Runtime timeout exclusions affect page scheduling only;
+                      # successful normalized assets and witnesses are unchanged.
+                      '2872ad4143b10db90f4bcf0d3ceb578a7549cd7b5e62ceebd30a8b40aa2f602d'):
         online_sha='e598fecb8a9bb423bba5e9cf118b338f89be0bbe3d83195d5512e4e7c2fbf53d'
     from .cache_lock import observation_revision
     revision=observation_revision()

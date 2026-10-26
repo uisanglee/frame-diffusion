@@ -377,6 +377,8 @@ class OnlineSampler:
         cache_dirs={t.get('lazy_cache_dir') for t in targets if t.get('lazy_cache_dir')}
         if len(cache_dirs)>1:raise ValueError('Mixed lazy train-view cache directories')
         self.view_cache=TrainViewCache(cache_dir=next(iter(cache_dirs),None))
+        from .online_exclusions import TimeoutExclusions
+        self.timeout_exclusions=TimeoutExclusions(targets)
         # Instance-local caches: a class-level lru_cache retains old samplers
         # (and their full target manifests) after a training session ends.
         self.html=lru_cache(maxsize=64)(self.html)
@@ -410,6 +412,13 @@ class OnlineSampler:
             # six times more than pages with one capture.
             target=rng.choice(self.by_page[rng.choice(self.page_ids)])
             try:
+                identity=self.timeout_exclusions.describe(target)
+                if self.timeout_exclusions.contains(identity):
+                    errors.append({'page':identity['page'],'view':identity['view'],
+                                   'error_type':'ExcludedOnlineView','error':'Repeated active timeout cached'})
+                    continue
+                from .cache_lock import report_online_target
+                report_online_target(identity)
                 descriptor=target if target.get('lazy_contract') else None
                 if descriptor:
                     # Materialization owns a Playwright runtime; close ours first.
@@ -571,6 +580,9 @@ class OnlineStream:
         self.pending=deque();self.pool=None;self.timeout_skips=0;self.generation_skips=0
         self.consecutive_generation_skips=0
         self.timeout_retries=0;self.retrying_index=None;self.consecutive_timeout_skips=0
+        self.retrying_target=None
+        from .online_exclusions import TimeoutExclusions
+        self.timeout_exclusions=TimeoutExclusions(targets)
         self.failure_views=Counter();self.accepted_views=Counter();self.teacher_fields=Counter()
 
     def _record_failures(self,errors):
@@ -603,18 +615,23 @@ class OnlineStream:
                 task=self.pending[0]
                 stage=getattr(task,'stage','working')
                 limit=getattr(self.pool,'cache_wait_timeout',self.timeout) if stage=='cache_wait' else self.timeout
+                target=getattr(task,'target',None)
                 if self.retrying_index!=self.cursor:
                     self.retrying_index=self.cursor;self.timeout_retries+=1
+                    self.retrying_target=target if stage=='working' else None
                     print({'online_timeout_retry':self.cursor,'timeout_s':limit,
                            'action':'restart_single_worker_same_sample',
-                           'stage':stage,'error':str(exc)},flush=True)
+                           'stage':stage,'page':target,'error':str(exc)},flush=True)
                     self.pool.restart(task,retry=True)
                     continue
                 skipped=self.cursor
+                excluded=bool(stage=='working' and target and self.retrying_target
+                              and target['key']==self.retrying_target['key'])
+                if excluded:self.timeout_exclusions.exclude(target,limit)
                 self.timeout_skips+=1;self.consecutive_timeout_skips+=1
                 print({'online_timeout_skip':skipped,'timeout_s':limit,
                        'action':'restart_single_worker_skip_sample',
-                       'stage':stage,'error':str(exc)},flush=True)
+                       'stage':stage,'page':target,'excluded_view':excluded,'error':str(exc)},flush=True)
                 self.cursor+=1
                 self.pool.restart(task,retry=False);self.pending.popleft();self._fill()
                 if self.consecutive_timeout_skips>=32:
@@ -633,7 +650,7 @@ class OnlineStream:
                     continue
                 raise RuntimeError(f'Online producer failed/stalled at sample {self.cursor}: {exc}') from exc
             if row['online']['index']!=self.cursor: raise RuntimeError('Online sample order changed')
-            self.retrying_index=None;self.consecutive_timeout_skips=0
+            self.retrying_index=None;self.retrying_target=None;self.consecutive_timeout_skips=0
             self._record_failures(row['online'].get('errors',[]))
             self.accepted_views[row.get('view','unknown')]+=1
             if row.get('replacement_edit'):self.teacher_fields[row['replacement_edit'][1]]+=1

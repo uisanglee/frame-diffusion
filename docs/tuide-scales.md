@@ -35,6 +35,15 @@ have a separate `TUIDE_CACHE_LOCK_TIMEOUT` limit (default 3600 seconds). Timeout
 logs identify `working` versus `cache_wait`. Increase `ONLINE_WORKERS` only when
 CPU/RAM have headroom; `ONLINE_PREFETCH` bounds the pending result count.
 
+If a retry times out again in `working` on the same page/view, the skip log reports
+`page` and `excluded_view: true`. Records in the shared cache's
+`online-timeout-exclusions/` persist across abstract/screenshot runs and resumes.
+Subsequent selections skip that view before browser preparation; in-flight jobs
+are retained. Other viewports remain eligible, and source/preparation changes
+invalidate the exclusion. Lock waits, unidentified startup stalls and timeouts on
+different views do not exclude a page. Delete a record to retry its view. Historical
+timeout logs lack page identity and cannot be imported automatically.
+
 Existing successful shared page caches remain compatible. Deterministic
 `no_editable_css`/`no_visible_candidate` failures are cached under the same
 source/settings key; transient browser and inspection errors are retried. A

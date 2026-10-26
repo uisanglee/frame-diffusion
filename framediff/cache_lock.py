@@ -14,6 +14,10 @@ def set_progress(callback):
     _progress = callback
 
 
+def report_online_target(target):
+    if _progress: _progress('target', target)
+
+
 @contextlib.contextmanager
 def cache_lock(file):
     waiting = False
