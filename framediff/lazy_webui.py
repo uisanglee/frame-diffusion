@@ -6,7 +6,6 @@ and atomically committed so independent online workers can safely share them.
 """
 import copy
 import ast
-import fcntl
 import hashlib
 import json
 import os
@@ -17,6 +16,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from functools import lru_cache
 from importlib.metadata import version
+from .cache_lock import cache_lock, UnusableTrainView
 
 CONTRACT = 'lazy-webui-train-view-v1'
 DISK_CACHE_CONTRACT = 'lazy-webui-train-view-cache-v2-verified'
@@ -93,8 +93,14 @@ def preparation_fingerprint():
                       '6e923210000160149956198f2df1e10d88086ec38b08ff38dbbc34fc7390aa17',
                       '95c26191b15f4c248138edb4380f8156812c757832f393ee5fbe89f74f84710f',
                       'c3eb782c70255fa665555d811a9c11ca6f26a37e0e3982ce0b8aadda10dde057',
-                      'a7d8a859aa7a266b59e58daaeecacebad55aa24930b2b546c79f108a26776522'):
+                      'a7d8a859aa7a266b59e58daaeecacebad55aa24930b2b546c79f108a26776522',
+                      # Fused observation and lock notifications preserve all
+                      # candidates/labels; browser parity tests cover this path.
+                      '3dc80e62b2d374b3dc8fa7fb80a0ba547749d879d1b78b03e587331846b39d0d'):
         online_sha='e598fecb8a9bb423bba5e9cf118b338f89be0bbe3d83195d5512e4e7c2fbf53d'
+    from .cache_lock import observation_revision
+    revision=observation_revision()
+    if revision is not None:hashes['online_observation.py']=revision
     return {**hashes,
             'online_preparation':online_sha,
             'playwright':version('playwright')}
@@ -171,16 +177,36 @@ class TrainViewCache:
             return self._get(row,policy,clean_relabel_source)
         key=self._key(row,policy,clean_relabel_source)
         with (self.cache_dir/f'{key}.lock').open('a') as lock:
-            fcntl.flock(lock,fcntl.LOCK_EX)
-            try:
+            with cache_lock(lock):
                 if self.legacy_cache_dir and self.legacy_cache_dir!=self.cache_dir:
                     self._import_legacy(key)
-                # A killed writer cannot run its finally block. With this key
-                # locked, its old staging directories are safe to reclaim.
-                for stale in self.cache_dir.glob(f'.{key}.*'):
-                    if stale.is_dir() and not stale.is_symlink():shutil.rmtree(stale)
-                return self._get(row,policy,clean_relabel_source)
-            finally:fcntl.flock(lock,fcntl.LOCK_UN)
+                failure=self.cache_dir/f'{key}.failure.json'
+                if not (self.cache_dir/key/'result.json').is_file() and failure.is_file():
+                    try: saved=json.loads(failure.read_text())
+                    except (OSError,ValueError):saved={}
+                    if (isinstance(saved,dict) and saved.get('key')==key and saved.get('contract')=='unusable-train-view-v1'
+                        and isinstance(saved.get('error'),str)):
+                        from .web_experiment import digest
+                        source=row['lazy_source']
+                        if digest(source['html'])!=source['source_sha']:raise ValueError('Lazy source HTML changed')
+                        raise UnusableTrainView(saved['error'])
+                try:
+                    result=self._get(row,policy,clean_relabel_source)
+                except Exception as exc:
+                    from .tree_online import EmptyTargetPoolError
+                    definite=isinstance(exc,UnusableTrainView)
+                    if isinstance(exc,EmptyTargetPoolError):
+                        reasons=[r.get('reason') for r in exc.diagnostics]
+                        definite=bool(reasons) and all(r in ('no_editable_css','no_visible_candidate') for r in reasons)
+                    if definite:
+                        temporary=failure.with_suffix('.tmp')
+                        try:
+                            temporary.write_text(json.dumps({'key':key,'contract':'unusable-train-view-v1','error':str(exc)}))
+                            temporary.replace(failure)
+                        finally:temporary.unlink(missing_ok=True)
+                    raise
+                failure.unlink(missing_ok=True)
+                return result
 
     def _import_legacy(self,key):
         """Import a verified completed entry under the destination key lock."""
@@ -233,6 +259,10 @@ class TrainViewCache:
             # Under the per-entry lock, discard only this invalid generated
             # entry. A new successful commit must not lose to corrupt data.
             if disk.exists():shutil.rmtree(disk)
+            # Only misses need staging cleanup. Do not scan the entire shared
+            # directory on every successful cache hit.
+            for stale in self.cache_dir.glob(f'.{key}.*'):
+                if stale.is_dir() and not stale.is_symlink():shutil.rmtree(stale)
         while len(self.entries)>=self.capacity:
             _,(directory,_)=self.entries.popitem(last=False)
             if directory is not None:directory.cleanup()
@@ -264,7 +294,10 @@ class TrainViewCache:
                     rendered['policy'][0],{source['id']:rendered['page']}),
                     persist_seed=os.environ.get('TUIDE_SAVE_DIAGNOSTICS','0')=='1' and not clean_relabel_source,
                     clean_relabel_source=clean_relabel_source)
-                if error:raise ValueError(f'Lazy normalization failed: {error}')
+                if error:
+                    reasons=error.get('inspection_reasons',[])
+                    error_class=UnusableTrainView if reasons and all(r in ('no_editable_css','no_visible_candidate') for r in reasons) else ValueError
+                    raise error_class(f'Lazy normalization failed: {error}')
                 result=seed
             elif not policy:result=rendered['detection'][0]
             if os.environ.get('TUIDE_SAVE_DIAGNOSTICS','0')!='1':

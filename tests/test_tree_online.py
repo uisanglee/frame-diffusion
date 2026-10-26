@@ -219,24 +219,20 @@ def test_prefetch_bounded_order_and_resume(corpus):
     assert stream.pool is None and resumed.pool is None
 
 
-def test_timeout_skips_index_and_restarts_pool(monkeypatch,capsys):
+def test_timeout_skips_index_and_restarts_only_its_worker(monkeypatch,capsys):
     class Future:
         def __init__(self,value=None,timeout=False):self.value=value;self.timeout=timeout
         def result(self,timeout=None):
             if self.timeout:raise FutureTimeoutError()
             return self.value
     stream=OnlineStream([], 'screenshot',workers=1,prefetch=1,timeout=1)
-    stream.pool=object();stream.stop=object();stream.pending=deque([Future(timeout=True)])
-    stopped=[]
-    def stop(force=False):
-        stopped.append(force);stream.pool=None;stream.pending.clear()
-    def start():
-        stream.pool=object()
-        stream.pending=deque([Future(timeout=True) if stream.cursor==0 else Future({'online':{'index':1}})])
-    monkeypatch.setattr(stream,'_stop_pool',stop);monkeypatch.setattr(stream,'_start_pool',start)
+    from types import SimpleNamespace
+    timed=Future(timeout=True);ready=Future({'online':{'index':1}})
+    stream.pending=deque([timed,ready]);restarted=[]
+    stream.pool=SimpleNamespace(restart=lambda task,retry:restarted.append((task,retry)))
     monkeypatch.setattr(stream,'_fill',lambda:None)
     assert stream.take(1)==[{'online':{'index':1}}]
-    assert stream.cursor==2 and stream.timeout_skips==1 and stopped==[True,True]
+    assert stream.cursor==2 and stream.timeout_skips==1 and restarted==[(timed,True),(timed,False)]
     assert stream.timeout_retries==1
     assert "'online_timeout_skip': 0" in capsys.readouterr().out
 
@@ -274,9 +270,9 @@ def test_timeout_retry_preserves_sample_index(monkeypatch):
     class Good:
         def result(self,timeout=None):return {'online':{'index':4}}
     stream=OnlineStream([], 'screenshot',workers=1,prefetch=1,timeout=1,start=4)
-    stream.pool=object();stream.pending=deque([Future()])
-    monkeypatch.setattr(stream,'_stop_pool',lambda force=False:None)
-    monkeypatch.setattr(stream,'_start_pool',lambda:setattr(stream,'pending',deque([Good()])))
+    from types import SimpleNamespace
+    task=Future();stream.pending=deque([task])
+    stream.pool=SimpleNamespace(restart=lambda task,retry:stream.pending.__setitem__(0,Good()))
     monkeypatch.setattr(stream,'_fill',lambda:None)
     assert stream.take(1)==[{'online':{'index':4}}]
     assert stream.timeout_retries==1 and stream.timeout_skips==0 and stream.cursor==5

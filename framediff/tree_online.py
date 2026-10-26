@@ -6,18 +6,16 @@ Task seeds depend on consumed sample indices, never worker scheduling or GPU.
 """
 import copy
 import contextlib
-import fcntl
 import hashlib
 import json
 import math
 import multiprocessing as mp
 import os
 import random
-import time
 import tempfile
 from importlib.metadata import version
 from collections import deque, Counter
-from concurrent.futures import ProcessPoolExecutor, TimeoutError as FutureTimeoutError
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from functools import lru_cache
 from multiprocessing.util import Finalize
 from pathlib import Path
@@ -27,6 +25,7 @@ from .html_feedback import refresh_geometry
 from .ir import read_jsonl
 from .tree_edits import FIELDS, CONTRACT, current_state, execute, extract, repair_path, value_valid
 from .web_experiment import digest
+from .cache_lock import cache_lock
 
 def _inspection_log(payload):
     """Hide successful per-page lazy preparation chatter, not failures."""
@@ -68,10 +67,14 @@ def mutation_sites(state):
 def inspection_fingerprint():
     # Invalidate on changes to parsing, loading, or supported CSS values.
     root = Path(__file__).parent
-    return {'tree_online.py': INSPECTION_LOGIC_VERSION,
+    fingerprint={'tree_online.py': INSPECTION_LOGIC_VERSION,
             **{name: digest(root/name) for name in
                ('tree_edits.py','css_owners.py','html_bridge.py','browser.py','visual.py','explicit_html.py')},
             'playwright': version('playwright')}
+    from .cache_lock import observation_revision
+    revision=observation_revision()
+    if revision is not None:fingerprint['online_observation.py']=revision
+    return fingerprint
 
 
 @contextlib.contextmanager
@@ -91,11 +94,8 @@ def inspection_cache_entry(directory, target, html, fingerprint):
     # Different scales/modalities may start simultaneously. Only one process
     # inspects a given page; others read its completed atomic cache entry.
     with (directory/f'{key}.lock').open('a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        try:
+        with cache_lock(lock):
             yield directory/f'{key}.json'
-        finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 def save_inspection(path, state, error=None, **metadata):
@@ -114,6 +114,11 @@ def abstraction(browser, tree, viewport, size):
     """Same clipped occupancy+boundary representation used by the policy."""
     from .visual import elements,semantic_masks,refresh_visual_geometry
     from .explicit_html import current_clip_boxes
+    from .visual import VISUAL_GEOMETRY_CONTRACT
+    if tree.get('visual_geometry_contract')==VISUAL_GEOMETRY_CONTRACT:
+        from .online_observation import observe
+        boxes,items=observe(browser,tree,viewport)
+        return semantic_masks(items,viewport,size),boxes,items
     ids=[n['id'] for n in tree['nodes'][1:]]
     boxes=browser.tagged_boxes(ids);boxes[tree['nodes'][0]['id']]=[0,0,*viewport]
     refresh_visual_geometry(browser,tree)
@@ -576,14 +581,19 @@ class OnlineStream:
         self._start_pool();return self
 
     def _start_pool(self):
+        from .online_workers import OnlineWorkerPool
         context=mp.get_context('spawn')  # Never fork a CUDA-initialized parent.
         self.stop=context.Event()
-        self.pool=ProcessPoolExecutor(self.workers,mp_context=context,initializer=_initialize,initargs=(*self.args,self.stop))
+        self.pool=OnlineWorkerPool(self.workers,initializer=_initialize,initargs=self.args,
+                                  cache_wait_timeout=float(os.environ.get('TUIDE_CACHE_LOCK_TIMEOUT','3600')))
         self.next_index=self.cursor;self.pending.clear();self._fill()
 
     def _stop_pool(self,force=False):
         if self.pool is None:return
+        from .online_workers import OnlineWorkerPool
         self.stop.set()
+        if isinstance(self.pool,OnlineWorkerPool):
+            self.pool.shutdown();self.pool=None;self.pending.clear();return
         for future in self.pending:future.cancel()
         processes=list((getattr(self.pool,'_processes',None) or {}).values()) if force else []
         if force:
@@ -601,22 +611,26 @@ class OnlineStream:
         while len(rows)<count:
             if not self.pool: raise RuntimeError('Online stream is not open')
             try: row=self.pending[0].result(timeout=self.timeout)
-            except FutureTimeoutError:
+            except FutureTimeoutError as exc:
+                task=self.pending[0]
+                stage=getattr(task,'stage','working')
+                limit=getattr(self.pool,'cache_wait_timeout',self.timeout) if stage=='cache_wait' else self.timeout
                 if self.retrying_index!=self.cursor:
                     self.retrying_index=self.cursor;self.timeout_retries+=1
-                    print({'online_timeout_retry':self.cursor,'timeout_s':self.timeout,
-                           'action':'restart_worker_pool_same_sample'},flush=True)
-                    self._stop_pool(force=True);self._start_pool()
+                    print({'online_timeout_retry':self.cursor,'timeout_s':limit,
+                           'action':'restart_single_worker_same_sample',
+                           'stage':stage,'error':str(exc)},flush=True)
+                    self.pool.restart(task,retry=True)
                     continue
                 skipped=self.cursor
                 self.timeout_skips+=1;self.consecutive_timeout_skips+=1
-                print({'online_timeout_skip':skipped,'timeout_s':self.timeout,
-                       'action':'restart_worker_pool'},flush=True)
+                print({'online_timeout_skip':skipped,'timeout_s':limit,
+                       'action':'restart_single_worker_skip_sample',
+                       'stage':stage,'error':str(exc)},flush=True)
                 self.cursor+=1
-                self._stop_pool(force=True)
+                self.pool.restart(task,retry=False);self.pending.popleft();self._fill()
                 if self.consecutive_timeout_skips>=32:
                     raise RuntimeError('32 consecutive online timeout skips; inspect renderer/worker health')
-                self._start_pool()
                 continue
             except Exception as exc:
                 message=str(exc)

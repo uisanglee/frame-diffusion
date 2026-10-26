@@ -20,6 +20,22 @@ Run from the repository with the Python environment activated. These commands
 use the existing v3 corpus and detector cache; no preparation command is required.
 Training still renders fresh online corrupted states.
 
+Online CPU workers prepare pages independently. If one sample times out, only
+its worker and browser descendants are restarted; other queued/completed results
+are retained and consumed in their original index order. `ONLINE_TIMEOUT`
+(900 seconds in `run_webui_scale.sh`) counts active sample work, including worker
+startup, but excludes waiting for another process's shared cache lock. Such waits
+have a separate `TUIDE_CACHE_LOCK_TIMEOUT` limit (default 3600 seconds). Timeout
+logs identify `working` versus `cache_wait`. Increase `ONLINE_WORKERS` only when
+CPU/RAM have headroom; `ONLINE_PREFETCH` bounds the pending result count.
+
+Existing successful shared page caches remain compatible. Deterministic
+`no_editable_css`/`no_visible_candidate` failures are cached under the same
+source/settings key; transient browser and inspection errors are retried. A
+source or preparation change invalidates these failures along with page caches.
+Full-DOM observations use one browser query, with the same boxes, candidate
+screening and teacher labels. No Train prewarm or held-out regeneration is needed.
+
 ```bash
 mkdir -p log
 CUDA_VISIBLE_DEVICES=1 nohup bash scripts/train_tuide_scale.sh s > log/tuide-s.log 2>&1 &

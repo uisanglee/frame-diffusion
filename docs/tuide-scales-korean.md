@@ -20,6 +20,22 @@ CSS owner 최대 512개, 고정된 val/test 손상 데이터, 준비된 목표 �
 데이터와 detector 캐시를 사용하므로 별도의 전처리 명령어가 필요하지 않습니다.
 다만 학습 중 새로운 online corruption 상태는 계속 렌더링합니다.
 
+온라인 CPU worker는 페이지를 독립적으로 준비합니다. 샘플 하나가 타임아웃되면
+해당 worker와 그 브라우저 자식만 재시작하며, 다른 worker의 대기·완성 결과는
+유지합니다. 학습에는 기존 샘플 인덱스 순서대로 전달합니다. `ONLINE_TIMEOUT`
+(`run_webui_scale.sh` 기본 900초)은 worker 시작을 포함한 실제 작업 시간에
+적용됩니다. 다른 프로세스가 생성하는 공유 캐시의 잠금 대기는 별도의
+`TUIDE_CACHE_LOCK_TIMEOUT`(기본 3600초)으로 제한합니다. 타임아웃 로그의
+`stage`로 `working`과 `cache_wait`를 구분할 수 있습니다. CPU·메모리 여유가
+있을 때 `ONLINE_WORKERS`를 늘리고, `ONLINE_PREFETCH`로 대기 결과 수를 제한하세요.
+
+기존 성공 공유 캐시는 그대로 재사용합니다. 수정 가능한 CSS가 없거나 고정된
+후보 검사에서 시각적 효과를 찾지 못한 확정 실패는 같은 소스·설정 키에
+캐시하여 반복 준비를 막습니다. 일시적인 브라우저·검사 오류는 다시 시도합니다.
+소스나 전처리 기준이 바뀌면 실패 캐시도 무효화됩니다. full-DOM 측정은 브라우저
+질의 한 번으로 묶었으며 박스·후보 판정·teacher 기준은 같습니다. Train 전체
+사전 생성이나 val/test 재생성은 필요하지 않습니다.
+
 ```bash
 mkdir -p log
 CUDA_VISIBLE_DEVICES=1 nohup bash scripts/train_tuide_scale.sh s > log/tuide-s.log 2>&1 &
