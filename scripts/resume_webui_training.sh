@@ -84,7 +84,7 @@ fi
 export POLICY_MODES=screenshot POLICY_SCALE=s
 export POLICY_SCREENSHOT_STEPS="${POLICY_SCREENSHOT_STEPS:-30000}" POLICY_LR="${POLICY_LR:-0.0001}"
 export ONLINE_WORKERS="${ONLINE_WORKERS:-2}" ONLINE_PREFETCH="${ONLINE_PREFETCH:-4}"
-export ONLINE_TIMEOUT="${ONLINE_TIMEOUT:-900}" PARENT_FIRST=0
+export ONLINE_TIMEOUT="${ONLINE_TIMEOUT:-180}" PARENT_FIRST=0
 output=runs/webui-screenshot-single-v1/7000/tuide-s-screenshot
 for input in policy-train.jsonl policy-val.jsonl pages-train.jsonl; do
   require_file "data/webui-7k-56169-safe-margin-v1/7000/css/$input"

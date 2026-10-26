@@ -29,7 +29,7 @@ CSS owner 최대 512개, 고정된 val/test 손상 데이터, 준비된 목표 �
 온라인 CPU worker는 페이지를 독립적으로 준비합니다. 샘플 하나가 타임아웃되면
 해당 worker와 그 브라우저 자식만 재시작하며, 다른 worker의 대기·완성 결과는
 유지합니다. 학습에는 기존 샘플 인덱스 순서대로 전달합니다. `ONLINE_TIMEOUT`
-(`run_webui_scale.sh` 기본 900초)은 worker 시작을 포함한 실제 작업 시간에
+(`run_webui_scale.sh` 기본 180초)은 worker 시작을 포함한 실제 작업 시간에
 적용됩니다. 다른 프로세스가 생성하는 공유 캐시의 잠금 대기는 별도의
 `TUIDE_CACHE_LOCK_TIMEOUT`(기본 3600초)으로 제한합니다. 타임아웃 로그의
 `stage`로 `working`과 `cache_wait`를 구분할 수 있습니다. CPU·메모리 여유가

@@ -29,7 +29,7 @@ Training still renders fresh online corrupted states.
 Online CPU workers prepare pages independently. If one sample times out, only
 its worker and browser descendants are restarted; other queued/completed results
 are retained and consumed in their original index order. `ONLINE_TIMEOUT`
-(900 seconds in `run_webui_scale.sh`) counts active sample work, including worker
+(180 seconds in `run_webui_scale.sh`) counts active sample work, including worker
 startup, but excludes waiting for another process's shared cache lock. Such waits
 have a separate `TUIDE_CACHE_LOCK_TIMEOUT` limit (default 3600 seconds). Timeout
 logs identify `working` versus `cache_wait`. Increase `ONLINE_WORKERS` only when
