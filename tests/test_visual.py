@@ -213,7 +213,7 @@ def test_detector_and_policy_share_owner_rectangle_definition():
         feedback=feedback_metadata(browser,tree)
         actual=elements(tree,boxes,[600,400],feedback['current_clip_boxes'])
         expected=detector_labels(browser)['elements']
-        canonical=lambda items:sorted((e['label'],tuple(e['box'])) for e in items)
+        def canonical(items):return sorted((e['label'],tuple(e['box'])) for e in items)
         assert canonical(actual)==canonical(expected)
         assert (1,(0,0,500,100)) in canonical(actual)
 
@@ -375,18 +375,6 @@ def test_teacher_action_legality_matches_policy_mask():
     feature=current_features(tree,tiny,viewport,16)
     invalid=action_index((1,'width',-.05),len(tree['nodes']))
     assert not feature['action_legal'].flatten()[invalid]
-
-
-def test_policy_legality_filter_reports_bad_teacher_rows():
-    from framediff.visual_train import filter_legal_policy_rows
-    tree,boxes=fixture_tree();base={'current':tree,'current_boxes':boxes,'viewport':[320,240]}
-    rows=[{**base,'id':'clean','teacher_edits':[]},
-          {**base,'id':'valid','teacher_edits':[[1,'width',.05]]},
-          {**base,'id':'invalid','current_boxes':{**boxes,'card':[16,20,4,30]},
-           'teacher_edits':[[1,'width',-.05]]}]
-    kept,rejected=filter_legal_policy_rows(rows)
-    assert [r['id'] for r in kept]==['clean','valid']
-    assert rejected==[{'id':'invalid','edits':[[1,'width',-.05]]}]
 
 
 @pytest.mark.browser

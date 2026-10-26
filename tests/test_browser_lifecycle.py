@@ -114,14 +114,11 @@ def stalled_browser_task(folder):
 
 
 def test_online_force_stop_reaps_stalled_browser_tree(tmp_path):
-    import multiprocessing as mp
-    from concurrent.futures import ProcessPoolExecutor
     from collections import deque
     from framediff.tree_online import OnlineStream
-    context=mp.get_context('spawn')
+    from framediff.online_workers import OnlineWorkerPool
     stream=OnlineStream([], 'screenshot',workers=1,prefetch=1)
-    stream.stop=context.Event()
-    stream.pool=ProcessPoolExecutor(1,mp_context=context)
+    stream.pool=OnlineWorkerPool(1)
     stream.pending=deque([stream.pool.submit(stalled_browser_task,str(tmp_path))])
     path=tmp_path/'children.json'
     try:
@@ -130,7 +127,7 @@ def test_online_force_stop_reaps_stalled_browser_tree(tmp_path):
         assert path.exists(),'Browser worker did not initialize'
         tracked={int(pid):cmd for pid,cmd in json.loads(path.read_text()).items()}
         assert tracked
-    finally:stream._stop_pool(force=True)
+    finally:stream._stop_pool()
     assert_processes_gone(tracked)
 
 

@@ -4,6 +4,12 @@ All scales share the frozen detector, semantic channels, CSS grammar, image size
 512 CSS-owner limit, fixed val/test corruptions, and prepared target cache.
 Only hidden width, tree/decoder depth, and attention head count change.
 
+The maintained policy trainer is `visual-tree-train` (`tree_policy.py`) for both
+abstract and screenshot modes; `visual_train.py` handles detectors and frozen
+target predictions. Retired delta-policy training (`visual-train-policy`) and
+numeric-prefix preprocessing (`visual-subset-numeric`) have been removed.
+Historical policy checkpoint loading/evaluation and existing caches are retained.
+
 | Preset | Hidden | Layers | Heads | Abstract policy parameters |
 |---|---:|---:|---:|---:|
 | s | 128 | 3 | 4 | 4,766,449 |

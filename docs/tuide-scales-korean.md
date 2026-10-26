@@ -4,6 +4,12 @@
 CSS owner 최대 512개, 고정된 val/test 손상 데이터, 준비된 목표 캐시를 공유합니다.
 달라지는 것은 hidden 차원, 트리/디코더 깊이, attention head 수뿐입니다.
 
+현재 abstract·screenshot 정책 학습은 모두 `visual-tree-train`(`tree_policy.py`)을
+사용합니다. `visual_train.py`는 Detector 학습과 고정 목표 예측만 담당합니다.
+구형 delta-policy 학습(`visual-train-policy`)과 numeric-prefix 전처리
+(`visual-subset-numeric`)는 제거했으며, 과거 정책 체크포인트의 로딩·평가와
+기존 캐시 재사용 기능은 유지합니다.
+
 | 설정 | Hidden | Layers | Heads | Abstract 정책 파라미터 수 |
 |---|---:|---:|---:|---:|
 | s | 128 | 3 | 4 | 4,766,449 |

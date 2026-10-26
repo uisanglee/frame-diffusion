@@ -33,8 +33,6 @@ def add_parsers(sub):
     add_css_diffusion_parsers(sub)
     from .composition import add_parsers as add_composition_parsers
     add_composition_parsers(sub)
-    p=sub.add_parser('visual-subset-numeric',help='Filter cached trajectories without rendering or changing source assets')
-    p.add_argument('--rendered',required=True);p.add_argument('--out',required=True)
     p=sub.add_parser('visual-tree-prepare',
         help='Parse cached current/target HTML and construct exact CSS declaration replacement paths; no rerendering')
     p.add_argument('--rendered',required=True);p.add_argument('--out',required=True);p.add_argument('--resume',action='store_true')
@@ -62,7 +60,7 @@ def add_parsers(sub):
     p.add_argument('--manifest',required=True);p.add_argument('--out',required=True);p.add_argument('--resume',action='store_true')
     for k,v in [('max-nodes',128),('trajectories',3),('max-noise',4),('abstract-size',384),('seed',42),('min-elements',1)]:p.add_argument('--'+k,type=int,default=v)
     p.add_argument('--max-source-mae',type=float,default=1.,help='Reject rerenders too different from optional source screenshot; 1 disables')
-    for name in ('visual-train-detector','visual-train-policy','visual-tree-train'):
+    for name in ('visual-train-detector','visual-tree-train'):
         p=sub.add_parser(name)
         for k in ('train','val','out'):p.add_argument('--'+k,required=True)
         p.add_argument('--device',default='auto');p.add_argument('--resume');p.add_argument('--init-checkpoint')
@@ -102,11 +100,6 @@ def add_parsers(sub):
                 for key,default in [('online-workers',2),('online-prefetch',4),('online-max-noise',4),('online-attempts',8)]:
                     p.add_argument('--'+key,type=int,default=default)
                 p.add_argument('--online-timeout',type=float,default=180.)
-            else:
-                p.add_argument('--policy-head',choices=['flat','hierarchical','autoregressive'],default='flat')
-                p.add_argument('--numeric-only',action='store_true')
-                p.add_argument('--balanced-policy',action='store_true',help='Legacy baseline only')
-                p.add_argument('--decoding',choices=['joint','aggregate'],default='joint')
             for k,v in [('size',384),('hidden',128),('layers',3),('heads',4),('max-nodes',128),('token-grid',12)]:p.add_argument('--'+k,type=int,default=v)
     p=sub.add_parser('visual-cache-targets',help='Run frozen detector once per target for policy fine-tuning')
     p.add_argument('--reuse-cache',help='Reuse image-hash cache after verifying detector/threshold/size identity')
@@ -191,9 +184,6 @@ def run(args):
     if args.command=='visual-tree-freeze':
         from .tree_freeze import freeze
         return freeze(args)
-    if args.command=='visual-subset-numeric':
-        from .visual_numeric import prepare
-        return prepare(args)
     if args.command=='visual-tree-prepare':
         from .tree_edits import prepare
         return prepare(args)
@@ -226,7 +216,7 @@ def run(args):
     if args.command=='visual-build-data':
         from .visual_data import build
         return build(args)
-    if args.command.startswith('visual-train-'):
+    if args.command=='visual-train-detector':
         from .visual_train import train
         return train(args)
     if args.command=='visual-cache-targets':

@@ -118,7 +118,7 @@ def test_detector_relabel_script_exports_independent_assets_and_resumes(tmp_path
     from framediff.ir import write_jsonl,read_jsonl
     from framediff.visual import DETECTOR_LABEL_CONTRACT
     html=tmp_path/'sample.html';png=tmp_path/'sample.png'
-    html.write_text('<html><body style="margin:0">Visible text<button>OK</button></body></html>')
+    html.write_text('<html><body style="margin:0"><span>Visible text</span><button>OK</button></body></html>')
     with HtmlBrowser() as browser:
         browser.load(html.read_text(),[320,200]);pixels,_=browser.stable_capture()
         png.write_bytes(pixels)
@@ -148,7 +148,7 @@ def test_detector_relabel_script_exports_independent_assets_and_resumes(tmp_path
     subprocess.run(command,check=True,capture_output=True,text=True)
     assert (out/'10/rendered/detector-train.jsonl').read_bytes()==before
     assert json.loads((out/'relabel-config.json').read_text())['label_contract']==DETECTOR_LABEL_CONTRACT
-    (tmp_path/'missing.html').write_text('<html><body>Recovered</body></html>')
+    (tmp_path/'missing.html').write_text('<html><body><span>Recovered</span></body></html>')
     Image.new('RGB',(320,200),'white').save(tmp_path/'missing.png')
     subprocess.run(command,check=True,capture_output=True,text=True)
     assert json.loads((out/'summary.json').read_text())['failed'] == 0

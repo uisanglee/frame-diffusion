@@ -64,7 +64,7 @@ def main(argv=None):
     if args.command=='compare-renderers' and (args.repeats<1 or args.warmup<0 or args.limit<0):
         p.error('repeats must be positive; warmup and limit must be nonnegative')
     for key in ('steps','batch_size','accumulation','hidden','layers','heads','max_nodes','max_noise','eval_every','log_every','val_samples','beam','topk','budget','cpu_threads'):
-        if key=='val_samples' and args.command in ('visual-train-detector','visual-train-policy','visual-tree-train'):
+        if key=='val_samples' and args.command in ('visual-train-detector','visual-tree-train'):
             if args.val_samples<0:p.error('val_samples must be nonnegative; 0 means all')
             continue
         if hasattr(args,key) and getattr(args,key)<1:p.error(key+' must be positive')

@@ -9,7 +9,6 @@ import contextlib
 import hashlib
 import json
 import math
-import multiprocessing as mp
 import os
 import random
 import tempfile
@@ -582,25 +581,14 @@ class OnlineStream:
 
     def _start_pool(self):
         from .online_workers import OnlineWorkerPool
-        context=mp.get_context('spawn')  # Never fork a CUDA-initialized parent.
-        self.stop=context.Event()
         self.pool=OnlineWorkerPool(self.workers,initializer=_initialize,initargs=self.args,
                                   cache_wait_timeout=float(os.environ.get('TUIDE_CACHE_LOCK_TIMEOUT','3600')))
         self.next_index=self.cursor;self.pending.clear();self._fill()
 
-    def _stop_pool(self,force=False):
+    def _stop_pool(self):
         if self.pool is None:return
-        from .online_workers import OnlineWorkerPool
-        self.stop.set()
-        if isinstance(self.pool,OnlineWorkerPool):
-            self.pool.shutdown();self.pool=None;self.pending.clear();return
-        for future in self.pending:future.cancel()
-        processes=list((getattr(self.pool,'_processes',None) or {}).values()) if force else []
-        if force:
-            from .preparation_workers import stop_executor
-            stop_executor(self.pool,processes)
-        else:self.pool.shutdown(wait=True,cancel_futures=True)
-        self.pool=None;self.pending.clear()
+        try:self.pool.shutdown()
+        finally:self.pool=None;self.pending.clear()
 
     def _fill(self):
         while len(self.pending)<self.prefetch:

@@ -20,7 +20,6 @@ def _run(connection, initializer, initargs, stop):
                 connection.send(('progress',job,time.monotonic(),stage,path))
             set_progress(progress)
             try:
-                connection.send(('started',job,time.monotonic()))
                 value=function(*args)
                 connection.send(('result',job,value,None))
             except Exception as exc:
@@ -41,9 +40,6 @@ class _Job:
 
     def result(self,timeout=None):
         return self.pool.result(self,timeout)
-
-    def cancel(self):
-        return False  # Pool shutdown owns cancellation and browser cleanup.
 
     def transition(self,stage,now):
         elapsed=max(0.,now-self.mark)
@@ -96,8 +92,6 @@ class OnlineWorkerPool:
         if job is None or job.number!=number: raise RuntimeError('Online worker result identity changed')
         if kind=='progress':
             now,stage,path=payload;job.transition(stage,now);job.path=path
-        elif kind=='started':
-            pass  # The dispatch clock already includes startup time.
         elif kind=='result':
             job.transition('complete',time.monotonic());job.value,job.error=payload;job.done=True;slot.job=None
         else: raise RuntimeError('Unknown online worker message')
@@ -145,7 +139,7 @@ class OnlineWorkerPool:
                 self._dispatch();return
         raise RuntimeError('Timed-out online job has no active worker')
 
-    def shutdown(self,wait=True,cancel_futures=True):
+    def shutdown(self):
         if self.closed:return
         self.closed=True;self.queue.clear()
         for slot in self.slots:

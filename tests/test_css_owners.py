@@ -1,6 +1,5 @@
 from dataclasses import asdict
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 import torch

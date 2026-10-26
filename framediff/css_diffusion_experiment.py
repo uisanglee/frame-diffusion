@@ -111,26 +111,6 @@ def apply_values(browser, row, values):
     browser.executions += 1
 
 
-def owner_topology(owners):
-    """Identity stable across harmless CSSOM serialization normalization."""
-    result=[]
-    for owner in owners:
-        kind=owner.get('kind')
-        if kind=='root': result.append(('root',))
-        elif kind=='inline':result.append(('inline',owner.get('id'),tuple(owner.get('matches',[]))))
-        elif kind=='rule':result.append(('rule',owner.get('block'),tuple(owner.get('path',[])),
-                                         tuple(owner.get('matches',[]))))
-        else:raise ValueError('Unknown CSS owner kind')
-    return result
-
-
-def canonical_owners(expected, actual):
-    """Accept selector/condition formatting changes, reject address/match changes."""
-    if owner_topology(expected) != owner_topology(actual):
-        raise ValueError('CSS owner topology changed after preparation')
-    return actual
-
-
 def normalized_owner_key(owner):
     """Stable rule identity when CSSOM serialization shifts nested rule paths."""
     kind=owner.get('kind')

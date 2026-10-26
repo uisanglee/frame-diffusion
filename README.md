@@ -12,6 +12,14 @@ W/H/X/Y의 15개 손상 조합별 CSS 복구 실험은 [Synthetic Action Composi
 
 ## 최신: 이미지 조건 반복 복구
 
+현재 WebUI 학습은 `scripts/run_webui_scale.sh`를 진입점으로 사용합니다.
+Detector는 `visual-train-detector` → `framediff/visual_train.py`, TUIDE와
+screenshot 정책은 모두 `visual-tree-train` → `framediff/tree_policy.py`에서
+학습합니다. 구형 delta-policy 학습 명령 `visual-train-policy`와 그 전용
+numeric-prefix 전처리 `visual-subset-numeric`는 제거했습니다. 기존 정책의
+체크포인트 로딩·평가 코드는 보존하며, 현재 공유 캐시와 체크포인트 재개는
+그대로 사용할 수 있습니다.
+
 Inline과 `<style>` 규칙을 함께 훼손·복구하는 `css-owner-tree-v2` 경로를 추가했습니다.
 [Stylesheet 정책 준비·GPU 1/3 학습·평가](docs/stylesheet-policy.md)를 참고하세요.
 
@@ -33,8 +41,8 @@ declaration-tree policy입니다. [최신 코드 구분·기존 데이터 재사
 CSS owner, 검사 코드 또는 Playwright 버전이 바뀌면 해당 캐시를 재사용하지 않습니다.
 `cache_hits`는 재사용 수, `inspected_missing_states`는 새 브라우저 검사 수입니다.
 중단 전 완료된 검사는 다음 실행에서 재사용되며, 캐시는 학습 샘플의 온라인 corruption을 저장하지 않습니다.
-CSSOM으로 읽을 수 없는 내부 stylesheet 등 검사 오류가 있는 페이지도 오류 사유와 함께 캐시하고
-학습 대상에서 제외합니다. 로그의 `excluded_inspection_error`로 그 수를 별도 보고합니다.
+수정 가능한 CSS나 효과가 있는 후보가 없는 확정 실패는 사유와 함께 캐시합니다.
+일시적인 브라우저·검사 오류는 다시 시도하며, `excluded_inspection_error`로 별도 보고합니다.
 
 **목표 screenshot → 전용 검출기로 한 번 추상화 → 현재 DOM 추상화 이미지와 비교해 매 스텝 CSS action 예측**을 지원합니다.
 고정 VLM 계획이나 목표 box residual을 사용하지 않습니다. 매번 실제 screenshot을 사용하는 별도 정책과

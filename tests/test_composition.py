@@ -43,7 +43,7 @@ def test_multiple_correct_actions_order_and_collateral():
 
 
 @pytest.mark.browser
-def test_build_and_known_reverse_restore_all_combinations(tmp_path):
+def test_build_and_known_reverse_restore_all_combinations(tmp_path, monkeypatch):
     data=tmp_path/'data'
     args=SimpleNamespace(out=str(data),samples_per_cell=6,seed=73129,resume=False)
     build(args)
@@ -72,6 +72,15 @@ def test_build_and_known_reverse_restore_all_combinations(tmp_path):
     import torch
     from framediff.css_owners import CONTRACT
     from framediff.tree_policy import TreeConfig, TreePolicy, KIND
+    import framediff.visual_experiment as visual_experiment
+    original_rollout = visual_experiment.rollout
+
+    def decode_without_early_stop(*args, **kwargs):
+        # This test exercises decoding even when the small corruption already
+        # satisfies the default 99% pixel match stopping criterion.
+        return original_rollout(*args, **kwargs, pixel_goal_fraction=-1)
+
+    monkeypatch.setattr(visual_experiment, 'rollout', decode_without_early_stop)
     torch.manual_seed(42)
     for mode in ('abstract','screenshot'):
         cfg=TreeConfig(mode=mode,size=64,hidden=32,layers=1,heads=4,token_grid=2,
@@ -85,10 +94,4 @@ def test_build_and_known_reverse_restore_all_combinations(tmp_path):
             steps=1,threshold=.4,geometry_tolerance=1.,limit=1,resume=False))
         result=read_json(run/'summary.json')['overall']
         assert result['failed_rate']==0
-        if mode=='screenshot':
-            assert result['actions']==1
-        else:
-            # Random abstract policies make no quality claim: the proposed
-            # edit is either committed or rejected by the monotonic-MAE
-            # rollout guard.
-            assert result['actions'] in (0,1)
+        assert result['actions']==1
