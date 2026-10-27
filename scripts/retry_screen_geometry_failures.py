@@ -6,7 +6,7 @@ from pathlib import Path
 import tempfile
 
 
-def requeue(root):
+def requeue(root,include_visible=False):
     root=Path(root)
     if not (root/'screening/config.json').is_file():
         raise ValueError('Not a screening output directory')
@@ -20,7 +20,9 @@ def requeue(root):
             for path in (root/'screening'/split).glob('*.json'):
                 record=json.loads(path.read_text())
                 if (record.get('status')=='rejected' and
-                    'label geometry mismatch' in record.get('error','')):
+                    ('label geometry mismatch' in record.get('error','') or
+                     (include_visible and 'Lazy render failed' in record.get('error','')
+                      and 'visible abstraction elements' in record.get('error','')))):
                     paths.append(path)
         backup=None
         if paths:
@@ -35,5 +37,7 @@ def requeue(root):
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out',required=True)
+    parser.add_argument('--include-visible',action='store_true',
+                        help='Also retry legacy insufficient-visible-element render failures')
     args=parser.parse_args()
-    print(json.dumps(requeue(args.out)))
+    print(json.dumps(requeue(args.out,args.include_visible)))

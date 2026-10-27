@@ -232,3 +232,20 @@ def test_cached_asset_hash_reused_and_content_change_detected(tmp_path,monkeypat
     os.utime(asset,ns=(stat.st_atime_ns,stat.st_mtime_ns))
     assert TrainViewCache._load_disk(tmp_path) is None
     assert len(calls)==2
+
+
+def test_definite_lazy_failure_does_not_retry_same_view(tmp_path,monkeypatch):
+    from framediff.tree_online import OnlineSampler,OnlineGenerationError
+    from framediff.cache_lock import UnusableTrainView
+    from test_multiview_regressions import lazy_descriptor
+    row=lazy_descriptor(tmp_path)
+    sampler=OnlineSampler([row],'abstract',attempts=8)
+    calls=[]
+    def fail(*a,**kw):
+        calls.append(1)
+        raise UnusableTrainView('Full-DOM render has no visible abstraction elements')
+    monkeypatch.setattr(sampler.view_cache,'get',fail)
+    try:
+        with pytest.raises(OnlineGenerationError):sampler.generate(0)
+        assert len(calls)==1
+    finally:sampler.close();sampler.view_cache.close()

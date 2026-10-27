@@ -109,7 +109,10 @@ def preparation_fingerprint():
                       '3dc80e62b2d374b3dc8fa7fb80a0ba547749d879d1b78b03e587331846b39d0d',
                       # Runtime timeout exclusions affect page scheduling only;
                       # successful normalized assets and witnesses are unchanged.
-                      '2872ad4143b10db90f4bcf0d3ceb578a7549cd7b5e62ceebd30a8b40aa2f602d'):
+                      '2872ad4143b10db90f4bcf0d3ceb578a7549cd7b5e62ceebd30a8b40aa2f602d',
+                      # Skip definite failed views within a sample; successful
+                      # preparation and corruption semantics are unchanged.
+                      '38de3202ef64ed86b5a15828c69e338cf8ebafdead9a19c828b79689943a384f'):
         online_sha='e598fecb8a9bb423bba5e9cf118b338f89be0bbe3d83195d5512e4e7c2fbf53d'
     from .cache_lock import observation_revision
     revision=observation_revision()
@@ -303,6 +306,18 @@ class TrainViewCache:
                 finally:previous.close()
             else:
                 rendered,error,_=_render_page((args,work/'rendered',index,source))
+                # A legacy owner budget can select only off-screen nodes. In
+                # migration only, retry with full-DOM labels and visible owners
+                # before deciding whether the page has any usable content.
+                if (error and clean_relabel_source and not args.visual_geometry_contract
+                    and 'visible abstraction elements' in str(error)):
+                    from .visual import VISUAL_GEOMETRY_CONTRACT,DETECTOR_LABEL_CONTRACT
+                    args.visual_geometry_contract=VISUAL_GEOMETRY_CONTRACT
+                    args.detector_label_contract=DETECTOR_LABEL_CONTRACT
+                    args.min_elements=1
+                    rendered,error,_=_render_page((args,work/'rendered',index,source))
+                    if error and 'visible abstraction elements' in str(error):
+                        raise UnusableTrainView(f'Full-DOM render has no visible abstraction elements: {error}')
                 if error:raise ValueError(f'Lazy render failed: {error}')
             if policy and not relabel:
                 seed,page,error=_prepare_page((args,work/'labels','train',index,source['id'],

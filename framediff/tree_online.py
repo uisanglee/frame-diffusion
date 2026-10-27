@@ -405,12 +405,15 @@ class OnlineSampler:
 
     def generate(self,index):
         rng=random.Random(task_seed(self.seed,index));errors=[]
+        available=self.by_page
+        page_ids=self.page_ids
         for attempt in range(self.attempts):
             if self.stop is not None and self.stop.is_set(): raise RuntimeError('Online producer stopped')
             # Pages are the statistical units. Select a page first, then one
             # available viewport, so pages with six captures are not weighted
             # six times more than pages with one capture.
-            target=rng.choice(self.by_page[rng.choice(self.page_ids)])
+            target=rng.choice(available[rng.choice(page_ids)])
+            selected=target
             try:
                 identity=self.timeout_exclusions.describe(target)
                 if self.timeout_exclusions.contains(identity):
@@ -549,6 +552,15 @@ class OnlineSampler:
                 if self.browser is not None:
                     try: self.close()
                     except Exception: self.browser=None
+                from .cache_lock import UnusableTrainView
+                if isinstance(exc,UnusableTrainView):
+                    # Preparation failure is independent of random corruption.
+                    # Try another view, never rebuild the same unusable page
+                    # eight times in an isolated screening probe.
+                    available={page:[row for row in rows if row is not selected]
+                               for page,rows in available.items()}
+                    page_ids=[page for page in page_ids if available[page]]
+                    if not page_ids:break
         raise OnlineGenerationError(index,errors)
 
 

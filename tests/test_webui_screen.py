@@ -28,6 +28,10 @@ def test_geometry_retry_preserves_successes_and_refuses_active_or_published_run(
     assert not (folder/'2.json').exists()
     assert all(json.loads((folder/f'{i}.json').read_text())==records[i] for i in (0,1))
     assert requeue(tmp_path)['requeued']==0
+    (folder/'3.json').write_text(json.dumps(dict(status='rejected',error='Lazy render failed: Only 0 visible abstraction elements')))
+    assert requeue(tmp_path)['requeued']==0
+    assert requeue(tmp_path,include_visible=True)['requeued']==1
+    assert (folder/'0.json').exists() and (folder/'1.json').exists()
     (tmp_path/'READY.json').write_text('{}')
     with pytest.raises(ValueError,match='already published'):requeue(tmp_path)
 

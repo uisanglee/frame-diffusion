@@ -356,3 +356,13 @@ python scripts/retry_screen_geometry_failures.py --out data/webui-full-dom-scree
 그다음 기존 40k 실행 명령을 그대로 재실행합니다. 7k는 `--out`을
 `data/webui-full-dom-screened-7k-v1`로 지정하세요. 실행 중인 전처리나 이미
 `READY.json`이 생성된 완성 데이터셋은 이 명령으로 변경할 수 없습니다.
+
+구버전의 `Only 0 visible abstraction elements` 등도 다시 검사하려면 위 명령에
+`--include-visible`을 추가합니다. 구버전 라벨이 부족했던 clean migration source만
+최신 full-DOM/화면 안 owner 선택으로 한 번 재검사합니다. 요소가 확보되어도 기존
+정규화와 편집 가능성 검사를 통과해야 채택합니다. 재검사에서도 요소가 없으면
+준비 실패를 캐시에 기록하며 같은 샘플에서 8번 반복하지 않습니다.
+
+```bash
+python scripts/retry_screen_geometry_failures.py --out data/webui-full-dom-screened-40k-v1 --include-visible
+```

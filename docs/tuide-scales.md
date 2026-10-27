@@ -331,3 +331,10 @@ python scripts/retry_screen_geometry_failures.py --out data/webui-full-dom-scree
 Relaunch the same preparation command. Only geometry rejection records are moved to a
 backup directory; success and timeout records remain. Use the 7k output root for a 7k
 run. The utility refuses active runs and published datasets with READY.json.
+
+To also requeue legacy insufficient-visible-element render failures, add
+`--include-visible` to the command above. Only failed clean migration sources
+are retried with full-DOM labels and viewport-visible owner selection. They must
+still pass normalization and editable-candidate inspection. An empty full-DOM
+retry is cached as unusable, without eight repeated attempts in a single probe.
+Successful cache entries remain compatible.

@@ -469,3 +469,69 @@ def test_multiview_prepare_pipeline_resume_and_subset(tmp_path):
     assert {r['view'] for r in test}=={'default_1280-720','iPhone-13 Pro'}
     assert all(Path(r['current_image']).is_file() for r in test)
     assert read_json(out/'10/coverage.json')['rendering']['train']['status']=='deferred'
+
+
+@pytest.mark.browser
+def test_empty_legacy_labels_retry_full_dom_with_visible_owner(tmp_path,monkeypatch):
+    from framediff.lazy_webui import TrainViewCache
+    from framediff.web_experiment import digest
+    from framediff.visual import VISUAL_GEOMETRY_CONTRACT
+    from framediff import visual_data
+    row=lazy_descriptor(tmp_path)
+    html=Path(row['lazy_source']['html'])
+    html.write_text('<body style="margin:0"><div style="width:150px;height:40px">Visible heading</div>'
+                    '<img style="position:absolute;top:400px;width:20px;height:20px">'
+                    '<img style="position:absolute;top:500px;width:20px;height:20px"></body>')
+    row['lazy_source']['source_sha']=digest(html)
+    row['lazy_settings'].update(max_nodes=4,visual_geometry_contract=None,detector_label_contract=None)
+    row['visual_geometry_contract']=None
+    row['detector_label_contract']=None
+    calls=[];original=visual_data._render_page
+    def track(task):
+        result=original(task);calls.append((task[0].visual_geometry_contract,result[1]));return result
+    monkeypatch.setattr(visual_data,'_render_page',track)
+    cache=TrainViewCache(cache_dir=tmp_path/'cache')
+    try:
+        result=cache.get_relabel_source(row)
+        assert len(calls)==2 and 'Only 0 visible' in str(calls[0][1])
+        assert calls[1][0]==VISUAL_GEOMETRY_CONTRACT and calls[1][1] is None
+        assert result['target_elements']
+        assert any(n.get('visual_class')==1 for n in result['current']['nodes'])
+        cache.get_relabel_source(row)
+        assert len(calls)==2
+        from framediff.policy_relabel import refresh_row
+        from framediff.tree_online import OnlineSampler
+        prepared=refresh_row(result,tmp_path/'full-labels',64,clean_only=True)
+        assert prepared['visible_candidates']
+        for mode in ('abstract','screenshot'):
+            sampler=OnlineSampler([prepared],mode,max_noise=1)
+            try:
+                sample=sampler.generate(0)
+                assert sample['replacement_edit']
+                if mode=='screenshot':assert sample['current_image']
+            finally:sampler.close();sampler.view_cache.close()
+    finally:cache.close()
+
+
+@pytest.mark.browser
+def test_empty_full_dom_is_cached_without_rebuilding(tmp_path,monkeypatch):
+    from framediff.lazy_webui import TrainViewCache
+    from framediff.cache_lock import UnusableTrainView
+    from framediff.web_experiment import digest
+    from framediff import visual_data
+    row=lazy_descriptor(tmp_path)
+    html=Path(row['lazy_source']['html'])
+    html.write_text('<body style="margin:0;height:200px"></body>')
+    row['lazy_source']['source_sha']=digest(html)
+    row['lazy_settings'].update(visual_geometry_contract=None,detector_label_contract=None)
+    calls=[];original=visual_data._render_page
+    def track(task):
+        calls.append(1);return original(task)
+    monkeypatch.setattr(visual_data,'_render_page',track)
+    cache=TrainViewCache(cache_dir=tmp_path/'cache')
+    try:
+        for _ in range(2):
+            with pytest.raises(UnusableTrainView,match='Full-DOM render has no visible'):
+                cache.get_relabel_source(row)
+        assert len(calls)==2  # legacy + authoritative full-DOM, never eight retries
+    finally:cache.close()
