@@ -305,3 +305,36 @@ Stage 2는 같은 입력 표현의 stage 1에서 초기화됩니다. 기존 `las
 우선합니다. preset을 지정하지 않으면 기존 기본값이나 사용자 지정 차원을
 사용할 수 있습니다. 다른 설정과 입력 서명이 일치한다면 실제 결정된 차원만
 재개 실행의 동일성 판정에 사용하므로 기존 S 실행과의 호환성이 유지됩니다.
+
+### GUAVA: timeout 검사 후 40,000페이지 (8:1:1)
+
+`scripts/prepare_screened_webui_40k.sh`는 기존 master 후보에서 train 32,000,
+val 4,000, test 4,000페이지를 선별합니다. WebUI 전체 40만 개를 다운로드하는
+스크립트가 아닙니다. 원래 도메인별 split을 유지하고, 모든 뷰가 검사를 통과한
+페이지를 선택합니다. split별 통과 후보가 부족하면 완료되지 않으며, 다른 split에서
+가져와 채우지 않습니다. 기존 고정 val/test corruption과 복구 라벨은 재사용합니다.
+
+GUAVA에 기존 원본·master·detector 데이터와 manifest가 참조하는 파일들이 있어야 합니다.
+manifest에 절대 경로가 있으면 GUAVA에서도 해당 경로로 접근 가능해야 합니다.
+공통 캐시가 없으면 생성하므로 첫 실행은 더 느릴 수 있습니다. GPU는 필요 없습니다.
+
+```bash
+cd /home/uisang/2027/frame-diffusion
+source .venv/bin/activate
+mkdir -p log
+nohup setsid env PYTHONUNBUFFERED=1 PREPARE_WORKERS=4 \
+  SCREEN_TIMEOUT=180 SCREEN_SAMPLES=3 \
+  SOURCE_DATA=data/webui-full-dom-policy-v2 \
+  DETECTOR_RENDERED=data/webui-full-dom-detector-v2/56169/rendered \
+  SCREENED_DATA=data/webui-full-dom-screened-40k-v1 \
+  TUIDE_SHARED_CACHE="$PWD/data/webui-shared-cache" \
+  SCREEN_PID_FILE="$PWD/log/prepare-screened-40k.pid" \
+  bash scripts/prepare_screened_webui_40k.sh \
+  >> log/prepare-screened-40k.log 2>&1 < /dev/null &
+```
+
+로그는 `tail -f log/prepare-screened-40k.log`로 확인합니다. 같은 명령으로 재개합니다.
+최종 완료 파일은 `data/webui-full-dom-screened-40k-v1/READY.json`이며,
+학습 입력은 `data/webui-full-dom-screened-40k-v1/40000`입니다.
+기존 master와 공유 캐시는 삭제하지 마세요. 학습은 새 run 디렉터리를 사용합니다.
+안전한 종료는 위 7k 명령에서 PID 파일만 `log/prepare-screened-40k.pid`로 바꿉니다.

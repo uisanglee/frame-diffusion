@@ -288,3 +288,30 @@ validation and overrides explicit `--hidden`, `--layers`, `--heads` values.
 Without a preset the existing defaults/custom dimensions remain supported.
 Only resolved dimensions are used for resume identity, preserving compatibility
 with old S runs when all other configuration and input signatures match.
+
+### GUAVA: a screened 40k subset (80/10/10)
+
+Use `scripts/prepare_screened_webui_40k.sh` for 32,000 training, 4,000 validation,
+and 4,000 test pages. It uses the same screening protocol as the 7k script and
+preserves the original domain-disjoint split assignments and fixed held-out labels.
+It selects from the existing prepared master, not a fresh download of all 400k WebUI
+pages. Insufficient passing candidates in any split cause an error, not cross-split
+backfilling. All manifest-referenced assets must be accessible on GUAVA, including
+absolute paths. Missing common caches are built locally; no GPU is required.
+
+```bash
+cd /home/uisang/2027/frame-diffusion
+source .venv/bin/activate
+mkdir -p log
+nohup setsid env PREPARE_WORKERS=4 SCREEN_TIMEOUT=180 SCREEN_SAMPLES=3 \
+  TUIDE_SHARED_CACHE="$PWD/data/webui-shared-cache" \
+  SCREEN_PID_FILE="$PWD/log/prepare-screened-40k.pid" \
+  bash scripts/prepare_screened_webui_40k.sh \
+  >> log/prepare-screened-40k.log 2>&1 < /dev/null &
+```
+
+Resume with the same command. Completion creates
+`data/webui-full-dom-screened-40k-v1/READY.json`; training inputs are under its
+`40000/` directory. Retain original assets and the shared cache, and use new training
+run directories. For safe termination use the 7k PID-check command with
+`log/prepare-screened-40k.pid`.
