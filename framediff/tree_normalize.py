@@ -151,15 +151,18 @@ def _prepare_page(task, persist_seed=True, clean_relabel_source=False):
                         except Exception as exc:
                             for r in inspection:r['eligibility_error']=f'{type(exc).__name__}: {exc}'
                     write_json(folder/'candidate-inspection.json',inspection)
-                stage='seed_corruption'
-                sampler=OnlineSampler(pool,'screenshot',seed=args.seed,max_noise=1)
-                new=sampler.generate(index)
                 initial=folder/'initial.html';png=folder/'initial.png'
                 if persist_seed:
+                    stage='seed_corruption'
+                    sampler=OnlineSampler(pool,'screenshot',seed=args.seed,max_noise=1)
+                    new=sampler.generate(index)
                     initial.write_text(new.pop('current_html_text'));png.write_bytes(new['current_image'])
                     new.update(current_html=str(initial),current_image=str(png))
                 else:
-                    new.pop('current_html_text',None);new.pop('current_image',None)
+                    # Online training constructs its own corruption. Keep the
+                    # inspected clean state without rendering a throwaway seed.
+                    new={**seed,**pool[0], 'id':seed['id'],
+                         'declaration_state':copy.deepcopy(pool[0]['target_declaration_state'])}
             new.update(split=split,normalization_stats=stats,
                        normalization_contract=CONTRACT)
             page={k:pages[page_id][k] for k in ('id','group','split','source_sha','viewport')}

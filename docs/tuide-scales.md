@@ -50,6 +50,47 @@ source/settings key; transient browser and inspection errors are retried. A
 source or preparation change invalidates these failures along with page caches.
 Full-DOM observations use one browser query, with the same boxes, candidate
 screening and teacher labels. No Train prewarm or held-out regeneration is needed.
+With diagnostics off, newly materialized train caches store the clean state and
+inspected candidates without generating a disposable seed corruption. Online
+corruptions are still generated for each training sample. Existing seed-bearing
+caches remain usable. Asset hashes are reused within each process while file
+identity, size, modification time and change time are unchanged. Ancestor clips
+and rectangles are memoized within one DOM observation and recomputed after edits.
+Resume with the same data, shared cache and run directories after restarting the
+training process to load this code; no new training option is required.
+
+### A new 7k subset screened for online-generation timeouts
+
+`scripts/prepare_screened_webui_7k.sh` selects 5,600/700/700 pages within the
+original master train/val/test domain assignments. Every available source view
+of a page must pass. Rejected pages are replaced from the same split; insufficient
+candidates cause an error rather than a smaller dataset. Existing successful
+assets, shared caches, and fixed held-out corruptions/teachers are reused.
+
+The default active budget is 180 seconds per view, covering detector preparation,
+policy preparation, and three online screenshot samples (including abstract
+observations). This is stricter than the training per-sample timeout. Existing
+timeout exclusions are honored; shared lock timeouts stop screening without
+rejecting the waiting page. Stop competing training jobs before timing candidates.
+Unseen corruption combinations may still stall, so retain the training watchdog.
+
+```bash
+mkdir -p log
+nohup setsid env PYTHONUNBUFFERED=1 PREPARE_WORKERS=4 \
+  SCREEN_TIMEOUT=180 SCREEN_SAMPLES=3 \
+  SCREEN_PID_FILE="$PWD/log/prepare-screened-7k.pid" \
+  bash scripts/prepare_screened_webui_7k.sh \
+  > log/prepare-screened-7k.log 2>&1 < /dev/null &
+```
+
+Rerun the same command to reuse completed pass/fail records. Output defaults to
+`data/webui-full-dom-screened-7k-v1/7000`; its parent gets `READY.json` only after
+completion. Per-view reasons are in `screening/{train,val,test}/*.json` and page
+attrition is in `screening-report.json`. Report this runtime-based selection in
+the paper. A SIGTERM to the PID saved by `SCREEN_PID_FILE` closes this run's
+workers and browser descendants. Do not resume old checkpoints against changed
+manifests: train the detector and policies in a new run directory, using the same
+new fixed val/test subset for abstract and screenshot comparisons.
 
 ```bash
 mkdir -p log

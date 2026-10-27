@@ -22,6 +22,13 @@ CONTRACT = 'lazy-webui-train-view-v1'
 DISK_CACHE_CONTRACT = 'lazy-webui-train-view-cache-v2-verified'
 
 
+@lru_cache(maxsize=512)
+def _verified_asset_digest(path, stat_identity):
+    """Reuse hashes only while inode, size, mtime and ctime are unchanged."""
+    with Path(path).open('rb') as stream:
+        return hashlib.file_digest(stream,'sha256').hexdigest()
+
+
 def compact_new_cache(work, result):
     """Trim only unpublished generated work; never prune an existing cache."""
     work=work.resolve()
@@ -75,7 +82,10 @@ def preparation_fingerprint():
     # Optional seed-file retention changes storage only; preserve existing keys.
     if hashes['tree_normalize.py'] in (
         '5f2f562d97282db97fcbe96f6ab5cb2bfccfd347519eaeba3973a810bde6315c',
-        '3056b5d0cc463639d8c4dd534c091684a1d93edac1a447ae90b0140408c2236b'):
+        '3056b5d0cc463639d8c4dd534c091684a1d93edac1a447ae90b0140408c2236b',
+        # Seed-free lazy preparation preserves clean targets and witnesses;
+        # seeded and seed-free caches produce identical online training rows.
+        'ecd0cdf025ba66ea0304339b88a5b92ceadc48f72e37a70dd21298771869af91'):
         # The second revision adds only an opt-in lean source for *new* relabel
         # cache keys; ordinary normalized rows retain their old semantics.
         hashes['tree_normalize.py']='99abfa568147b5581248b90f477b920c26202fd5dffa02f9059135ea5eb5cc7f'
@@ -168,7 +178,9 @@ class TrainViewCache:
             assets=saved.get('assets')
             if not assets:return None
             for path,sha in assets.items():
-                if hashlib.sha256(Path(path).read_bytes()).hexdigest()!=sha:return None
+                stat=Path(path).stat()
+                identity=(stat.st_dev,stat.st_ino,stat.st_size,stat.st_mtime_ns,stat.st_ctime_ns)
+                if _verified_asset_digest(path,identity)!=sha:return None
             for key in ('target_html','target_image','image','current_html','current_image'):
                 if key in result and not Path(result[key]).is_file():return None
             return result

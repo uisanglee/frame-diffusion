@@ -51,6 +51,59 @@ CSS owner 최대 512개, 고정된 val/test 손상 데이터, 준비된 목표 �
 소스나 전처리 기준이 바뀌면 실패 캐시도 무효화됩니다. full-DOM 측정은 브라우저
 질의 한 번으로 묶었으며 박스·후보 판정·teacher 기준은 같습니다. Train 전체
 사전 생성이나 val/test 재생성은 필요하지 않습니다.
+진단 저장을 끄면 새 train 캐시에는 정상 상태와 검사된 수정 후보를 저장하고,
+버려지는 seed 손상 샘플은 생성하지 않습니다. 실제 online corruption은 학습
+샘플마다 계속 생성합니다. 기존 seed가 포함된 캐시도 재사용합니다. 같은 프로세스에서
+이미 검증한 파일은 파일 식별자·크기·수정 시각·변경 시각이 같으면 해시를 재사용합니다.
+DOM 좌표와 조상의 잘림 영역은 한 관측 안에서 재사용하며 CSS 수정 후에는 다시 측정합니다.
+수정 코드는 학습 프로세스를 재시작해야 적용됩니다. 기존 데이터·공유 캐시·run 경로로
+재개하면 되며 추가 학습 옵션은 없습니다.
+
+### Timeout 페이지를 제외한 새 7,000개 실험
+
+기존 master의 도메인별 train/val/test 경계 안에서 새로 5,600/700/700페이지를
+선별합니다. 페이지의 모든 원본 뷰가 통과해야 채택하며, 부족한 수는 같은 split의
+다음 후보로 채웁니다. 기존 HTML·PNG·정상 캐시와 고정 val/test 손상·정답을 재사용합니다.
+새 원본 스캔이나 전체 재렌더링은 하지 않지만, 아직 없는 train 캐시는 생성합니다.
+
+기본 검사는 뷰당 detector 준비, policy 준비, 온라인 screenshot 손상 3회이며
+이 전체 작업에 180초 제한을 적용합니다. screenshot 경로는 abstract 관측도 수행합니다.
+따라서 이 제한은 학습의 샘플 하나당 180초보다 엄격합니다. 기존 timeout 제외 기록도
+반영합니다. 잠금 대기는 페이지 실패로 판정하지 않고 중단 후 재개하도록 합니다.
+이 검사는 모든 가능한 손상에서 timeout이 없음을 보장하지 않으므로 학습 watchdog은 유지합니다.
+
+시간 기준에 서버 부하가 영향을 주므로 기존 학습을 중단한 같은 서버에서 실행하세요.
+
+```bash
+mkdir -p log
+nohup setsid env PYTHONUNBUFFERED=1 PREPARE_WORKERS=4 \
+  SCREEN_TIMEOUT=180 SCREEN_SAMPLES=3 \
+  SCREEN_PID_FILE="$PWD/log/prepare-screened-7k.pid" \
+  bash scripts/prepare_screened_webui_7k.sh \
+  > log/prepare-screened-7k.log 2>&1 < /dev/null &
+```
+
+같은 명령으로 재개하면 성공·실패 검사 기록을 재사용합니다. 기본 출력은
+`data/webui-full-dom-screened-7k-v1/7000`이며, 전체 완료 시 상위 폴더에 `READY.json`이
+생깁니다. 후보가 부족하면 개수를 줄이지 않고 오류를 냅니다. `screening-report.json`과
+`screening/{train,val,test}/*.json`에 제외 수와 사유가 남습니다. 시간 기준으로 선별된
+데이터셋이라는 점과 탈락 수를 논문에 기록하세요.
+
+중단 시 실제 Python PID를 저장한 파일을 사용합니다. SIGTERM 처리에서 해당 worker와
+브라우저 자식들을 정리합니다.
+
+```bash
+if [[ -s log/prepare-screened-7k.pid ]]; then
+  pid=$(cat log/prepare-screened-7k.pid)
+  if [[ "$(ps -p "$pid" -o args=)" == *framediff.webui_screen* ]]; then
+    kill -TERM "$pid"
+  fi
+fi
+```
+
+새 데이터의 train/val/test가 달라지므로 기존 체크포인트를 `--resume`하지 마세요.
+새 run 경로(예: `runs/webui-full-dom-screened-7k-v1`)에서 detector와 두 policy를
+학습하고, abstract와 screenshot 모두 새 데이터의 같은 고정 val/test를 사용합니다.
 
 ```bash
 mkdir -p log

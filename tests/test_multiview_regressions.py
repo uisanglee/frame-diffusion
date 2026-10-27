@@ -223,6 +223,42 @@ def test_lazy_policy_disk_cache_survives_process_cache(tmp_path,monkeypatch):
 
 
 @pytest.mark.browser
+def test_seed_free_cache_matches_seeded_online_training(tmp_path,monkeypatch):
+    from framediff.lazy_webui import TrainViewCache
+    from framediff.tree_online import OnlineSampler,target_pool
+    row=lazy_descriptor(tmp_path)
+    monkeypatch.delenv('TUIDE_SHARED_CACHE',raising=False)
+    monkeypatch.setenv('TUIDE_SAVE_DIAGNOSTICS','1')
+    seeded=TrainViewCache(cache_dir=tmp_path/'seeded')
+    try:old=seeded.get(row,policy=True)
+    finally:seeded.close()
+    monkeypatch.setenv('TUIDE_SAVE_DIAGNOSTICS','0')
+    clean=TrainViewCache(cache_dir=tmp_path/'clean')
+    with monkeypatch.context() as patch:
+        def forbidden(*a,**kw):raise AssertionError('Prepared a throwaway seed')
+        patch.setattr(OnlineSampler,'generate',forbidden)
+        try:new=clean.get(row,policy=True)
+        finally:clean.close()
+        # Existing seed-bearing entries remain readable with diagnostics off.
+        try:assert seeded.get(row,policy=True)==old
+        finally:seeded.close()
+    assert 'replacement_edit' not in new and 'current_image' not in new
+    assert new['visible_candidates']==old['visible_candidates']
+    for mode in ('abstract','screenshot'):
+        samplers=[OnlineSampler(target_pool([r]),mode,max_noise=2) for r in (old,new)]
+        try:
+            for index in (0,3):
+                a=samplers[0].generate(index);samplers[0].close()
+                b=samplers[1].generate(index);samplers[1].close()
+                for field in ('replacement_edit','current_boxes','target_elements',
+                              'declaration_state','target_declaration_state','current'):
+                    assert a[field]==b[field],field
+                if mode=='screenshot':assert a['current_image']==b['current_image']
+        finally:
+            for sampler in samplers:sampler.close();sampler.view_cache.close()
+
+
+@pytest.mark.browser
 def test_cold_relabel_skips_obsolete_seed_and_preserves_new_labels(tmp_path,monkeypatch):
     from framediff.lazy_webui import TrainViewCache
     from framediff.policy_relabel import _task,refresh_row
@@ -309,7 +345,9 @@ def test_lazy_detector_and_policy_materialization(tmp_path,capsys,monkeypatch):
         portable=portable_images(detector,('image',))
         assert isinstance(portable['image'],bytes)
         policy=cache.get(row,policy=True)
-        assert policy['replacement_edit'] and policy['page_id']=='page'
+        assert policy['visible_candidates'] and policy['page_id']=='page'
+        assert policy['declaration_state']==policy['target_declaration_state']
+        assert 'replacement_edit' not in policy
         assert not path.exists() # eviction only removes this cache's generated files
         assert Path(row['lazy_source']['html']).is_file()
         assert cache.get(row,policy=True)==policy
@@ -335,6 +373,18 @@ def test_lazy_training_cache_stage2_and_resume(tmp_path,monkeypatch):
     from framediff.lazy_webui import TrainViewCache
     from framediff.web_experiment import digest
     row=lazy_descriptor(tmp_path)
+    # Warm exactly the common detector/policy assets used by the new screening
+    # command, then check actual spawned training workers do not rebuild them.
+    from framediff.webui_screen import screen_view
+    shared=tmp_path/'screened-shared'
+    monkeypatch.setenv('TUIDE_SHARED_CACHE',str(shared))
+    monkeypatch.setenv('TUIDE_SAVE_DIAGNOSTICS','0')
+    assert screen_view(row,row,dict(shared_cache=str(shared),observation_size=64,
+                                   samples=1,max_noise=1,seed=42))['status']=='accepted'
+    def cached_assets():
+        return {str(p.relative_to(shared)):(p.stat().st_mtime_ns,p.stat().st_size)
+                for p in (shared/'lazy-train-views').rglob('*') if p.is_file() and p.suffix!='.lock'}
+    prepared_assets=cached_assets()
     # Independent held-out source, eagerly prepared at a different viewport.
     html=tmp_path/'heldout.html'
     html.write_text('<html><body style="margin:0"><div style="width:120px;height:50px;background:blue">Validation</div></body></html>')
@@ -358,6 +408,7 @@ def test_lazy_training_cache_stage2_and_resume(tmp_path,monkeypatch):
               '--device','cpu','--cpu-threads','2','--steps','1','--batch-size','1','--accumulation','1',
               '--val-samples','0','--eval-every','1','--min-size','64','--max-size','96',
               '--max-detections','8','--no-pretrained'])
+        assert cached_assets()==prepared_assets
         for split in ('train','val'):
             main(['visual-cache-targets','--data',str(tmp_path/f'policy-{split}.jsonl'),
                   '--checkpoint',str(tmp_path/'detector/best.pt'),'--out',str(tmp_path/f'cached-{split}'),
@@ -379,6 +430,7 @@ def test_lazy_training_cache_stage2_and_resume(tmp_path,monkeypatch):
             main([*args,'--steps','2','--resume',str(checkpoint)])
             assert torch.load(checkpoint,weights_only=True)['online_cursor']==2
             assert list(read_jsonl(out/'validation.jsonl'))[-1]['validation_complete']
+            assert cached_assets()==prepared_assets, (mode,predicted)
     finally:cache.close()
 
 

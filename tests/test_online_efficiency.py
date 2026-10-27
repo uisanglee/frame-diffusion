@@ -192,3 +192,43 @@ def test_fused_observation_and_candidate_lists_match_original(monkeypatch):
             state,old=tree_online.inspect_candidates(browser,target,source)
         new_state,new=tree_online.inspect_candidates(browser,target,source)
         assert state==new_state and old==new
+
+
+@pytest.mark.browser
+def test_observation_clip_cache_refreshes_after_reflow_and_scroll():
+    from framediff.html_bridge import HtmlBrowser
+    from framediff.plans import dom_tree
+    from framediff.visual import annotate
+    from framediff.tree_online import abstraction
+    html='''<html style="overflow:hidden"><body style="margin:0">
+      <section id="outer" style="width:150px;height:90px;overflow:auto;border:3px solid">
+        <div id="inner" style="width:240px;height:160px;overflow:hidden;padding:5px">
+          <div style="margin-left:100px;width:200px;height:100px;background:red">Text</div>
+          <button><span>Nested</span></button></div></section></body></html>'''
+    with HtmlBrowser() as browser:
+        dom=browser.snapshot(html,[300,200],max_nodes=32,visual_geometry=True)
+        tree,_,_=dom_tree(dom);annotate(browser,tree,visual_boxes=True)
+        for edit in ('', 'outer.style.width="110px";outer.scrollLeft=35;outer.scrollTop=20',
+                     'inner.style.visibility="hidden"', 'inner.style.visibility="visible";outer.style.overflow="visible"'):
+            if edit:browser.page.evaluate('() => {'+edit+'}')
+            expected=_original_observation(browser,copy.deepcopy(tree),[300,200],64)
+            actual=abstraction(browser,copy.deepcopy(tree),[300,200],64)
+            assert torch.equal(actual[0],expected[0]) and actual[1:]==expected[1:]
+
+
+def test_cached_asset_hash_reused_and_content_change_detected(tmp_path,monkeypatch):
+    from framediff.lazy_webui import TrainViewCache,_verified_asset_digest,DISK_CACHE_CONTRACT
+    import hashlib
+    asset=tmp_path/'target.png';asset.write_bytes(b'original')
+    (tmp_path/'result.json').write_text(json.dumps(dict(contract=DISK_CACHE_CONTRACT,
+        result={'target_image':str(asset)},assets={str(asset):hashlib.sha256(b'original').hexdigest()})))
+    _verified_asset_digest.cache_clear()
+    calls=[];digest=hashlib.file_digest
+    monkeypatch.setattr(hashlib,'file_digest',lambda *a,**kw:(calls.append(1),digest(*a,**kw))[1])
+    assert TrainViewCache._load_disk(tmp_path)
+    assert TrainViewCache._load_disk(tmp_path)
+    assert len(calls)==1
+    stat=asset.stat();asset.write_bytes(b'modified')
+    os.utime(asset,ns=(stat.st_atime_ns,stat.st_mtime_ns))
+    assert TrainViewCache._load_disk(tmp_path) is None
+    assert len(calls)==2

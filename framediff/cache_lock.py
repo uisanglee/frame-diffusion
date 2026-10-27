@@ -50,5 +50,10 @@ def observation_revision():
     sha=hashlib.sha256(Path(__file__).with_name('online_observation.py').read_bytes()).hexdigest()
     # This snapshot is browser-tested against the previous multi-call collector.
     # Unknown future collector changes must invalidate observations and witnesses.
-    return None if sha=='2459133082882061b46ded9a96109d5745a9c3f1ceaae92cef69a57c32913120' else sha
+    return None if sha in (
+        '2459133082882061b46ded9a96109d5745a9c3f1ceaae92cef69a57c32913120',
+        # Per-observation rectangle/ancestor clip memoization; browser parity
+        # includes CSS reflow, overflow changes, and scrolling between calls.
+        '9eca87cdbfe7126a6648da73a8c17b6ce88914b462687a228218d50536f84867',
+    ) else sha
 
