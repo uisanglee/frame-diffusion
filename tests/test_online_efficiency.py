@@ -249,3 +249,59 @@ def test_definite_lazy_failure_does_not_retry_same_view(tmp_path,monkeypatch):
         with pytest.raises(OnlineGenerationError):sampler.generate(0)
         assert len(calls)==1
     finally:sampler.close();sampler.view_cache.close()
+
+
+def test_preparation_failure_has_one_retry_not_eight(tmp_path,monkeypatch):
+    from framediff.tree_online import OnlineSampler,OnlineGenerationError
+    from test_multiview_regressions import lazy_descriptor
+    row=lazy_descriptor(tmp_path)
+    sampler=OnlineSampler([row],'abstract',attempts=8)
+    calls=[]
+    def fail(*a,**kw):
+        calls.append(1)
+        raise ValueError(f'Lazy normalization failed: original_reload; changed={len(calls)}')
+    monkeypatch.setattr(sampler.view_cache,'get',fail)
+    try:
+        for index in (0,1):
+            with pytest.raises(OnlineGenerationError,match='after 2 attempts'):
+                sampler.generate(index)
+        assert len(calls)==4  # new call retries: no permanent exclusion
+        assert not list(tmp_path.rglob('*.failure.json'))
+    finally:sampler.close();sampler.view_cache.close()
+
+
+def test_post_preparation_errors_keep_generation_retry_budget(tmp_path,monkeypatch):
+    from framediff import tree_online
+    from test_multiview_regressions import lazy_descriptor
+    row=lazy_descriptor(tmp_path)
+    sampler=tree_online.OnlineSampler([row],'abstract',attempts=8)
+    prepared=dict(visible_candidates=[1],target_declaration_state={},target_html='unused',target_image='unused')
+    monkeypatch.setattr(sampler.view_cache,'get',lambda *a,**kw:prepared)
+    calls=[]
+    def fail():
+        calls.append(1)
+        raise ValueError('online generation failure')
+    monkeypatch.setattr(tree_online,'HtmlBrowser',fail)
+    try:
+        with pytest.raises(tree_online.OnlineGenerationError,match='after 8 attempts'):
+            sampler.generate(0)
+        assert len(calls)==8
+    finally:sampler.close();sampler.view_cache.close()
+
+
+@pytest.mark.browser
+def test_transient_preparation_error_recovers_on_second_attempt(tmp_path,monkeypatch):
+    from framediff.tree_online import OnlineSampler
+    from test_multiview_regressions import lazy_descriptor
+    row=lazy_descriptor(tmp_path)
+    sampler=OnlineSampler([row],'abstract',max_noise=1,attempts=8)
+    original=sampler.view_cache.get;calls=[]
+    def get(*a,**kw):
+        calls.append(1)
+        if len(calls)==1:raise ValueError('Temporary page preparation failure')
+        return original(*a,**kw)
+    monkeypatch.setattr(sampler.view_cache,'get',get)
+    try:
+        assert sampler.generate(0)['replacement_edit']
+        assert len(calls)==2
+    finally:sampler.close();sampler.view_cache.close()

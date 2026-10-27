@@ -338,3 +338,11 @@ are retried with full-DOM labels and viewport-visible owner selection. They must
 still pass normalization and editable-candidate inspection. An empty full-DOM
 retry is cached as unusable, without eight repeated attempts in a single probe.
 Successful cache entries remain compatible.
+
+Lazy page preparation gets at most two failed attempts per view within one online
+sample request. Subsequent attempts select other available views; an isolated
+screening probe stops when its sole view exhausts that budget. This also bounds
+`original_reload` failures whose diagnostic numbers vary. Ordinary preparation
+errors do not create permanent exclusions and may be retried by later sample
+requests. The random corruption retry budget is unchanged. Error entries report
+`stage: preparation` or `stage: online_generation`.

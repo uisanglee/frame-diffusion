@@ -112,7 +112,10 @@ def preparation_fingerprint():
                       '2872ad4143b10db90f4bcf0d3ceb578a7549cd7b5e62ceebd30a8b40aa2f602d',
                       # Skip definite failed views within a sample; successful
                       # preparation and corruption semantics are unchanged.
-                      '38de3202ef64ed86b5a15828c69e338cf8ebafdead9a19c828b79689943a384f'):
+                      '38de3202ef64ed86b5a15828c69e338cf8ebafdead9a19c828b79689943a384f',
+                      # Bound failed preparation retries only; completed cache
+                      # contents and successful samples remain identical.
+                      '1dd4559768af77fc7245b0bff545799371c12bf042e1cdbd38af19d119693708'):
         online_sha='e598fecb8a9bb423bba5e9cf118b338f89be0bbe3d83195d5512e4e7c2fbf53d'
     from .cache_lock import observation_revision
     revision=observation_revision()

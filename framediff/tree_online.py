@@ -407,6 +407,7 @@ class OnlineSampler:
         rng=random.Random(task_seed(self.seed,index));errors=[]
         available=self.by_page
         page_ids=self.page_ids
+        preparation_failures=Counter()
         for attempt in range(self.attempts):
             if self.stop is not None and self.stop.is_set(): raise RuntimeError('Online producer stopped')
             # Pages are the statistical units. Select a page first, then one
@@ -414,6 +415,7 @@ class OnlineSampler:
             # six times more than pages with one capture.
             target=rng.choice(available[rng.choice(page_ids)])
             selected=target
+            preparing=False
             try:
                 identity=self.timeout_exclusions.describe(target)
                 if self.timeout_exclusions.contains(identity):
@@ -426,6 +428,7 @@ class OnlineSampler:
                 if descriptor:
                     # Materialization owns a Playwright runtime; close ours first.
                     self.close()
+                    preparing=True
                     prepared=self.view_cache.get(descriptor,policy=True)
                     # _prepare_page already performed and cached the expensive
                     # browser witness probes. Reusing its enriched row avoids
@@ -435,6 +438,7 @@ class OnlineSampler:
                         raise ValueError('Lazy policy cache lacks inspected target metadata')
                     target=copy.deepcopy(prepared)
                     target['id']=descriptor['lazy_source']['id']
+                    preparing=False
                 if self.browser is None: self.browser=HtmlBrowser().__enter__()
                 else: self.browser.reset_context()
                 browser=self.browser;tree=target['current'];viewport=target['viewport']
@@ -548,15 +552,21 @@ class OnlineSampler:
                 return result
             except Exception as exc:
                 errors.append({'page':target['id'],'view':target.get('view','unknown'),
-                               'error_type':type(exc).__name__,'error':str(exc)})
+                               'error_type':type(exc).__name__,'error':str(exc),
+                               'stage':'preparation' if preparing else 'online_generation'})
                 if self.browser is not None:
                     try: self.close()
                     except Exception: self.browser=None
                 from .cache_lock import UnusableTrainView
-                if isinstance(exc,UnusableTrainView):
+                if preparing:preparation_failures[selected['id']]+=1
+                if (isinstance(exc,UnusableTrainView) or
+                    (preparing and preparation_failures[selected['id']]>=2)):
                     # Preparation failure is independent of random corruption.
                     # Try another view, never rebuild the same unusable page
                     # eight times in an isolated screening probe.
+                    # Allow one retry for transient preparation errors. Counts
+                    # are local to this generate call, never permanent tombstones.
+                    # Diagnostic numbers may differ between identical failures.
                     available={page:[row for row in rows if row is not selected]
                                for page,rows in available.items()}
                     page_ids=[page for page in page_ids if available[page]]

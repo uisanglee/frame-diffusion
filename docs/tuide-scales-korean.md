@@ -366,3 +366,11 @@ python scripts/retry_screen_geometry_failures.py --out data/webui-full-dom-scree
 ```bash
 python scripts/retry_screen_geometry_failures.py --out data/webui-full-dom-screened-40k-v1 --include-visible
 ```
+
+온라인 샘플 생성 중 lazy 페이지 준비(렌더링·정규화·라벨 갱신)는 같은 뷰에서
+최대 두 번 시도합니다. 두 번 모두 실패하면 해당 샘플 생성에서는 그 뷰를 제외하고,
+다른 뷰가 있으면 남은 시도 예산 안에서 계속합니다. 따라서 `original_reload`의
+세부 진단 수치가 달라져도 같은 준비 작업을 8번 반복하지 않습니다. 일반 준비
+오류는 영구 실패 캐시에 추가하지 않으며 다음 샘플에서는 다시 시도할 수 있습니다.
+무작위 corruption 생성의 최대 시도 횟수는 기존대로 유지합니다. 오류 항목의
+`stage`는 `preparation` 또는 `online_generation`으로 표시됩니다.
