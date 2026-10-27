@@ -10,6 +10,28 @@ from framediff.preparation_workers import write_jsonl
 from framediff.webui_screen import RowIndex,page_inventory,publish,result_record,select_split,screen_view
 
 
+def test_geometry_retry_preserves_successes_and_refuses_active_or_published_run(tmp_path):
+    import fcntl
+    import runpy
+    requeue=runpy.run_path(str(Path(__file__).resolve().parents[1]/'scripts/retry_screen_geometry_failures.py'))['requeue']
+    folder=tmp_path/'screening/train';folder.mkdir(parents=True)
+    (folder.parent/'config.json').write_text('{}')
+    records=[dict(status='accepted'),dict(status='rejected',error='timeout'),
+             dict(status='rejected',error='target: label geometry mismatch (element geometry changed)')]
+    for i,r in enumerate(records):(folder/f'{i}.json').write_text(json.dumps(r))
+    with (tmp_path/'.screening.lock').open('a') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        with pytest.raises(RuntimeError,match='Stop screening'):requeue(tmp_path)
+    result=requeue(tmp_path)
+    assert result['requeued']==1
+    assert json.loads((Path(result['backup'])/'train/2.json').read_text())==records[2]
+    assert not (folder/'2.json').exists()
+    assert all(json.loads((folder/f'{i}.json').read_text())==records[i] for i in (0,1))
+    assert requeue(tmp_path)['requeued']==0
+    (tmp_path/'READY.json').write_text('{}')
+    with pytest.raises(ValueError,match='already published'):requeue(tmp_path)
+
+
 def test_existing_input_or_unrelated_output_is_not_overwritten(tmp_path):
     from framediff.webui_screen import run
     source=tmp_path/'source';detector=tmp_path/'detector'

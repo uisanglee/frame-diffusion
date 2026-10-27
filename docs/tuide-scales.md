@@ -315,3 +315,19 @@ Resume with the same command. Completion creates
 `40000/` directory. Retain original assets and the shared cache, and use new training
 run directories. For safe termination use the 7k PID-check command with
 `log/prepare-screened-40k.pid`.
+
+### Retry legacy-classification geometry rejections
+
+Relabel validates stored boxes using their original classification contract before
+producing full-DOM labels. Classification-only migration no longer counts as geometry
+drift; actual shifts remain rejected. Successful preparation cache keys remain unchanged.
+Stop the unfinished screening run with SIGTERM and wait for cleanup, pull the update,
+then run:
+
+```bash
+python scripts/retry_screen_geometry_failures.py --out data/webui-full-dom-screened-40k-v1
+```
+
+Relaunch the same preparation command. Only geometry rejection records are moved to a
+backup directory; success and timeout records remain. Use the 7k output root for a 7k
+run. The utility refuses active runs and published datasets with READY.json.

@@ -18,6 +18,8 @@ from .web_experiment import digest, guard_run
 # Semantic cache revision: text-fragment caches must not be reused as owner boxes.
 # Bump when supervision/eligibility semantics change, not for logging-only edits.
 CACHE_REVISION='policy-full-dom-owner-box-v2'
+# Successful full-DOM outputs are unchanged by legacy validation fixes. Keep
+# their cache revision; failed attempts do not produce successful cache entries.
 
 
 def geometry_preservation(row, prefix, boxes, items, tolerance=1.0):
@@ -87,13 +89,28 @@ def refresh_row(row, out, size=384, clean_only=False):
         observations={};preservation={}
         for prefix in (('target',) if clean_only else ('target','current')):
             browser.load(Path(row[prefix+'_html']).read_text(),row['viewport'])
+            legacy_items=None
+            if row['current'].get('visual_geometry_contract') is None and row.get(prefix+'_elements'):
+                # Compare saved labels under the SAME extraction contract.
+                # Full-DOM classification may legitimately replace transparent
+                # text/borders or suppress invisible ancestors. This is label
+                # migration, not geometry drift. No extra load or PNG capture.
+                from .visual import elements
+                from .explicit_html import current_clip_boxes
+                legacy_tree=copy.deepcopy(row['current'])
+                annotate(browser,legacy_tree)
+                ids=[n['id'] for n in legacy_tree['nodes'][1:]]
+                legacy_boxes=browser.tagged_boxes(ids)
+                legacy_boxes[legacy_tree['nodes'][0]['id']]=[0,0,*row['viewport']]
+                legacy_items=elements(legacy_tree,legacy_boxes,row['viewport'],current_clip_boxes(browser,ids))
             annotate(browser,tree,visual_boxes=True)
             mask,boxes,items=abstraction(browser,tree,row['viewport'],size)
             # Header-only check; existing image is not decoded or recaptured.
             with Image.open(row[prefix+'_image']) as saved:
                 if saved.size!=tuple(row['viewport']):
                     raise ValueError(f'{prefix}: image dimensions mismatch')
-            preservation[prefix]=geometry_preservation(row,prefix,boxes,items)
+            preservation[prefix]=geometry_preservation(row,prefix,boxes,
+                legacy_items if legacy_items is not None else items)
             parsed=css_owners.read(browser,tree)
             if parsed['owners']!=row['css_owners']:
                 raise ValueError(f'{prefix}: CSS owners changed')

@@ -130,10 +130,10 @@ def test_failure_categories(error,reason):
     assert failure_reason(error)==reason
 
 
-def fixture(tmp_path):
+def fixture(tmp_path, html=None):
     from framediff.tree_online import abstraction
     with HtmlBrowser() as b:
-        dom=b.snapshot('<body style="margin:0"><div class="card" style="width:200px;height:50px;margin-left:10px;background:red">Hello</div></body>',[400,200],max_nodes=32)
+        dom=b.snapshot(html or '<body style="margin:0"><div class="card" style="width:200px;height:50px;margin-left:10px;background:red">Hello</div></body>',[400,200],max_nodes=32)
         tree,boxes,_=dom_tree(dom);annotate(b,tree)
         target=b.page.content();parsed=css_owners.read(b,tree)
         nid=b.page.locator('.card').get_attribute('data-fd-id')
@@ -153,6 +153,46 @@ def fixture(tmp_path):
         path=tmp_path/(key+('.html' if isinstance(value,str) else '.png'))
         path.write_bytes(value.encode() if isinstance(value,str) else value);row[key]=str(path)
     return row
+
+
+def test_legacy_classification_change_preserves_identical_render(tmp_path,monkeypatch):
+    """Migrate classifications without rejecting unchanged HTML or recapturing."""
+    from framediff.tree_online import abstraction
+    from framediff.visual import elements
+    row=fixture(tmp_path, '<body style="margin:0"><div class="card" style="width:200px;height:50px;margin-left:10px;background:red;color:transparent">Hello</div></body>')
+    assert row['target_elements'][0]['label']==1  # Legacy: own text, even transparent.
+    with HtmlBrowser() as browser:
+        browser.load(Path(row['target_html']).read_text(),row['viewport'])
+        png,_=browser.stable_capture()
+        tree=copy.deepcopy(row['current']);annotate(browser,tree,visual_boxes=True)
+        offline_items=copy.deepcopy(tree['full_visual_elements'])
+        _,boxes,items=abstraction(browser,tree,row['viewport'],64)
+        assert png==Path(row['target_image']).read_bytes()
+        assert boxes==row['target_boxes']
+        assert items[0]['box']==row['target_elements'][0]['box']
+        assert items[0]['label']==4  # Full DOM: visible painted region.
+        # Full-DOM offline collector and online collector agree.
+        assert items==offline_items==elements(tree,boxes,row['viewport'])
+    before={k:Path(row[k]).read_bytes() for k in ('target_html','target_image','current_html','current_image')}
+    def no_capture(*a,**kw):raise AssertionError('No screenshots needed for relabel')
+    monkeypatch.setattr(HtmlBrowser,'stable_capture',no_capture)
+    for clean_only in (True,False):
+        updated=refresh_row(row,tmp_path/str(clean_only),64,clean_only=clean_only)
+        assert updated['target_elements'][0]['label']==4
+        assert updated['visual_geometry_contract']==VISUAL_GEOMETRY_CONTRACT
+    assert all(Path(row[k]).read_bytes()==v for k,v in before.items())
+    # Old normalizer rows can lack target_boxes: verify their saved legacy
+    # elements, never substitute the corrupted current_boxes as target boxes.
+    no_boxes=copy.deepcopy(row);no_boxes.pop('target_boxes')
+    assert refresh_row(no_boxes,tmp_path/'no-boxes',64,clean_only=True)['target_elements'][0]['label']==4
+    shifted=copy.deepcopy(no_boxes)
+    shifted['target_elements'][0]['box'][0]+=5
+    with pytest.raises(ValueError,match='element geometry changed'):
+        refresh_row(shifted,tmp_path/'real-drift',64,clean_only=True)
+    # Already full-DOM labels still require matching categories.
+    wrong=copy.deepcopy(updated);wrong['target_elements'][0]['label']=1
+    with pytest.raises(ValueError,match='element geometry changed'):
+        refresh_row(wrong,tmp_path/'wrong-new-label',64,clean_only=True)
 
 
 def test_relabel_preserves_assets_teacher_and_both_training_modes(tmp_path,monkeypatch):

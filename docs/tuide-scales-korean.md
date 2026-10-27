@@ -338,3 +338,21 @@ nohup setsid env PYTHONUNBUFFERED=1 PREPARE_WORKERS=4 \
 학습 입력은 `data/webui-full-dom-screened-40k-v1/40000`입니다.
 기존 master와 공유 캐시는 삭제하지 마세요. 학습은 새 run 디렉터리를 사용합니다.
 안전한 종료는 위 7k 명령에서 PID 파일만 `log/prepare-screened-40k.pid`로 바꿉니다.
+
+### 구버전 분류 차이로 실패한 검사 재개
+
+정규화된 HTML의 저장 박스는 저장 당시 분류 기준으로 검증한 뒤 최신 full-DOM
+라벨로 갱신합니다. 투명 텍스트 등의 분류 변경만으로 geometry 오류를 내지 않으며,
+실제 박스 변화는 계속 거부합니다. 기존 성공 캐시의 키와 라벨 형식은 유지합니다.
+
+이전 버전으로 검사 중이었다면 먼저 PID 파일로 SIGTERM을 보내 종료하고, 종료가
+끝난 뒤 최신 코드를 pull하세요. 다음 명령은 geometry 실패 기록만 백업 폴더로
+옮겨 재검사 대상으로 만듭니다. 성공 기록과 timeout 제외 기록은 유지합니다.
+
+```bash
+python scripts/retry_screen_geometry_failures.py --out data/webui-full-dom-screened-40k-v1
+```
+
+그다음 기존 40k 실행 명령을 그대로 재실행합니다. 7k는 `--out`을
+`data/webui-full-dom-screened-7k-v1`로 지정하세요. 실행 중인 전처리나 이미
+`READY.json`이 생성된 완성 데이터셋은 이 명령으로 변경할 수 없습니다.
