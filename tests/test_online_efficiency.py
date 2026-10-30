@@ -43,7 +43,7 @@ def test_restart_does_not_interrupt_running_worker(tmp_path):
         expected=int((tmp_path/'healthy').read_text())
         with pytest.raises(TimeoutError):slow.result(timeout=.1)
         pool.restart(slow)
-        assert any(s.process.pid==expected and s.process.is_alive() for s in pool.slots)
+        assert any(s.worker_pid==expected and s.process.is_alive() for s in pool.slots)
         (tmp_path/'release').touch()
         assert healthy.result(timeout=20)==expected
         assert slow.result(timeout=20)[0]==7

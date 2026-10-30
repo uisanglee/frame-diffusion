@@ -374,3 +374,48 @@ python scripts/retry_screen_geometry_failures.py --out data/webui-full-dom-scree
 오류는 영구 실패 캐시에 추가하지 않으며 다음 샘플에서는 다시 시도할 수 있습니다.
 무작위 corruption 생성의 최대 시도 횟수는 기존대로 유지합니다. 오류 항목의
 `stage`는 `preparation` 또는 `online_generation`으로 표시됩니다.
+
+### 학습 자원 정리와 안전한 종료
+
+Detector·TUIDE abstract·screenshot 학습은 SIGTERM/SIGINT를 받으면 워커와
+그 하위 브라우저 프로세스를 정리합니다. 실행용 bash만 종료하지 말고,
+아래 목록에서 `--out`이 해당 실험인 **학습 Python PID**를 확인하세요.
+
+```bash
+ps -u "$USER" -o pid,ppid,args | grep -E '[p]ython.*framediff.*visual-(tree-train|train-detector)'
+# 12345를 종료할 학습 Python PID로 바꿉니다.
+kill -TERM 12345
+```
+
+정리가 끝날 때까지 기다리고 즉시 `kill -9`를 보내지 마세요. 동일 명령으로
+최근 저장된 체크포인트부터 재개합니다. 종료 중인 optimizer step을 별도 저장하지는
+않습니다. SIGKILL·드라이버 멈춤·전원 차단은 이 처리로 정리할 수 없습니다.
+이미 실행 중인 작업은 수정된 코드를 사용하도록 다시 시작해야 합니다.
+
+공유 Chromium은 기본 100개 컨텍스트 사용 후 다음 컨텍스트를 열기 전에 재시작합니다.
+`TUIDE_BROWSER_MAX_CONTEXTS=100`으로 조절할 수 있으며 양의 정수를 사용합니다.
+진행 중인 corruption/repair probe는 중단하지 않습니다. 이는 재사용 기간의 제한이며
+RAM 용량 제한은 아니므로, 매우 무거운 단일 페이지의 메모리 사용까지 막지는 않습니다.
+기존 캐시 형식·데이터 서명·모델 설정·체크포인트 형식은 바뀌지 않습니다.
+워커별 학습 대상 목록은 여전히 별도 메모리를 사용하므로 워커 수를 늘리면 RAM 사용도
+늘어납니다. 현재 실험은 `ONLINE_WORKERS=4 ONLINE_PREFETCH=8`을 유지하세요.
+
+Stage 2에서 목표 예측 캐시가 없을 때 Detector는 **최대 2개씩 추론**합니다.
+TUIDE의 `BATCH_SIZE`·`ACCUMULATION`과 별개이며, 기존 예측 캐시·체크포인트를
+그대로 읽습니다. Detector의 정밀도와 리사이즈 설정은 유지합니다. 순간 추론
+메모리를 줄이지만 Detector는 여전히 학습 GPU에 상주합니다. 전체 목표를 미리
+추론하거나 다른 GPU로 이동하는 변경은 아닙니다.
+
+온라인 워커마다 가벼운 감독 프로세스를 추가했습니다. Linux에서는 subreaper를
+설정해 렌더링 워커가 비정상 종료되어도 분리된 브라우저 자식을 회수합니다.
+감독 프로세스에 전체 학습 대상 목록을 복제하지 않습니다. 응답 수신도 제한된
+큐를 사용하는 스레드로 분리해, 메시지가 일부만 도착해도 타임아웃 검사를
+진행합니다. 워커 회수 시 수신 스레드도 종료합니다. Linux 서버에서는 아래로
+전용 고아 프로세스 통합 테스트까지 실행할 수 있습니다.
+
+```bash
+python -m pytest -q tests/test_worker_ipc_recovery.py tests/test_training_shutdown.py
+```
+
+수정된 코드를 반영하려면 학습 프로세스를 다시 시작해야 합니다. GPU 하드웨어
+장애나 물리적인 전원 차단의 원인을 확인하거나 해결했다는 뜻은 아닙니다.

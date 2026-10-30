@@ -431,6 +431,28 @@ def test_lazy_training_cache_stage2_and_resume(tmp_path,monkeypatch):
             assert torch.load(checkpoint,weights_only=True)['online_cursor']==2
             assert list(read_jsonl(out/'validation.jsonl'))[-1]['validation_complete']
             assert cached_assets()==prepared_assets, (mode,predicted)
+            # Completed resumes must still validate inputs but never construct
+            # either GPU model, an optimizer, or online rendering workers.
+            with monkeypatch.context() as terminal:
+                import framediff.tree_policy as policy
+                import framediff.visual_train as visual_train
+                import framediff.tree_online as online
+                def unexpected(*a,**kw):raise AssertionError('Completed run allocated training resources')
+                terminal.setattr(policy,'TreePolicy',unexpected)
+                terminal.setattr(visual_train,'load_detector',unexpected)
+                terminal.setattr(online,'OnlineStream',unexpected)
+                terminal.setattr(torch.optim,'AdamW',unexpected)
+                before=(out/'validation.jsonl').read_bytes()
+                main([*args,'--steps','2','--resume',str(checkpoint)])
+                stopped=torch.load(checkpoint,weights_only=True)
+                stopped['early_stopping']['stopped']=True
+                stopped_path=out/'stopped-test.pt';torch.save(stopped,stopped_path)
+                main([*args,'--steps','3','--resume',str(stopped_path)])
+                stopped['data_signature']={}
+                torch.save(stopped,stopped_path)
+                with pytest.raises(ValueError,match='Resume data changed'):
+                    main([*args,'--steps','3','--resume',str(stopped_path)])
+                assert (out/'validation.jsonl').read_bytes()==before
     finally:cache.close()
 
 

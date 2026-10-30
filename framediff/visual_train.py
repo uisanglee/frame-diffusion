@@ -16,6 +16,7 @@ from .train import select_device,seed_all
 from .visual import CONTRACT,CLASSES,abstract_image
 from .visual_data import validate_splits
 from .web_experiment import digest,guard_run
+from .training_shutdown import cleanup_on_termination
 
 
 def guard_detector_resume(out, config, resume):
@@ -133,6 +134,7 @@ def detector_quality(net,rows,device,threshold=.4,workers=0,prefetch=2):
             'detector_label_coverage':label_coverage(rows)}
 
 
+@cleanup_on_termination
 def train(args):
     with contextlib.ExitStack() as stack:
         return _train(args,stack)

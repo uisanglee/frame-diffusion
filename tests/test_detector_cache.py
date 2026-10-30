@@ -341,3 +341,23 @@ def test_prediction_cache_batches_unique_misses_and_survives_restart(tmp_path,mo
     for path in tmp_path.glob('*.json'):path.write_text('{bad')
     cache=TargetPredictionCache(tmp_path,'checkpoint-a',.4)
     assert cache.predict(None,images)==first[:2] and calls==[2,2,2]
+
+
+def test_prediction_cache_limits_inference_to_two_and_preserves_order(tmp_path,monkeypatch):
+    import framediff.visual_train as train
+    calls=[]
+    def detect(net,images,threshold):
+        calls.append(len(images))
+        return [[dict(box=[0,0,1,1],label=4,score=float(image[0,0,0]))] for image in images]
+    monkeypatch.setattr(train,'detect_batch',detect)
+    images=[]
+    for value in (25,50,75,100,125):
+        buf=io.BytesIO();Image.new('RGB',(5,5),(value,0,0)).save(buf,format='PNG');images.append(buf.getvalue())
+    cache=TargetPredictionCache(tmp_path,'microbatch-checkpoint',.0)
+    first=cache.predict(None,images+[images[0]])
+    assert calls==[2,2,1]
+    assert [row[0]['score'] for row in first[:5]]==pytest.approx([v/255 for v in (25,50,75,100,125)])
+    assert first[-1]==first[0]
+    cache=TargetPredictionCache(tmp_path,'microbatch-checkpoint',.0)
+    assert cache.predict(None,images)==first[:5]
+    assert calls==[2,2,1]

@@ -70,6 +70,8 @@ def inspection_fingerprint():
             **{name: digest(root/name) for name in
                ('tree_edits.py','css_owners.py','html_bridge.py','browser.py','visual.py','explicit_html.py')},
             'playwright': version('playwright')}
+    from .browser_fingerprint import compatible_browser_digest
+    fingerprint['browser.py']=compatible_browser_digest(fingerprint['browser.py'])
     from .cache_lock import observation_revision
     revision=observation_revision()
     if revision is not None:fingerprint['online_observation.py']=revision
@@ -611,7 +613,10 @@ class OnlineStream:
         for error in errors:self.failure_views[error.get('view','unknown')]+=1
 
     def __enter__(self):
-        self._start_pool();return self
+        try:
+            self._start_pool();return self
+        except BaseException:
+            self._stop_pool();raise
 
     def _start_pool(self):
         from .online_workers import OnlineWorkerPool

@@ -190,16 +190,20 @@ class TargetPredictionCache:
             if items is None:missing[key]=data
             else:results[key]=items;self.hits+=1
         if missing:
-            predictions=detect_batch(net,[detector_input(data) for data in missing.values()],self.threshold)
-            for key,items in zip(missing,predictions):
-                self.misses+=1;results[key]=items;self.remember(key,items)
-                temporary=None
-                try:
-                    with tempfile.NamedTemporaryFile(mode='w',dir=self.folder,delete=False) as file:
-                        temporary=Path(file.name);json.dump({'key':key,'items':items},file,allow_nan=False)
-                    os.replace(temporary,self.folder/f'{key}.json')
-                finally:
-                    if temporary is not None:temporary.unlink(missing_ok=True)
+            pending=list(missing)
+            # Separate detector inference microbatches from policy training batch.
+            for offset in range(0,len(pending),2):
+                chunk=pending[offset:offset+2]
+                predictions=detect_batch(net,[detector_input(missing[key]) for key in chunk],self.threshold)
+                for key,items in zip(chunk,predictions):
+                    self.misses+=1;results[key]=items;self.remember(key,items)
+                    temporary=None
+                    try:
+                        with tempfile.NamedTemporaryFile(mode='w',dir=self.folder,delete=False) as file:
+                            temporary=Path(file.name);json.dump({'key':key,'items':items},file,allow_nan=False)
+                        os.replace(temporary,self.folder/f'{key}.json')
+                    finally:
+                        if temporary is not None:temporary.unlink(missing_ok=True)
         return [results[key] for key in keys]
 
 
@@ -254,7 +258,10 @@ class DetectorStream:
     def __enter__(self):
         self.pool=ProcessPoolExecutor(self.workers,mp_context=mp.get_context('spawn'),
             initializer=initialize,initargs=(self.pools,self.cache_dir))
-        self.fill();return self
+        try:
+            self.fill();return self
+        except BaseException:
+            self.__exit__();raise
 
     def fill(self):
         from .visual_train import sample_page_views

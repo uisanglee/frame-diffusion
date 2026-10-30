@@ -346,3 +346,48 @@ screening probe stops when its sole view exhausts that budget. This also bounds
 errors do not create permanent exclusions and may be retried by later sample
 requests. The random corruption retry budget is unchanged. Error entries report
 `stage: preparation` or `stage: online_generation`.
+
+### Training resource lifecycle and stopping
+
+Detector, abstract and screenshot training now handle SIGTERM/SIGINT by unwinding
+worker contexts and cleaning up their browser descendants. Signal the training
+**Python PID**, not only its launching shell. Find the exact run first:
+
+```bash
+ps -u "$USER" -o pid,ppid,args | grep -E '[p]ython.*framediff.*visual-(tree-train|train-detector)'
+# Replace 12345 with the Python PID whose --out matches the desired run.
+kill -TERM 12345
+```
+
+Wait for cleanup; do not immediately follow with SIGKILL. Resume with the same
+training command from the latest saved checkpoint. Termination does not save a
+partially completed optimizer step. SIGKILL, driver hangs and power loss cannot
+be handled by this cleanup. Already running jobs must be restarted to load it.
+
+Shared Chromium processes are recycled between contexts after 100 contexts by
+default (`TUIDE_BROWSER_MAX_CONTEXTS=100`, positive integer). A corruption/repair
+probe is never interrupted by this limit. This bounds browser reuse duration,
+not RSS: one unusually heavy page can still require substantial memory. Cache
+formats, data signatures, model settings and checkpoint formats are unchanged.
+Worker target manifests remain process-local copies; increasing workers still
+increases RAM use. Keep `ONLINE_WORKERS=4 ONLINE_PREFETCH=8` for these runs.
+
+Stage 2 lazy target inference now processes at most **two cache misses per detector
+forward pass**, independent of `BATCH_SIZE`/`ACCUMULATION`. Existing predictions
+and checkpoints remain readable; precision and detector resize settings are
+unchanged. This reduces inference peaks but keeps the detector resident on the
+policy GPU. It does not precompute all targets or move detection to another GPU.
+
+Online workers now have lightweight owner processes. On Linux each owner enables
+child-subreaper mode so detached browser descendants remain reclaimable after a
+rendering worker crashes. Owners receive no target manifest copy. A bounded
+receiver thread keeps partial IPC responses from blocking timeout checks; retired
+receivers are stopped when their workers are reclaimed. Linux-only orphan cleanup
+can be checked on the training server with:
+
+```bash
+python -m pytest -q tests/test_worker_ipc_recovery.py tests/test_training_shutdown.py
+```
+
+These changes require restarting the training process with the updated code.
+They are not a diagnosis or cure for GPU hardware faults or physical power loss.

@@ -21,6 +21,7 @@ from .tree_edits import CONTRACT, FIELDS, EditTokenizer, extract, validate_edit
 from .visual import SpatialEncoder, elements, image_tensor,BOUNDARY_CONTRACT
 from .visual_data import validate_splits
 from .web_experiment import digest, guard_run
+from .training_shutdown import cleanup_on_termination
 
 KIND = 'visual-policy-css-tree-v1'
 
@@ -365,6 +366,31 @@ def symbolic_policy_metrics(net,rows,target_states,device,predicted,amp):
                 for field,v in per_property.items()}}
 
 
+def detector_training_provenance(rows, geometry_contract):
+    """Validate each row's target reference, aggregate each provenance once."""
+    groups=set();hashes=set();seen_paths=set();seen_objects={}
+    for row in rows:
+        if not row.get('predicted_target_elements') and not row.get('lazy_detector'):
+            raise ValueError('Missing detector target cache')
+        source=row.get('parser_provenance')
+        if isinstance(source,str):
+            path=Path(source).resolve()
+            if path in seen_paths:continue
+            source=read_json(path)
+            seen_paths.add(path)
+        else:
+            if id(source) in seen_objects:continue
+            seen_objects[id(source)]=source
+        if not isinstance(source,dict) or not source:
+            raise ValueError('Missing detector training provenance')
+        if source.get('visual_geometry_contract')!=geometry_contract:
+            raise ValueError('Detector target cache and policy visual label versions differ')
+        groups.update(source.get('parser_training_groups',[]))
+        hashes.update(source.get('parser_training_hashes',[]))
+    return groups,hashes
+
+
+@cleanup_on_termination
 def train(args):
     from .visual_train import validation_sample, update_early_stopping
     resolve_policy_scale(args)
@@ -457,46 +483,46 @@ def train(args):
         raise ValueError('Old occupancy-only policy checkpoint; train a new occupancy+boundary policy. Detector weights can be reused.')
     if ck and (ck.get('kind')!=KIND or TreeConfig(**ck['config'])!=cfg): raise ValueError('Incompatible policy checkpoint; detector reuse is separate')
     groups={r['group'] for r in training};hashes={r['source_sha'] for r in training}
-    parser_groups=set();parser_hashes=set();provenance={}
+    parser_groups=set();parser_hashes=set()
     if args.predicted_targets:
         if not cfg.semantic: raise ValueError('Predicted abstraction applies only to abstract policy')
-        for row in training+validation:
-            if not row.get('predicted_target_elements') and not row.get('lazy_detector'): raise ValueError('Missing detector target cache')
-            source=row.get('parser_provenance')
-            if isinstance(source,str):
-                if source not in provenance: provenance[source]=read_json(source)
-                source=provenance[source]
-            if not source: raise ValueError('Missing detector training provenance')
-            if source.get('visual_geometry_contract')!=cfg.visual_geometry_contract:
-                raise ValueError('Detector target cache and policy visual label versions differ')
-            parser_groups.update(source.get('parser_training_groups',[]));parser_hashes.update(source.get('parser_training_hashes',[]))
+        parser_groups,parser_hashes=detector_training_provenance(
+            (row for dataset in (training,validation) for row in dataset),cfg.visual_geometry_contract)
     if ck:
         groups.update(ck.get('training_groups',[]));hashes.update(ck.get('training_hashes',[]))
         parser_groups.update(ck.get('parser_training_groups',[]));parser_hashes.update(ck.get('parser_training_hashes',[]))
     if (groups|parser_groups)&{r['group'] for r in validation} or (hashes|parser_hashes)&{r['source_sha'] for r in validation}:
         raise ValueError('Validation overlaps policy/detector training')
-    net=TreePolicy(cfg,not args.no_pretrained and ck is None).to(device)
-    lazy_detector=None
+    lazy_config=None
     if args.predicted_targets and any(r.get('lazy_detector') for r in training):
-        from .visual_train import load_detector
-        from .detector_support import TargetPredictionCache
         configs={tuple(sorted(r['lazy_detector'].items())) for r in training if r.get('lazy_detector')}
         if len(configs)!=1:raise ValueError('Mixed lazy detector configurations')
         lazy_config=dict(next(iter(configs)))
         if digest(lazy_config['checkpoint'])!=lazy_config['sha']:raise ValueError('Lazy detector checkpoint changed')
-        lazy_detector,_=load_detector(lazy_config['checkpoint'],device)
+    # Preserve all configuration/provenance/data checks, but do not allocate
+    # policy, detector or optimizer tensors for a completed resume.
+    if args.resume:
+        if ck['data_signature']!=signatures: raise ValueError('Resume data changed')
+        if ck['early_stopping']['stopped']:
+            print('Early stopping already completed; keeping best.pt',flush=True);return
+        if ck['step']>=args.steps:
+            print(f"Already completed {ck['step']} steps; no models or online workers started",flush=True);return
+    net=TreePolicy(cfg,not args.no_pretrained and ck is None).to(device)
+    lazy_detector=None
+    if lazy_config is not None:
+        from .visual_train import load_detector
+        from .detector_support import TargetPredictionCache
+        lazy_detector,detector_checkpoint=load_detector(lazy_config['checkpoint'],device)
+        del detector_checkpoint  # Weights are loaded; do not retain its CPU optimizer/model copy.
         prediction_cache=TargetPredictionCache(Path(args.train).resolve().parent/'.target-predictions',
                                               lazy_config['sha'],lazy_config['threshold'])
     optimizer=torch.optim.AdamW(net.parameters(),lr=args.lr,weight_decay=.01)
     rng=random.Random(args.seed);start=0;best=float('inf');early={'reference_loss':float('inf'),'bad_validations':0,'stopped':False}
     if ck: net.load_state_dict(ck['model'])
     if args.resume:
-        if ck['data_signature']!=signatures: raise ValueError('Resume data changed')
         optimizer.load_state_dict(ck['optimizer']);rng.setstate(ck['rng']);torch.set_rng_state(ck['torch_rng'].cpu())
         if device.startswith('cuda') and ck.get('cuda_rng'): torch.cuda.set_rng_state_all(ck['cuda_rng'])
         start=ck['step'];best=ck['best'];early=ck['early_stopping']
-        if early['stopped']: print('Early stopping already completed; keeping best.pt',flush=True);return
-        if start>=args.steps: print(f'Already completed {start} steps; no online workers started',flush=True);return
     selected=validation_sample(validation,args.val_samples)
     if cfg.parent_first:
         from .parent_first import relabel_validation

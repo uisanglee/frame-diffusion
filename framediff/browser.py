@@ -1,10 +1,15 @@
 from pathlib import Path
+import os
 from .ir import compile_html
 
 class _Runtime:
     def __init__(self):
         self.pw = self.browser = None
         self.active = False
+        self.contexts = 0
+        self.max_contexts = int(os.environ.get('TUIDE_BROWSER_MAX_CONTEXTS', '100'))
+        if self.max_contexts < 1:
+            raise ValueError('TUIDE_BROWSER_MAX_CONTEXTS must be positive')
 
     def start(self):
         if self.pw is not None:
@@ -20,6 +25,7 @@ class _Runtime:
     def close(self):
         browser, pw = self.browser, self.pw
         self.browser = self.pw = None
+        self.contexts = 0
         try:
             if browser is not None:
                 browser.close()
@@ -69,7 +75,12 @@ class Browser:
         self._runtime.start()
         self.pw, self.browser = self._runtime.pw, self._runtime.browser
     def _new_context(self):
+        # Only recycle between pages, never during a corruption/repair probe.
+        if self._shared and self._runtime.contexts >= self._runtime.max_contexts:
+            self._runtime.close()
+            self._start_runtime()
         self.context=self.browser.new_context(java_script_enabled=False)
+        self._runtime.contexts += 1
         self.context.route('**/*',lambda route:route.abort())
         self.page=self.context.new_page()
     def reset_context(self):

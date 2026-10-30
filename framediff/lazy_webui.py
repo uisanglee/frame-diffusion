@@ -79,6 +79,8 @@ def preparation_fingerprint():
               and getattr(node,'name',None) not in excluded
               and not (isinstance(node,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='_sampler' for t in node.targets))]
     hashes={name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in names}
+    from .browser_fingerprint import compatible_browser_digest
+    hashes['browser.py']=compatible_browser_digest(hashes['browser.py'])
     # Optional seed-file retention changes storage only; preserve existing keys.
     if hashes['tree_normalize.py'] in (
         '5f2f562d97282db97fcbe96f6ab5cb2bfccfd347519eaeba3973a810bde6315c',
@@ -115,7 +117,9 @@ def preparation_fingerprint():
                       '38de3202ef64ed86b5a15828c69e338cf8ebafdead9a19c828b79689943a384f',
                       # Bound failed preparation retries only; completed cache
                       # contents and successful samples remain identical.
-                      '1dd4559768af77fc7245b0bff545799371c12bf042e1cdbd38af19d119693708'):
+                      '1dd4559768af77fc7245b0bff545799371c12bf042e1cdbd38af19d119693708',
+                      # Audited browser-lifecycle fingerprint compatibility.
+                      'd7d137b091cb2ec6c557f8b140cc67b595bf192c26cec7fa036baae80bd5d0da'):
         online_sha='e598fecb8a9bb423bba5e9cf118b338f89be0bbe3d83195d5512e4e7c2fbf53d'
     from .cache_lock import observation_revision
     revision=observation_revision()

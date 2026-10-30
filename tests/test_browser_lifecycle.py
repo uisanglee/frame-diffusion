@@ -64,6 +64,42 @@ def test_shared_leases_reuse_browser_not_context(runtime):
     assert browser.close.call_count == runtime.stop.call_count == 1
 
 
+def test_shared_browser_recycles_only_between_contexts(runtime, monkeypatch):
+    monkeypatch.setenv('TUIDE_BROWSER_MAX_CONTEXTS', '2')
+    enable_worker_browser()
+    with Browser() as lease:
+        lease.reset_context()
+        assert runtime.chromium.launch.call_count == 1
+        lease.reset_context()
+        assert runtime.chromium.launch.call_count == 2
+        assert runtime.stop.call_count == 1
+    with Browser():pass
+    assert runtime.chromium.launch.call_count == 2
+    with Browser():pass
+    assert runtime.chromium.launch.call_count == 3
+
+
+def test_browser_recycle_limit_must_be_positive(monkeypatch):
+    monkeypatch.setenv('TUIDE_BROWSER_MAX_CONTEXTS', '0')
+    with pytest.raises(ValueError, match='must be positive'):
+        with Browser():pass
+
+
+@pytest.mark.browser
+def test_recycling_preserves_pixels_and_geometry(monkeypatch):
+    monkeypatch.setenv('TUIDE_BROWSER_MAX_CONTEXTS', '1')
+    enable_worker_browser()
+    observations=[]
+    try:
+        for _ in range(3):
+            with Browser() as lease:
+                lease.page.set_viewport_size({'width':320,'height':240})
+                lease.page.set_content('<div style="width:120px;height:80px;margin:16px;background:red">Test</div>')
+                observations.append((lease.page.screenshot(),lease.page.locator('div').bounding_box()))
+        assert observations[0] == observations[1] == observations[2]
+    finally:close_worker_browser()
+
+
 def test_shared_exit_close_failure_discards_runtime(runtime):
     enable_worker_browser()
     with pytest.raises(RuntimeError, match='close failed'):
