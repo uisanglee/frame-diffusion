@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# One initial VLM, seed 42, all three datasets. Run independently per GPU.
+set -euo pipefail
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$repo_root"
+if [[ $# -ne 1 ]]; then
+  echo 'Usage: bash scripts/run_paper_seed42.sh {qwen|llava}' >&2
+  exit 2
+fi
+case "$1" in
+  qwen)
+    export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+    export VLM_SPECS='qwen3vl8b|qwen|Qwen/Qwen3-VL-8B-Instruct|bf16'
+    output=runs/paper-qwen3vl8b-seed42-16k ;;
+  llava)
+    export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1}
+    export VLM_SPECS='llava-next-7b|hf|llava-hf/llava-v1.6-mistral-7b-hf|4bit'
+    output=runs/paper-llava-next-7b-seed42-16k ;;
+  *) echo 'Model must be qwen or llava' >&2; exit 2 ;;
+esac
+[[ -f .venv/bin/activate ]] || { echo 'Missing .venv/bin/activate' >&2; exit 2; }
+source .venv/bin/activate
+mkdir -p log
+
+export WEBUI_TEST="$repo_root/data/webui-full-dom-screened-7k-v1/7000/css/pages-test.jsonl"
+export D2C_ROOT="$repo_root/data/raw/design2code/testset_final"
+export D2C_HARD_ROOT="$repo_root/data/raw/design2code-hard"
+export TRAIN_RUN="$repo_root/runs/webui-full-dom-screened-7k-v1/7000"
+export OFFICIAL_REPO="$repo_root/external/design2code-official"
+export DETECTOR_CHECKPOINT="$TRAIN_RUN/detector/best.pt"
+export ABSTRACT_CHECKPOINT="$TRAIN_RUN/tuide-s-abstract/replacement/abstract-stage2/best.pt"
+export PAPER_REFERENCE_CACHE="$repo_root/.cache/paper-reference-renders"
+export PYTHONUNBUFFERED=1 INITIAL_SEEDS=42 INITIAL_TEMPERATURE=0.7
+export MAX_NEW_TOKENS=16384 PAGE_LIMIT=0 REPAIR_STEPS=20 REVISION_ROUNDS=3
+export RUN_UI2CODEN=1 RUN_ABLATION=0 REPEATS=1
+
+echo "Initial model=$1, GPU=$CUDA_VISIBLE_DEVICES, seed=42, output=$output"
+WEB_DATASET=webui PAGE_MANIFEST="$WEBUI_TEST" \
+  bash scripts/run_paper_experiments.sh . "$output/webui" "$TRAIN_RUN"
+WEB_DATASET=design2code PAGE_MANIFEST='' \
+  bash scripts/run_paper_experiments.sh "$D2C_ROOT" "$output/design2code" "$TRAIN_RUN"
+WEB_DATASET=design2code PAGE_MANIFEST='' \
+  bash scripts/run_paper_experiments.sh "$D2C_HARD_ROOT" "$output/design2code-hard" "$TRAIN_RUN"
