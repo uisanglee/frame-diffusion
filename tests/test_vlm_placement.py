@@ -1,0 +1,82 @@
+from types import SimpleNamespace
+import sys
+import pytest
+import torch
+from framediff.vlm import pin_revision, verify_cuda_placement
+
+
+def test_revision_pin_reused_without_hub(tmp_path, monkeypatch):
+    calls=[]
+    def info(model, revision):
+        calls.append((model, revision))
+        return SimpleNamespace(sha='a'*40)
+    monkeypatch.setitem(sys.modules, 'huggingface_hub', SimpleNamespace(HfApi=lambda:SimpleNamespace(model_info=info)))
+    assert pin_revision('model', 'main', tmp_path)=='a'*40
+    assert pin_revision('model', 'main', tmp_path)=='a'*40
+    assert len(calls)==1
+    with pytest.raises(ValueError, match='changed'):
+        pin_revision('other', 'main', tmp_path)
+    with pytest.raises(ValueError, match='changed'):
+        pin_revision('model', 'other', tmp_path)
+
+
+def test_unpinned_old_run_rejected(tmp_path):
+    (tmp_path/'prepare').mkdir()
+    (tmp_path/'prepare/config.json').write_text('{}')
+    with pytest.raises(ValueError, match='no revision pin'):
+        pin_revision('model', 'main', tmp_path)
+
+
+@pytest.mark.parametrize('device,mapping,valid', [
+    ('cuda:0', {'':0}, True), ('cpu', {'':'cpu'}, False),
+    ('cuda:1', {'':1}, False), ('cuda:0', {'':'disk'}, False),
+    ('meta', {'':'cpu'}, False),
+])
+def test_placement(device, mapping, valid, monkeypatch):
+    monkeypatch.setattr(torch.cuda,'current_device',lambda:0)
+    monkeypatch.setattr(torch.cuda,'get_device_name',lambda d:'test GPU')
+    model=SimpleNamespace(parameters=lambda:iter([SimpleNamespace(device=torch.device(device))]),
+                          buffers=lambda:iter([]),hf_device_map=mapping)
+    if valid:
+        verify_cuda_placement(model)
+        assert model._framediff_placement['device']=='cuda:0'
+    else:
+        with pytest.raises(RuntimeError):verify_cuda_placement(model)
+
+
+def test_glm_loader_pins_processor_and_single_gpu(monkeypatch):
+    from framediff import vlm
+    captured={}
+    model=SimpleNamespace(config=SimpleNamespace(_commit_hash='a'*40))
+    model.eval=lambda:model
+    def load(name,**kwargs):
+        captured['model']=(name,kwargs)
+        return model
+    def processor(name,**kwargs):
+        captured['processor']=kwargs
+        return object()
+    monkeypatch.setitem(sys.modules,'transformers',SimpleNamespace(
+        AutoModelForImageTextToText=SimpleNamespace(from_pretrained=lambda *a,**k:pytest.fail('wrong loader')),
+        Glm4vForConditionalGeneration=SimpleNamespace(from_pretrained=load),
+        AutoProcessor=SimpleNamespace(from_pretrained=processor),
+        BitsAndBytesConfig=lambda **kw:kw))
+    monkeypatch.setattr(torch.cuda,'is_available',lambda:True)
+    monkeypatch.setattr(torch.cuda,'current_device',lambda:0)
+    monkeypatch.setattr(vlm,'verify_cuda_placement',lambda m:captured.update(checked=m))
+    args=SimpleNamespace(model='zai-org/GLM-4.1V-9B-Thinking',revision='a'*40,seed=42,four_bit=True)
+    vlm.load_hf_runtime(args)
+    assert captured['model'][1]['device_map']=={'':0}
+    assert captured['model'][1]['quantization_config']['load_in_4bit']
+    assert captured['processor']['revision']=='a'*40
+    assert captured['checked'] is model
+
+
+@pytest.mark.parametrize('ids,expected', [([1,4,2,5],[5]),([1,4],None),([5],[5])])
+def test_reasoning_not_executed(ids,expected):
+    from framediff.vlm import decode_hf_answer
+    decoded=[]
+    processor=SimpleNamespace(tokenizer=SimpleNamespace(get_vocab=lambda:{'<think>':1,'</think>':2}),
+        batch_decode=lambda tokens,**kwargs:decoded.append(tokens[0].tolist()) or ['HTML'])
+    answer=decode_hf_answer(processor,torch.tensor([ids]))
+    assert answer==('' if expected is None else 'HTML')
+    assert decoded==([] if expected is None else [expected])

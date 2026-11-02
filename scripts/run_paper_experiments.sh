@@ -14,8 +14,9 @@ run_ablation=${RUN_ABLATION:-1}
 [[ "$run_ablation" == 0 || "$run_ablation" == 1 ]] || { echo 'RUN_ABLATION must be 0 or 1' >&2; exit 2; }
 aliases=()
 for entry in "${entries[@]}"; do
+  revision=${VLM_REVISION:-main}
   if [[ "$entry" == *'|'* ]]; then
-    IFS='|' read -r alias backend model precision endpoint api_key_env reasoning_effort <<< "$entry"
+    IFS='|' read -r alias backend model precision endpoint api_key_env reasoning_effort revision <<< "$entry"
   else
     alias=${entry%%=*};model=${entry#*=};backend=${VLM_BACKEND:-qwen}
     precision=${VLM_PRECISION:-4bit};endpoint=${VLM_ENDPOINT:-http://localhost:8000/v1/chat/completions}
@@ -26,13 +27,22 @@ for entry in "${entries[@]}"; do
   case "$precision" in bf16) four_bit=0;; 4bit) four_bit=1;; server) four_bit=0;; *) echo "Precision must be bf16, 4bit, or server: $entry" >&2;exit 2;; esac
   endpoint=${endpoint:-http://localhost:8000/v1/chat/completions}
   api_key_env=${api_key_env:-${VLM_API_KEY_ENV:-VLM_API_KEY}}
+  revision=${revision:-${VLM_REVISION:-main}}
+  if [[ "$backend" != openai-compatible ]]; then
+    revision=$(python - "$model" "$revision" "$output/$alias" <<'PYREV'
+import sys
+from framediff.vlm import pin_revision
+print(pin_revision(*sys.argv[1:]))
+PYREV
+    )
+  fi
   aliases+=("$alias")
   abstract=0;[[ "$run_ablation" == 1 && "$alias" == "$representative" ]] && abstract=1
   echo "Running $alias ($backend, $model, $precision), abstract ablation=$abstract"
   CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} WEB_DATASET=design2code SELF_REVISION_PROTOCOL=design2code \
     ABSTRACT_VLM_REVISION=$abstract VLM_BACKEND="$backend" VLM_MODEL="$model" \
     VLM_ENDPOINT="$endpoint" VLM_API_KEY_ENV="$api_key_env" VLM_REASONING_EFFORT="$reasoning_effort" \
-    VLM_FOUR_BIT="$four_bit" \
+    VLM_FOUR_BIT="$four_bit" VLM_REVISION="$revision" \
     bash scripts/run_visual_web.sh "$root" "$output/$alias" "$train"
 done
 aliases_csv=$(IFS=,; echo "${aliases[*]}")

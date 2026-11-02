@@ -13,6 +13,7 @@ else
   source_options=(--root "$dataset_root" --dataset "${WEB_DATASET:-design2code}" --webui-view "${WEBUI_VIEW:-default_1280-720}")
 fi
 vlm_options=(--backend "${VLM_BACKEND:-qwen}" --model "${VLM_MODEL:-Qwen/Qwen3-VL-8B-Instruct}"
+  --revision "${VLM_REVISION:-main}"
   --endpoint "${VLM_ENDPOINT:-http://localhost:8000/v1/chat/completions}"
   --api-key-env "${VLM_API_KEY_ENV:-VLM_API_KEY}")
 if [[ -n "${VLM_REASONING_EFFORT:-}" ]]; then

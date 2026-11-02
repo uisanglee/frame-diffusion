@@ -1,0 +1,9 @@
+# Optional: only needed for OFFICIAL_REPO (Design2Code Block/Position/CLIP).
+opencv-python
+matplotlib
+scikit-learn
+colormath
+tqdm
+ftfy
+regex
+git+https://github.com/openai/CLIP.git

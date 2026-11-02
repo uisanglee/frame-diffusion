@@ -54,7 +54,7 @@ It runs models sequentially with the following exact settings:
 
 - `Qwen/Qwen3-VL-8B-Instruct`: BF16.
 - `google/gemma-3-12b-it`: bitsandbytes NF4 4-bit with BF16 compute and double quantization.
-- `mistral-community/pixtral-12b`: bitsandbytes NF4 4-bit with BF16 compute and double quantization. This is the Transformers-compatible conversion referenced by the Hugging Face Pixtral documentation.
+- `mistral-experimental/pixtral-12b`: bitsandbytes NF4 4-bit with BF16 compute and double quantization. This is the Transformers-compatible conversion referenced by the Hugging Face Pixtral documentation.
 
 Gemma is gated on Hugging Face, so accept its license and run `hf auth login` first. Local models are loaded in separate `web-prepare` processes and released before the detector/policies are loaded.
 
@@ -69,13 +69,13 @@ bash scripts/run_paper_4090_vlms.sh \
 The general format is a comma-separated list of `alias|backend|model|precision` records. `backend` is `qwen`, `hf`, or `openai-compatible`; local precision is `bf16` or `4bit`:
 
 ```bash
-export VLM_SPECS='qwen3vl8b|qwen|Qwen/Qwen3-VL-8B-Instruct|bf16,gemma3-12b|hf|google/gemma-3-12b-it|4bit,pixtral-12b|hf|mistral-community/pixtral-12b|4bit'
+export VLM_SPECS='qwen3vl8b|qwen|Qwen/Qwen3-VL-8B-Instruct|bf16,gemma3-12b|hf|google/gemma-3-12b-it|4bit,pixtral-12b|hf|mistral-experimental/pixtral-12b|4bit'
 ```
 
 For a per-model OpenAI-compatible endpoint, append a fifth field: `alias|openai-compatible|model|server|endpoint`. Set `VLM_API_KEY` when required. The older `alias=model` format remains supported.
 
 The full record also accepts provider-specific credentials and reasoning control:
-`alias|backend|model|precision|endpoint|api_key_env|reasoning_effort`.
+`alias|backend|model|precision|endpoint|api_key_env|reasoning_effort|revision`.
 
 ## GPT-4o and Gemini 3.5 Flash APIs
 
@@ -140,3 +140,25 @@ bash scripts/run_external_html.sh \
 ```
 
 Without reference HTML, target-screenshot pixel MAE, repair time, actions, browser executions and failures are reported; DOM IoU and official HTML-reference metrics are intentionally unavailable. For multiple pages, create a JSONL manifest with the same fields (`id`, `screenshot`, `initial_html`, optional `html`, and `external_source_model`) and pass it through `PAGE_MANIFEST` to `scripts/run_visual_web.sh` with `SELF_REVISION_PROTOCOL=none`.
+
+### Local model reproducibility and GPU placement
+
+The paper runner resolves each local model revision (default `VLM_REVISION=main`, or the eighth spec field) to an immutable Hub commit SHA before generation. It saves the pin in `<output>/<alias>/model-revision.json` and reuses it on resume. Model and processor use that revision. Keep this file with experiment results. Existing outputs with `prepare/config.json` but no pin require a new output directory so results from unknown revisions are not mixed.
+
+Local Qwen and HF loaders use one current CUDA device, with no automatic CPU/disk offload. Set `CUDA_VISIBLE_DEVICES` to one GPU for these experiments. Placement is checked after loading and recorded alongside generation metadata (`device`, `gpu_name`, `device_map`, `placement_contract`). Insufficient GPU memory raises an error rather than silently offloading; use 4-bit precision or reduce image/output token budgets as appropriate. These changes do not modify TUIDE training checkpoints or the shared page cache.
+
+### GLM-4.1V-9B-Thinking on one RTX 4090
+
+The 4090 matrix also includes `zai-org/GLM-4.1V-9B-Thinking` with NF4 4-bit weights and BF16 compute. Install updated optional dependencies (`pip install -e '.[vlm,visual,visual-metrics,test]'`); Transformers 4.57.1 or newer within the supported 4.x range is required. It uses `Glm4vForConditionalGeneration`, the shared revision pin, and the single-CUDA placement check.
+
+Run GLM alone first, using the same dataset and trained-policy paths as the other experiments:
+
+```bash
+CUDA_VISIBLE_DEVICES=2 \
+VLM_SPECS='glm4v-9b-thinking|hf|zai-org/GLM-4.1V-9B-Thinking|4bit' \
+RUN_ABLATION=0 PAGE_LIMIT=2 REPEATS=1 REPAIR_STEPS=2 \
+bash scripts/run_paper_4090_vlms.sh \
+  "$D2C_ROOT" runs/paper-glm4v-smoke "$TRAIN_RUN_DIR"
+```
+
+Use a separate output directory for the full benchmark and match `PAGE_LIMIT`, `REPEATS`, `REPAIR_STEPS`, image resolution, and generation token budget across comparisons. Thinking tokens count toward the generation limit, token usage, and latency. Only the final answer after `</think>` is passed to HTML processing; an unfinished `<think>` response is rejected as empty output. Real 4090 memory usage must be checked in the smoke test; 4-bit does not guarantee that arbitrary image/context lengths fit.

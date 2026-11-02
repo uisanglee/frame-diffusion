@@ -70,29 +70,69 @@ def api_generate(args,prompt,images):
     with urllib.request.urlopen(request,timeout=600) as response:result=json.load(response)
     return result['choices'][0]['message']['content'],{'usage':result.get('usage'),'backend_model':result.get('model')}
 
+def pin_revision(model, revision, output):
+    """Persist one immutable Hub revision per paper experiment, including resumes."""
+    path = Path(output) / 'model-revision.json'
+    if path.exists():
+        pin = read_json(path)
+        if pin['model'] != model or pin['requested_revision'] != revision:
+            raise ValueError('Model/revision changed; use a new output directory')
+        return pin['sha']
+    if (Path(output) / 'prepare' / 'config.json').exists():
+        raise ValueError('Existing experiment has no revision pin; use a new output directory')
+    from huggingface_hub import HfApi
+    sha = HfApi().model_info(model, revision=revision).sha
+    if not sha or not re.fullmatch(r'[0-9a-f]{40}', sha):
+        raise ValueError('Hub did not return an immutable commit SHA')
+    write_json(path, {'model': model, 'requested_revision': revision, 'sha': sha})
+    return sha
+
+
+def verify_cuda_placement(model):
+    """Do not benchmark CPU/disk offload or multi-GPU dispatch as single-GPU inference."""
+    import torch
+    expected = torch.device('cuda', torch.cuda.current_device())
+    devices = {tensor.device for tensor in model.parameters()} | {tensor.device for tensor in model.buffers()}
+    if devices != {expected}:
+        raise RuntimeError(f'Local VLM must reside entirely on {expected}; found {devices}')
+    for value in getattr(model, 'hf_device_map', {}).values():
+        device = torch.device('cuda', value) if isinstance(value, int) else torch.device(value) if value != 'disk' else None
+        if device is None or device.type != 'cuda' or device.index not in (None, expected.index):
+            raise RuntimeError(f'CPU/disk/multi-GPU offload is not allowed: {model.hf_device_map}')
+    model._framediff_placement = {'device': str(expected), 'gpu_name': torch.cuda.get_device_name(expected),
+                                 'device_map': {k: str(v) for k, v in getattr(model, 'hf_device_map', {}).items()},
+                                 'placement_contract': 'single-cuda-no-offload-v1'}
+
+
 def load_qwen_runtime(args):
     import torch
     from transformers import AutoProcessor, Qwen3VLForConditionalGeneration, BitsAndBytesConfig
     if not torch.cuda.is_available():raise RuntimeError('Local Qwen backend requires CUDA; use an API backend on this host')
     torch.manual_seed(args.seed)
-    kwargs={'revision':args.revision,'dtype':torch.bfloat16,'device_map':'auto','attn_implementation':'sdpa'}
+    kwargs={'revision':args.revision,'dtype':torch.bfloat16,'device_map':{'':torch.cuda.current_device()},'attn_implementation':'sdpa'}
     if args.four_bit:kwargs['quantization_config']=BitsAndBytesConfig(load_in_4bit=True,bnb_4bit_quant_type='nf4',bnb_4bit_compute_dtype=torch.bfloat16,bnb_4bit_use_double_quant=True)
     model=Qwen3VLForConditionalGeneration.from_pretrained(args.model,**kwargs).eval()
-    processor=AutoProcessor.from_pretrained(args.model,revision=args.revision,max_pixels=args.max_pixels)
+    verify_cuda_placement(model)
+    processor=AutoProcessor.from_pretrained(args.model,revision=model.config._commit_hash or args.revision,max_pixels=args.max_pixels)
     return model,processor
 
 def load_hf_runtime(args):
-    """Load a Transformers-native image-to-text model such as Gemma or Pixtral."""
+    """Load a Transformers-native image-to-text model such as Gemma, Pixtral, or GLM-4.1V."""
     import torch
     from transformers import AutoModelForImageTextToText, AutoProcessor, BitsAndBytesConfig
     if not torch.cuda.is_available():raise RuntimeError('Local Hugging Face backend requires CUDA; use an API backend on this host')
     torch.manual_seed(args.seed)
-    kwargs={'revision':args.revision,'dtype':torch.bfloat16,'device_map':'auto','attn_implementation':'sdpa'}
+    kwargs={'revision':args.revision,'dtype':torch.bfloat16,'device_map':{'':torch.cuda.current_device()},'attn_implementation':'sdpa'}
     if args.four_bit:
         kwargs['quantization_config']=BitsAndBytesConfig(load_in_4bit=True,bnb_4bit_quant_type='nf4',
             bnb_4bit_compute_dtype=torch.bfloat16,bnb_4bit_use_double_quant=True)
-    model=AutoModelForImageTextToText.from_pretrained(args.model,**kwargs).eval()
-    processor=AutoProcessor.from_pretrained(args.model,revision=args.revision)
+    model_class=AutoModelForImageTextToText
+    if args.model.rstrip('/').split('/')[-1].lower() == 'glm-4.1v-9b-thinking':
+        from transformers import Glm4vForConditionalGeneration
+        model_class=Glm4vForConditionalGeneration
+    model=model_class.from_pretrained(args.model,**kwargs).eval()
+    verify_cuda_placement(model)
+    processor=AutoProcessor.from_pretrained(args.model,revision=model.config._commit_hash or args.revision)
     return model,processor
 
 def qwen_generate(args,prompt,images,runtime=None):
@@ -113,10 +153,23 @@ def qwen_generate(args,prompt,images,runtime=None):
     with torch.inference_mode():outputs=model.generate(**inputs,max_new_tokens=args.max_new_tokens,do_sample=False)
     torch.cuda.synchronize()
     answer=processor.batch_decode(outputs[:,inputs['input_ids'].shape[1]:],skip_special_tokens=True)[0]
-    return answer,{'generation_seconds':time.perf_counter()-start,'peak_cuda_bytes':torch.cuda.max_memory_allocated(),
+    return answer,{**getattr(model,'_framediff_placement',{}),'generation_seconds':time.perf_counter()-start,'peak_cuda_bytes':torch.cuda.max_memory_allocated(),
                    'resolved_revision':getattr(model.config,'_commit_hash',None),'input_tokens':inputs['input_ids'].shape[1],
                    'output_tokens':outputs.shape[1]-inputs['input_ids'].shape[1],
                    'weight_precision':'nf4-4bit' if args.four_bit else 'bf16'}
+
+def decode_hf_answer(processor, tokens):
+    """Exclude reasoning tokens from executable output, retaining total usage upstream."""
+    vocab=processor.tokenizer.get_vocab()
+    end=vocab.get('</think>')
+    start=vocab.get('<think>')
+    ids=tokens[0].tolist()
+    if end is not None and end in ids:
+        tokens=tokens[:,len(ids)-ids[::-1].index(end):]
+    elif start is not None and start in ids:
+        # Reasoning exhausted the token budget; never execute an intermediate code draft.
+        return ''
+    return processor.batch_decode(tokens,skip_special_tokens=True)[0]
 
 def hf_generate(args,prompt,images,runtime=None):
     import torch
@@ -134,8 +187,8 @@ def hf_generate(args,prompt,images,runtime=None):
     torch.cuda.reset_peak_memory_stats();torch.cuda.synchronize();start=time.perf_counter()
     with torch.inference_mode():outputs=model.generate(**inputs,max_new_tokens=args.max_new_tokens,do_sample=False)
     torch.cuda.synchronize();input_tokens=inputs['input_ids'].shape[1]
-    answer=processor.batch_decode(outputs[:,input_tokens:],skip_special_tokens=True)[0]
-    return answer,{'generation_seconds':time.perf_counter()-start,'peak_cuda_bytes':torch.cuda.max_memory_allocated(),
+    answer=decode_hf_answer(processor,outputs[:,input_tokens:])
+    return answer,{**getattr(model,'_framediff_placement',{}),'generation_seconds':time.perf_counter()-start,'peak_cuda_bytes':torch.cuda.max_memory_allocated(),
                    'resolved_revision':getattr(model.config,'_commit_hash',None),'input_tokens':input_tokens,
                    'output_tokens':outputs.shape[1]-input_tokens,
                    'weight_precision':'nf4-4bit' if args.four_bit else 'bf16'}
