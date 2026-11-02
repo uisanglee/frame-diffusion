@@ -6,7 +6,7 @@ if [[ $# -ne 3 ]]; then
   exit 2
 fi
 root=$1;output=$2;train=$3
-specs=${VLM_SPECS:-qwen3vl8b\|qwen\|Qwen/Qwen3-VL-8B-Instruct\|bf16}
+specs=${VLM_SPECS:-qwen3vl8b\|qwen\|Qwen/Qwen3-VL-8B-Instruct\|4bit}
 IFS=',' read -ra entries <<< "$specs"
 first=${entries[0]};first_alias=${first%%|*};[[ "$first_alias" == "$first" ]] && first_alias=${first%%=*}
 representative=${ABLATION_VLM_ALIAS:-$first_alias}

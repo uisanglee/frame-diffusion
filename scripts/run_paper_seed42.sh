@@ -10,8 +10,11 @@ fi
 case "$1" in
   qwen)
     export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
-    export VLM_SPECS='qwen3vl8b|qwen|Qwen/Qwen3-VL-8B-Instruct|bf16'
-    output=runs/paper-qwen3vl8b-seed42-16k ;;
+    # Qwen3-VL-8B in BF16 leaves too little VRAM for a 16K KV cache on a
+    # 24 GiB RTX 4090.  NF4 keeps the long HTML generation ceiling without
+    # CPU/disk offload or mixing the results with the former BF16 run.
+    export VLM_SPECS='qwen3vl8b|qwen|Qwen/Qwen3-VL-8B-Instruct|4bit'
+    output=runs/paper-qwen3vl8b-4bit-seed42-16k ;;
   llava)
     export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1}
     export VLM_SPECS='llava-next-7b|hf|llava-hf/llava-v1.6-mistral-7b-hf|4bit'
