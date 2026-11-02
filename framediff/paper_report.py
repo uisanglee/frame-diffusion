@@ -43,6 +43,9 @@ def estimate(values, seed=42):
 
 def report(rows, out):
     out = Path(out); out.mkdir(parents=True, exist_ok=True)
+    target_protocols=sorted({r.get('benchmark_protocol','provided-screenshot-v1') for r in rows})
+    if len(target_protocols)>1:
+        raise ValueError(f'Mixed target-image protocols cannot share a paper table: {target_protocols}')
     grouped = defaultdict(list)
     for row in rows:
         # Older evaluators only wrote page_id for repaired visual methods;
@@ -90,12 +93,15 @@ def report(rows, out):
                                'improved_page_rate': sum(g > 1e-8 for g in gains) / len(gains),
                                'worsened_page_rate': sum(g < -1e-8 for g in gains) / len(gains),
                                'unchanged_page_rate': sum(abs(g) <= 1e-8 for g in gains) / len(gains)})
-    result = {'protocol': 'page-weighted-repair-v1', 'methods': summaries, 'paired': paired,
+    result = {'protocol': 'page-weighted-repair-v1', 'target_image_protocol':target_protocols[0] if target_protocols else None,
+              'methods': summaries, 'paired': paired,
               'notes': ['Repeats averaged within page; 2000 paired page bootstrap resamples, seed 42.',
                         'Failed pipelines retain fallback HTML. Missing evaluations excluded with metric-specific n.',
                         'Geometry uses diagnostic Hungarian matching, not official Design2Code scoring.',
                         'Repair time includes target preprocessing; excludes model loading and final evaluation.',
                         'Page bootstrap does not account for correlation between different pages of the same domain.']}
+    if 'local-reference-render-v1' in target_protocols:
+        result['notes'].append('Target image and target DOM come from one local reference-HTML render; report separately from provided-screenshot Design2Code evaluation.')
     write_json(out / 'paper-summary.json', result)
     with (out / 'paper-summary.csv').open('w', newline='') as stream:
         writer = csv.writer(stream); writer.writerow(['method', 'metric', 'n_pages', 'mean', 'ci95_low', 'ci95_high'])

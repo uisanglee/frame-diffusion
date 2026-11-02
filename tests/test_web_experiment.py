@@ -233,6 +233,38 @@ def test_design2code_self_revision_protocol(tmp_path,monkeypatch):
 
 
 @pytest.mark.browser
+def test_local_reference_render_is_shared_image_and_dom_target(tmp_path,monkeypatch):
+    root=tmp_path/'dataset';root.mkdir()
+    Image.new('RGB',(320,240),'black').save(root/'page.png')
+    (root/'page.html').write_text(HTML)
+    image_inputs=[]
+    def generate(args,prompt,images,runtime):
+        image_inputs.append(args.image[0])
+        return HTML,{}
+    monkeypatch.setattr('framediff.vlm.generate',generate)
+    args=SimpleNamespace(root=str(root),manifest=None,out=str(tmp_path/'prepared'),rounds=0,
+        max_nodes=16,max_pixels=1048576,max_new_tokens=8192,limit=0,seed=42,resume=False,
+        backend='openai-compatible',model='fake',revision='main',endpoint='http://unused',
+        api_key_env='TEST_KEY',four_bit=False,initial_mode='direct',
+        revision_protocol='shared',repair_conditioning='visual',vlm_retries=0,
+        retry_failed=False,dataset='design2code',webui_view='default_1280-720',
+        target_image_source='reference-render')
+    row=prepare(args)[0]
+    assert row['screenshot'].endswith('A_rendering.png')
+    assert row['provided_screenshot']==str(root/'page.png')
+    assert image_inputs==[row['screenshot']]
+    assert read_json(row['reference_observation'])['viewport']==[320,240]
+    with Image.open(row['screenshot']) as target:
+        assert target.getpixel((50,50)) != (0,0,0)
+    metrics=evaluate_pages(SimpleNamespace(data=str(tmp_path/'prepared/prepared.jsonl'),
+        out=str(tmp_path/'evaluation'),max_nodes=2048,official_repo=None,resume=False))
+    assert metrics[0]['target_image_source']=='reference-render'
+    assert metrics[0]['pixel_mae']==pytest.approx(0,abs=1e-8)
+    assert metrics[0]['dom_box_iou']==pytest.approx(1,abs=1e-8)
+    assert 'reported separately from standard Design2Code' in (tmp_path/'evaluation/report.md').read_text()
+
+
+@pytest.mark.browser
 def test_failed_html_generation_keeps_page_for_all_methods(tmp_path,monkeypatch):
     Image.new('RGB',(100,100)).save(tmp_path/'a.png')
     (tmp_path/'a.html').write_text(HTML)

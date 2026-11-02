@@ -34,16 +34,21 @@ def build(root, aliases, representative, out, include_ablation=True):
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     lines = ['# Paper experiment suite', '', '## Main comparison', '']
+    target_protocols = set()
     for alias in aliases:
         path = root / alias / 'evaluation' / 'metrics.jsonl'
         if not path.is_file():
             raise FileNotFoundError(f'Missing completed evaluation for {alias}: {path}')
         rows = selected(read_jsonl(path), MAIN_METHODS)
+        target_protocols.update(r.get('benchmark_protocol','provided-screenshot-v1') for r in rows)
         missing = set(MAIN_METHODS.values()) - {r['method'] for r in rows}
         if missing:
             raise ValueError(f'{alias} is missing main methods: {sorted(missing)}')
         report(rows, out / 'main' / alias)
         lines.append(f'- [{alias}](main/{alias}/paper-report.md)')
+    if len(target_protocols)>1:
+        raise ValueError(f'Mixed target-image protocols across VLM runs: {sorted(target_protocols)}')
+    lines += ['', f'Target-image protocol: `{next(iter(target_protocols))}`.', '']
     if include_ablation:
         path = root / representative / 'evaluation' / 'metrics.jsonl'
         rows = selected(read_jsonl(path), ABLATION_METHODS)

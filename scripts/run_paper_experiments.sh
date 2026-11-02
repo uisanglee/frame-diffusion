@@ -40,6 +40,7 @@ PYREV
   abstract=0;[[ "$run_ablation" == 1 && "$alias" == "$representative" ]] && abstract=1
   echo "Running $alias ($backend, $model, $precision), abstract ablation=$abstract"
   CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} WEB_DATASET=design2code SELF_REVISION_PROTOCOL=design2code \
+    TARGET_IMAGE_SOURCE="${TARGET_IMAGE_SOURCE:-reference-render}" \
     ABSTRACT_VLM_REVISION=$abstract VLM_BACKEND="$backend" VLM_MODEL="$model" \
     VLM_ENDPOINT="$endpoint" VLM_API_KEY_ENV="$api_key_env" VLM_REASONING_EFFORT="$reasoning_effort" \
     VLM_FOUR_BIT="$four_bit" VLM_REVISION="$revision" \

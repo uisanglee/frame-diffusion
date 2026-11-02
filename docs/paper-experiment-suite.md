@@ -2,6 +2,18 @@
 
 This suite produces two disjoint result groups from the same prepared benchmark protocol.
 
+The paper wrapper defaults to `TARGET_IMAGE_SOURCE=reference-render`: it renders each
+reference HTML once at the provided screenshot's viewport, saves `A_rendering.png`
+and its DOM boxes from that same browser observation, and uses that PNG for the
+initial VLM, all repair methods, and pixel MAE. This is a **local-render layout
+evaluation**, not the standard Design2Code evaluation using the provided PNG.
+Reports and JSONL rows identify the protocol. Use a new output directory when
+changing it. To run the provided-screenshot protocol instead, set
+`TARGET_IMAGE_SOURCE=provided`; keep its results in a separate output directory.
+Reference rendering time is saved as `target_render_seconds` and is excluded
+from method-specific pipeline and repair times because the same target is shared
+by all methods on a page.
+
 ## Main comparison (run for every VLM)
 
 1. `Initial VLM`: one screenshot-to-HTML generation.

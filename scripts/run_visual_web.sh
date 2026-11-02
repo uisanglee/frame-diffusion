@@ -39,6 +39,7 @@ case "${SELF_REVISION_PROTOCOL:-none}" in
 esac
 python -m framediff web-prepare "${source_options[@]}" "${vlm_options[@]}" \
   --out "$output_root/prepare" --repair-conditioning visual "${revision_options[@]}" \
+  --target-image-source "${TARGET_IMAGE_SOURCE:-provided}" \
   --limit "${PAGE_LIMIT:-0}" --max-nodes 127 --vlm-retries "$vlm_retries" --seed "$seed" \
   --max-new-tokens "$max_new_tokens" --max-pixels "${MAX_PIXELS:-1048576}" --resume
 prepared="$output_root/prepare/prepared.jsonl"
