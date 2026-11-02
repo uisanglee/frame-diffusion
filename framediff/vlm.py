@@ -60,7 +60,8 @@ def api_generate(args,prompt,images):
         if labels:content.append({'type':'text','text':labels[index]})
         buf=io.BytesIO();image.save(buf,format='PNG')
         content.append({'type':'image_url','image_url':{'url':'data:image/png;base64,'+base64.b64encode(buf.getvalue()).decode()}})
-    payload={'model':args.model,'messages':[{'role':'user','content':content}],'temperature':0,'max_tokens':args.max_new_tokens,'seed':args.seed}
+    payload={'model':args.model,'messages':[{'role':'user','content':content}],
+             'temperature':getattr(args,'temperature',0.),'max_tokens':args.max_new_tokens,'seed':args.seed}
     reasoning=getattr(args,'reasoning_effort',None)
     if reasoning:payload['reasoning_effort']=reasoning
     headers={'Content-Type':'application/json'}
@@ -117,7 +118,7 @@ def load_qwen_runtime(args):
     return model,processor
 
 def load_hf_runtime(args):
-    """Load a Transformers-native image-to-text model such as Gemma, Pixtral, or GLM-4.1V."""
+    """Load a Transformers-native image-to-text model on one CUDA device."""
     import torch
     from transformers import AutoModelForImageTextToText, AutoProcessor, BitsAndBytesConfig
     if not torch.cuda.is_available():raise RuntimeError('Local Hugging Face backend requires CUDA; use an API backend on this host')
@@ -130,6 +131,9 @@ def load_hf_runtime(args):
     if args.model.rstrip('/').split('/')[-1].lower() == 'glm-4.1v-9b-thinking':
         from transformers import Glm4vForConditionalGeneration
         model_class=Glm4vForConditionalGeneration
+    elif args.model.rstrip('/').split('/')[-1].lower() == 'llava-v1.6-mistral-7b-hf':
+        from transformers import LlavaNextForConditionalGeneration
+        model_class=LlavaNextForConditionalGeneration
     model=model_class.from_pretrained(args.model,**kwargs).eval()
     verify_cuda_placement(model)
     processor=AutoProcessor.from_pretrained(args.model,revision=model.config._commit_hash or args.revision)
@@ -150,7 +154,11 @@ def qwen_generate(args,prompt,images,runtime=None):
     messages=[{'role':'user','content':content}]
     inputs=processor.apply_chat_template(messages,tokenize=True,add_generation_prompt=True,return_dict=True,return_tensors='pt').to(model.device)
     torch.cuda.reset_peak_memory_stats();torch.cuda.synchronize();start=time.perf_counter()
-    with torch.inference_mode():outputs=model.generate(**inputs,max_new_tokens=args.max_new_tokens,do_sample=False)
+    temperature=getattr(args,'temperature',0.)
+    generation={'do_sample':temperature>0}
+    if temperature>0:
+        torch.manual_seed(args.seed);generation['temperature']=temperature
+    with torch.inference_mode():outputs=model.generate(**inputs,max_new_tokens=args.max_new_tokens,**generation)
     torch.cuda.synchronize()
     answer=processor.batch_decode(outputs[:,inputs['input_ids'].shape[1]:],skip_special_tokens=True)[0]
     return answer,{**getattr(model,'_framediff_placement',{}),'generation_seconds':time.perf_counter()-start,'peak_cuda_bytes':torch.cuda.max_memory_allocated(),
@@ -185,7 +193,11 @@ def hf_generate(args,prompt,images,runtime=None):
     inputs=processor.apply_chat_template([{'role':'user','content':content}],tokenize=True,
         add_generation_prompt=True,return_dict=True,return_tensors='pt').to(model.device)
     torch.cuda.reset_peak_memory_stats();torch.cuda.synchronize();start=time.perf_counter()
-    with torch.inference_mode():outputs=model.generate(**inputs,max_new_tokens=args.max_new_tokens,do_sample=False)
+    temperature=getattr(args,'temperature',0.)
+    generation={'do_sample':temperature>0}
+    if temperature>0:
+        torch.manual_seed(args.seed);generation['temperature']=temperature
+    with torch.inference_mode():outputs=model.generate(**inputs,max_new_tokens=args.max_new_tokens,**generation)
     torch.cuda.synchronize();input_tokens=inputs['input_ids'].shape[1]
     answer=decode_hf_answer(processor,outputs[:,input_tokens:])
     return answer,{**getattr(model,'_framediff_placement',{}),'generation_seconds':time.perf_counter()-start,'peak_cuda_bytes':torch.cuda.max_memory_allocated(),

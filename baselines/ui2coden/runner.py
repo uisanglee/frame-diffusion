@@ -51,8 +51,13 @@ def load_records(path, path_root, limit):
             raw = json.loads(line)
             record = {k: raw[k] for k in ('id', 'page_id', 'viewport', 'repeat',
                 'reference_kind', 'reference_boxes', 'reference_box_error',
-                'external_source_model') if k in raw}
+                'external_source_model', 'target_image_source', 'benchmark_protocol',
+                'reference_observation', 'target_render_seconds', 'group') if k in raw}
             record['id'] = str(record['id'])
+            # Prepared WebUI views may carry a shared source-page ID. Match the
+            # main evaluator's per-view IDs, retaining explicit repeat IDs only.
+            if not raw.get('repeat'):
+                record['page_id'] = record['id']
             if record['id'] in seen: raise ValueError('Duplicate id: ' + record['id'])
             seen.add(record['id'])
             initial = raw.get('methods', {}).get('initial', {})
@@ -67,6 +72,11 @@ def load_records(path, path_root, limit):
                 p = (path_root / p).resolve() if not p.is_absolute() else p.resolve()
                 if not p.is_file(): raise FileNotFoundError(p)
                 record[key] = str(p)
+            if record.get('reference_observation'):
+                observation = Path(record['reference_observation'])
+                observation = (path_root / observation).resolve() if not observation.is_absolute() else observation.resolve()
+                if not observation.is_file(): raise FileNotFoundError(observation)
+                record['reference_observation'] = str(observation)
             from PIL import Image
             with Image.open(record['screenshot']) as im: size = list(im.size)
             record.setdefault('viewport', size)
@@ -227,7 +237,7 @@ def main():
         config = dict(protocol='ui2coden-local-polishing-v1', settings={k: v for k, v in vars(args).items()
             if k not in ('resume', 'check_inputs', 'out', 'path_root')}, prompt=PROMPT, layout_prompt=LAYOUT,
             runner_sha=sha(__file__), records=records,
-            files={r[k]: sha(r[k]) for r in records for k in ('screenshot', 'initial_html', 'html') if k in r})
+            files={r[k]: sha(r[k]) for r in records for k in ('screenshot', 'initial_html', 'html', 'reference_observation') if k in r})
         cfg = out / 'config.json'
         if cfg.exists():
             if not args.resume or json.loads(cfg.read_text()) != config:

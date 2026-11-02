@@ -80,9 +80,9 @@ def report(rows, out):
                           'n_trials': sum(len(v) for (p, m), v in grouped.items() if m == method), 'metrics': metrics})
     paired = []
     # Include the primary comparison as well as improvement over initial.
-    for baseline in ('initial', 'screenshot-policy'):
+    for baseline in ('initial', 'screenshot-policy', 'Initial VLM'):
         for method in methods:
-            if method == baseline or method == 'initial': continue
+            if method == baseline or method in ('initial', 'Initial VLM'): continue
             ids = sorted(p for p, m in pages if m == method and (p, baseline) in pages)
             for metric, direction in {**QUALITY, **{k: -1 for k in COST}}.items():
                 gains = [direction * (pages[p, method][metric] - pages[p, baseline][metric])

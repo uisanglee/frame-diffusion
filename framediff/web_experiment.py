@@ -93,9 +93,12 @@ def add_parsers(sub):
     p.add_argument('--vlm-retries', type=int, default=2, help='Additional validation retries per VLM operation')
     p.add_argument('--initial-mode', choices=['direct','text-augmented'], default='direct')
     p.add_argument('--revision-protocol', choices=['shared','design2code'], default='shared',
-                   help='design2code: paper text-augmented initial + one visual Self-Revision pass')
+                   help='design2code: paper text-augmented initial + requested visual Self-Revision rounds')
     p.add_argument('--target-image-source', choices=['provided','reference-render'], default='provided',
                    help='provided: dataset PNG; reference-render: render reference HTML locally and use that PNG as the target')
+    p.add_argument('--reference-manifest', help='Reuse target PNG and reference DOM from another prepared run')
+    p.add_argument('--initial-temperature', type=float, default=0.,
+                   help='Sample only the initial VLM draft at this temperature; revisions remain greedy')
     p.add_argument('--repair-conditioning', choices=['boxes','plan','visual'], default='boxes',
                    help='plan: fixed VLM plan; visual: DOM preparation only, no target-box extraction or VLM planning')
     for key, default in [('rounds',1),('max-nodes',128),('max-new-tokens',16384),('max-pixels',1048576),('limit',0),('seed',42)]:
@@ -122,6 +125,12 @@ def prepare(args):
     if target_image_source not in ('provided','reference-render'):
         raise ValueError('target-image-source must be provided or reference-render')
     if retries < 0: raise ValueError('vlm-retries must be nonnegative')
+    if not 0 <= getattr(args,'initial_temperature',0.) <= 2:
+        raise ValueError('initial-temperature must be in [0,2]')
+    reference_manifest = getattr(args,'reference_manifest',None)
+    if reference_manifest and target_image_source != 'reference-render':
+        raise ValueError('--reference-manifest requires --target-image-source reference-render')
+    shared_references = {str(row['id']):row for row in read_jsonl(reference_manifest)} if reference_manifest else {}
     if args.rounds < 0 or not 2 <= args.max_nodes <= 256 or args.max_pixels < 1 or args.max_new_tokens < 1 or args.limit < 0:
         raise ValueError('Invalid rounds/node/token/pixel/limit setting')
     if bool(args.root) == bool(args.manifest):
@@ -129,7 +138,8 @@ def prepare(args):
     if args.root:
         if getattr(args,'dataset','design2code')=='webui':
             from .webui_pages import discover_webui
-            items = discover_webui(args.root,getattr(args,'webui_view','default_1280-720'),args.limit)
+            items = discover_webui(args.root,getattr(args,'webui_view','default_1280-720'),args.limit,
+                                   recorded_boxes=target_image_source!='reference-render')
         else:
             items = [{'id':i,'screenshot':str(p.resolve()),'html':str(h.resolve())}
                      for i,p,h in discover_design2code(args.root)]
@@ -139,17 +149,14 @@ def prepare(args):
     if not items or len({i['id'] for i in items}) != len(items):
         raise ValueError('Empty dataset or duplicate IDs')
     if revision_protocol == 'design2code':
-        if args.rounds != 1 or args.initial_mode != 'text-augmented':
-            raise ValueError('design2code revision requires --rounds 1 --initial-mode text-augmented')
+        if args.initial_mode != 'text-augmented':
+            raise ValueError('design2code revision requires --initial-mode text-augmented')
         if any(i.get('initial_html') for i in items):
             raise ValueError('design2code revision must generate its text-augmented initial HTML; remove initial_html')
     if args.initial_mode=='text-augmented' and any(not i.get('html') for i in items):
         raise ValueError('text-augmented requires reference HTML for every page; use --initial-mode direct')
     if target_image_source=='reference-render' and any(not i.get('html') for i in items):
         raise ValueError('reference-render requires reference HTML for every page')
-    if target_image_source=='reference-render' and (getattr(args,'dataset','design2code')=='webui' or
-                                                    any(i.get('reference_kind')=='webui_recorded_boxes' for i in items)):
-        raise ValueError('reference-render is for HTML-reference datasets, not recorded WebUI boxes')
     out = Path(args.out).resolve()
     sources = [{**i, 'image_sha':digest(i['screenshot']), 'reference_sha':digest(i['html']) if i.get('html') else None,
                 **({'source_sha':{p:digest(p) for p in i['source_files']}} if 'source_files' in i else {}),
@@ -157,6 +164,12 @@ def prepare(args):
                 'placeholder_sha':digest(Path(i['html']).parent/'rick.jpg')
                     if i.get('html') and (Path(i['html']).parent/'rick.jpg').exists() else None} for i in items]
     settings = {k:v for k,v in vars(args).items() if k not in ('resume','out','retry_failed')}
+    if reference_manifest:
+        settings['reference_manifest_sha256']=digest(reference_manifest)
+    else:
+        settings.pop('reference_manifest',None)
+    if settings.get('initial_temperature') == 0.:
+        settings.pop('initial_temperature',None)
     if settings.get('repair_conditioning')=='visual':
         from .visual import ACTION_CONTRACT
         settings['visual_action_contract']=ACTION_CONTRACT
@@ -175,10 +188,12 @@ def prepare(args):
         if args.backend in ('qwen','hf') and runtime is None:
             runtime = (vlm.load_qwen_runtime if args.backend=='qwen' else vlm.load_hf_runtime)(args)
         c = copy.copy(args); c.task = task; c.image = list(map(str,images)); c.current = str(current) if current else None; c.frames = None
+        c.temperature = getattr(args,'initial_temperature',0.) if label == 'initial' and task == 'generate-html' else 0.
         c.image_labels=image_labels; c.prompt_first=prompt_first
         base_prompt = extra if literal_prompt or task=='repair-plan' else extra + vlm.prompt_for(c)
         def generate(attempt, feedback):
             name = label if attempt==0 else f'{label}.retry-{attempt}'
+            c.seed = int.from_bytes(hashlib.sha256(f'{args.seed}|{record["id"]}|{name}'.encode()).digest()[:4], 'big') if c.temperature else args.seed
             prompt = base_prompt + feedback
             write_json(work/f'{name}.prompt.json', {'prompt':prompt,'images':c.image,
                 'image_labels':image_labels,'prompt_first':prompt_first})
@@ -226,15 +241,25 @@ def prepare(args):
             reference_observation = None
             target_render_seconds = 0.
             if target_image_source=='reference-render':
-                target_render_start = time.perf_counter()
-                target_screenshot = str(work/'A_rendering.png')
-                reference = browser.snapshot(
-                    embed_placeholder(Path(item['html']).read_text(),placeholder),
-                    viewport,target_screenshot,2048)
-                reference_observation = str(work/'A_rendering-dom.json')
-                write_json(reference_observation,{'viewport':viewport,'nodes':reference['nodes'],
-                    'total_visible_nodes':reference['total_visible_nodes'],'max_nodes':2048})
-                target_render_seconds = time.perf_counter()-target_render_start
+                if shared_references:
+                    source = shared_references.get(str(item['id']))
+                    if (not source or source.get('target_image_source') != 'reference-render' or
+                            digest(source['html']) != digest(item['html']) or source['viewport'] != viewport):
+                        raise ValueError(f'Shared target source differs: {item["id"]}')
+                    target_screenshot = source['screenshot']
+                    reference_observation = source['reference_observation']
+                    if not Path(target_screenshot).is_file() or not Path(reference_observation).is_file():
+                        raise FileNotFoundError(f'Missing shared target observation: {item["id"]}')
+                else:
+                    target_render_start = time.perf_counter()
+                    target_screenshot = str(work/'A_rendering.png')
+                    reference = browser.snapshot(
+                        embed_placeholder(Path(item['html']).read_text(),placeholder),
+                        viewport,target_screenshot,2048)
+                    reference_observation = str(work/'A_rendering-dom.json')
+                    write_json(reference_observation,{'viewport':viewport,'nodes':reference['nodes'],
+                        'total_visible_nodes':reference['total_visible_nodes'],'max_nodes':2048})
+                    target_render_seconds = time.perf_counter()-target_render_start
             record = {**item,'viewport':viewport,'group':item.get('group',item['id']),
                       'screenshot':target_screenshot,'provided_screenshot':item['screenshot'],
                       'target_image_source':target_image_source,
@@ -248,6 +273,10 @@ def prepare(args):
                       'vlm_attempts':{},'vlm_usage':{}}
             if reference_observation:
                 record['reference_observation']=reference_observation
+                # A local HTML render replaces the recorded AX reference, including for WebUI.
+                record['reference_kind']='rendered_html'
+                record.pop('reference_boxes',None)
+                record.pop('reference_box_error',None)
             paper_texts = None
             if revision_protocol == 'design2code':
                 from .design2code_self_revision import SOURCE_URL,extract_text_elements
@@ -290,7 +319,7 @@ def prepare(args):
             current = initial; elapsed = initial_seconds; calls = 0; renders = 0
             failure = record['errors'].get('initial')
             for round_index in range(1,args.rounds+1):
-                label = ('design2code-self-revision' if revision_protocol=='design2code'
+                label = ((f'design2code-self-revision-{round_index}' if args.rounds > 1 else 'design2code-self-revision') if revision_protocol=='design2code'
                          else f'self-revision-{round_index}')
                 start = time.perf_counter(); before = browser.executions
                 if failure is None:

@@ -80,6 +80,21 @@ def test_policy_adapter(record, tmp_path):
     assert r['initial_html'] == record['initial_html']
 
 
+def test_reference_render_protocol_survives_adapter(record, tmp_path):
+    observation = tmp_path / 'target-dom.json'; observation.write_text('{}')
+    manifest = tmp_path / 'prepared.jsonl'
+    manifest.write_text(json.dumps({
+        'id': 'test/a', 'screenshot': record['screenshot'], 'html': record['html'],
+        'viewport': record['viewport'], 'target_image_source': 'reference-render',
+        'benchmark_protocol': 'local-reference-render-v1',
+        'reference_observation': str(observation),
+        'methods': {'initial': {'html': record['initial_html']}}}) + '\n')
+    loaded = runner.load_records(manifest, tmp_path, 0)[0]
+    assert loaded['benchmark_protocol'] == 'local-reference-render-v1'
+    assert loaded['target_image_source'] == 'reference-render'
+    assert loaded['reference_observation'] == str(observation)
+
+
 def test_common_evaluator_with_real_browser(record, tmp_path):
     """Exercises actual Chromium + existing reporting, no model/network/GPU."""
     from argparse import Namespace
@@ -97,3 +112,24 @@ def test_common_evaluator_with_real_browser(record, tmp_path):
     assert metrics[1]['pixel_mae'] == 0
     assert metrics[1]['dom_box_iou'] == 1
     assert (out/'paper-report.md').is_file()
+
+
+def test_later_failures_keep_last_success_and_resume(record, tmp_path):
+    repaired = HTML.replace('100px', '150px')
+    runtime = Runtime([repaired, '<html>truncated', ValueError('render failure')])
+    result = runner.run_page(record, tmp_path/'page', 3, runtime, Browser())
+    first = result['methods']['ui2coden-round-1']['html']
+    assert first != record['initial_html']
+    for step in (2, 3):
+        method = result['methods'][f'ui2coden-round-{step}']
+        assert method['failed'] and method['html'] == first
+        assert '150px' in Path(method['html']).read_text()
+    assert runner.run_page(record, tmp_path/'page', 3, None, Browser()) == result
+
+
+def test_webui_view_ids_do_not_collapse(record, tmp_path):
+    path = tmp_path/'views.jsonl'
+    path.write_text(json.dumps(dict(id='page/mobile', page_id='page',
+        screenshot=record['screenshot'], initial_html=record['initial_html'],
+        html=record['html']))+'\n')
+    assert runner.load_records(path, tmp_path, 0)[0]['page_id'] == 'page/mobile'

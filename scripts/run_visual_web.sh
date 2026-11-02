@@ -6,7 +6,7 @@ output_root=$2
 train_root=$3
 if [[ -n "${PAGE_MANIFEST:-}" ]]; then
   [[ -f "$PAGE_MANIFEST" ]] || { echo "Missing PAGE_MANIFEST: $PAGE_MANIFEST" >&2; exit 2; }
-  source_options=(--manifest "$PAGE_MANIFEST")
+  source_options=(--manifest "$PAGE_MANIFEST" --dataset "${WEB_DATASET:-design2code}")
 else
   [[ -n "$dataset_root" ]] || { echo 'Dataset root is empty. Export D2C_ROOT/WEBUI_ROOT or pass an explicit directory.' >&2; exit 2; }
   [[ -d "$dataset_root" ]] || { echo "Missing dataset root: $dataset_root" >&2; exit 2; }
@@ -33,13 +33,16 @@ case "${SELF_REVISION_PROTOCOL:-none}" in
     revision_options=(--rounds "${REVISION_ROUNDS:-1}" --initial-mode "${INITIAL_MODE:-direct}" --revision-protocol shared)
     seed=${SEED:-42}; max_new_tokens=${MAX_NEW_TOKENS:-16384}; vlm_retries=${VLM_RETRIES:-2} ;;
   design2code)
-    revision_options=(--rounds 1 --initial-mode text-augmented --revision-protocol design2code)
+    revision_options=(--rounds "${REVISION_ROUNDS:-1}" --initial-mode text-augmented --revision-protocol design2code)
     seed=${SEED:-2024}; max_new_tokens=${MAX_NEW_TOKENS:-4096}; vlm_retries=${VLM_RETRIES:-0} ;;
   *) echo 'SELF_REVISION_PROTOCOL must be none, shared, or design2code' >&2; exit 2 ;;
 esac
-python -m framediff web-prepare "${source_options[@]}" "${vlm_options[@]}" \
+reference_options=()
+[[ -n "${REFERENCE_MANIFEST:-}" ]] && reference_options=(--reference-manifest "$REFERENCE_MANIFEST")
+python -m framediff web-prepare "${source_options[@]}" "${vlm_options[@]}" "${reference_options[@]}" \
   --out "$output_root/prepare" --repair-conditioning visual "${revision_options[@]}" \
   --target-image-source "${TARGET_IMAGE_SOURCE:-provided}" \
+  --initial-temperature "${INITIAL_TEMPERATURE:-0}" \
   --limit "${PAGE_LIMIT:-0}" --max-nodes 127 --vlm-retries "$vlm_retries" --seed "$seed" \
   --max-new-tokens "$max_new_tokens" --max-pixels "${MAX_PIXELS:-1048576}" --resume
 prepared="$output_root/prepare/prepared.jsonl"
@@ -72,15 +75,19 @@ pick_checkpoint() {
   echo "Could not find any checkpoint candidate: $*" >&2
   exit 2
 }
-raw_checkpoint=$(pick_checkpoint "${RAW_CHECKPOINT:-}" \
-  "$train_root/replacement/raw-stage1/best.pt" "$train_root/replacement/raw-stage2/best.pt" "$train_root/policy-raw/best.pt" "$train_root/raw-stage2/best.pt")
+policy_options=(--abstract-only)
+if [[ "${ABSTRACT_ONLY:-0}" != 1 ]]; then
+  raw_checkpoint=$(pick_checkpoint "${RAW_CHECKPOINT:-}" \
+    "$train_root/replacement/raw-stage1/best.pt" "$train_root/replacement/raw-stage2/best.pt" "$train_root/policy-raw/best.pt" "$train_root/raw-stage2/best.pt")
+  policy_options=(--raw-checkpoint "$raw_checkpoint")
+fi
 abstract_checkpoint=$(pick_checkpoint "${ABSTRACT_CHECKPOINT:-}" \
   "$train_root/replacement/abstract-stage2/best.pt" "$train_root/policy-abstract/best.pt" "$train_root/abstract-stage2/best.pt")
 detector_checkpoint=$(pick_checkpoint "${DETECTOR_CHECKPOINT:-}" "$train_root/detector/best.pt")
 extra=()
 if [[ "${ORACLE_ABLATION:-0}" == 1 ]]; then extra+=(--oracle-ablation); fi
 python -m framediff visual-evaluate --data "$prepared" \
-  --raw-checkpoint "$raw_checkpoint" --abstract-checkpoint "$abstract_checkpoint" \
+  "${policy_options[@]}" --abstract-checkpoint "$abstract_checkpoint" \
   --detector-checkpoint "$detector_checkpoint" --out "$output_root/repair" \
   --device "${DEVICE:-cuda}" --steps "${REPAIR_STEPS:-20}" --repeats "${REPEATS:-3}" \
   --time-budget "${TIME_BUDGET:-0}" --goal-threshold "${GOAL_THRESHOLD:--1}" \
@@ -89,6 +96,6 @@ python -m framediff visual-evaluate --data "$prepared" \
   --pixel-goal-tolerance "${PIXEL_GOAL_TOLERANCE:-0.005}" \
   --limit "${PAGE_LIMIT:-0}" "${extra[@]}" --resume
 metrics=()
-if [[ -n "${OFFICIAL_REPO:-}" && "${WEB_DATASET:-design2code}" != webui ]]; then metrics+=(--official-repo "$OFFICIAL_REPO"); fi
+if [[ -n "${OFFICIAL_REPO:-}" ]]; then metrics+=(--official-repo "$OFFICIAL_REPO"); fi
 python -m framediff web-evaluate --data "$output_root/repair/results.jsonl" \
   --out "$output_root/evaluation" "${metrics[@]}" --resume

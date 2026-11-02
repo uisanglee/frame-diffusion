@@ -2,6 +2,7 @@ from types import SimpleNamespace
 import sys
 import pytest
 import torch
+from PIL import Image
 from framediff.vlm import pin_revision, verify_cuda_placement
 
 
@@ -69,6 +70,75 @@ def test_glm_loader_pins_processor_and_single_gpu(monkeypatch):
     assert captured['model'][1]['quantization_config']['load_in_4bit']
     assert captured['processor']['revision']=='a'*40
     assert captured['checked'] is model
+
+
+def test_llava_next_loader_uses_nf4_and_one_gpu(monkeypatch):
+    from framediff import vlm
+    captured={}
+    model=SimpleNamespace(config=SimpleNamespace(_commit_hash='b'*40))
+    model.eval=lambda:model
+    def load(name,**kwargs):
+        captured['model']=(name,kwargs)
+        return model
+    def processor(name,**kwargs):
+        captured['processor']=(name,kwargs)
+        return object()
+    monkeypatch.setitem(sys.modules,'transformers',SimpleNamespace(
+        AutoModelForImageTextToText=SimpleNamespace(from_pretrained=lambda *a,**k:pytest.fail('wrong loader')),
+        LlavaNextForConditionalGeneration=SimpleNamespace(from_pretrained=load),
+        AutoProcessor=SimpleNamespace(from_pretrained=processor),
+        BitsAndBytesConfig=lambda **kw:kw))
+    monkeypatch.setattr(torch.cuda,'is_available',lambda:True)
+    monkeypatch.setattr(torch.cuda,'current_device',lambda:0)
+    monkeypatch.setattr(vlm,'verify_cuda_placement',lambda m:captured.update(checked=m))
+    args=SimpleNamespace(model='llava-hf/llava-v1.6-mistral-7b-hf',revision='b'*40,
+        seed=42,four_bit=True)
+    vlm.load_hf_runtime(args)
+    name,kwargs=captured['model']
+    assert name==args.model
+    assert kwargs['revision']=='b'*40
+    assert kwargs['device_map']=={'':0}
+    assert kwargs['quantization_config']=={
+        'load_in_4bit':True,'bnb_4bit_quant_type':'nf4',
+        'bnb_4bit_compute_dtype':torch.bfloat16,'bnb_4bit_use_double_quant':True}
+    assert captured['processor']==(args.model,{'revision':'b'*40})
+    assert captured['checked'] is model
+
+
+def test_llava_next_two_image_revision_keeps_target_first(monkeypatch):
+    from framediff import vlm
+    seen={}
+    class Inputs(dict):
+        def to(self,device):
+            seen['device']=str(device)
+            return self
+    class Processor:
+        tokenizer=SimpleNamespace(get_vocab=lambda:{})
+        def apply_chat_template(self,messages,**kwargs):
+            seen['content']=messages[0]['content']
+            return Inputs(input_ids=torch.tensor([[1,2]]))
+        def batch_decode(self,tokens,**kwargs):
+            return ['<html><body>ok</body></html>']
+    class Model:
+        device=torch.device('cpu')
+        config=SimpleNamespace(_commit_hash='b'*40)
+        _framediff_placement={'device':'cuda:0'}
+        def generate(self,**inputs):
+            return torch.tensor([[1,2,3]])
+    monkeypatch.setattr(torch.cuda,'reset_peak_memory_stats',lambda:None)
+    monkeypatch.setattr(torch.cuda,'synchronize',lambda:None)
+    monkeypatch.setattr(torch.cuda,'max_memory_allocated',lambda:123)
+    args=SimpleNamespace(image_labels=['Reference Webpage:','Current Webpage:'],
+        prompt_first=True,max_new_tokens=100,four_bit=True)
+    images=[Image.new('RGB',(4,4),'red'),Image.new('RGB',(4,4),'blue')]
+    answer,meta=vlm.hf_generate(args,'Revise the HTML',images,(Model(),Processor()))
+    content=seen['content']
+    assert [part['type'] for part in content]==['text','text','image','text','image']
+    assert [part['text'] for part in content if part['type']=='text']==[
+        'Revise the HTML','Reference Webpage:','Current Webpage:']
+    assert content[2]['image'] is images[0] and content[4]['image'] is images[1]
+    assert answer=='<html><body>ok</body></html>'
+    assert meta['weight_precision']=='nf4-4bit'
 
 
 @pytest.mark.parametrize('ids,expected', [([1,4,2,5],[5]),([1,4],None),([5],[5])])

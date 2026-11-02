@@ -43,12 +43,9 @@ def rollout(browser,html,tree,viewport,target_path,policy,parser=None,threshold=
                         oracle_elements,diagnostic_target_boxes,goal_threshold,
                         pixel_goal_fraction,pixel_goal_tolerance,stats)
     except Exception as exc:
-        # A failed render may have a dead page. In that case keep the input,
-        # but never invent zero execution costs for work already performed.
-        retained=html
-        if stats.get('_loaded') and not stats.get('_scroll_verification_pending'):
-            try:retained=browser.page.content()
-            except Exception:pass
+        # The browser may be dead or contain a partially applied failed edit.
+        # Keep the last completed edit, independently of browser availability.
+        retained=stats.pop('_last_success_html',html)
         stats.pop('_loaded',None)
         stats.pop('_scroll_verification_pending',None)
         stats.update(failed=True,error=str(exc),stop_reason='rollout_failed',
@@ -127,6 +124,7 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
                 html=Path(temporary,'normalized.html').read_text()
     t=time.perf_counter();browser.load(html,viewport);stats['layout_seconds']+=time.perf_counter()-t
     stats['_loaded']=True
+    stats['_last_success_html']=html
     current_html=html;current_tree=copy.deepcopy(tree)
     geometry_contract=getattr(cfg,'visual_geometry_contract',None)
     if geometry_contract:
@@ -247,6 +245,7 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
             break
         candidate_html=browser.page.content();stats['layout_seconds']+=time.perf_counter()-t
         history['accepted']=True;current_html=candidate_html;stats['actions']+=1
+        stats['_last_success_html']=current_html
     if pixel_goal_fraction>=0 and stats['stop_reason']=='steps' and stats['actions']:
         from .explicit_html import feedback_screenshot
         t=time.perf_counter();png=feedback_screenshot(browser,animations='disabled');browser.screenshots+=1
@@ -262,6 +261,7 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
     stats['scroll_preservation']=scroll_report
     if not scroll_report['accepted']:
         browser.load(html,viewport);current_html=html
+        stats['_last_success_html']=html
         stats['stop_reason']='scroll_preservation_rollback'
         stats['scroll_guard_rolled_back']=True
         stats['actions_before_scroll_rollback']=stats['actions']
@@ -285,6 +285,7 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
             state['diagnostic_metrics']=box_metrics(state['boxes'],diagnostic_target_boxes,viewport,(root,))
     stats['diagnostic_seconds']=time.perf_counter()-diagnostic_start
     stats.pop('_loaded',None)
+    stats.pop('_last_success_html',None)
     return current_html,stats,target
 
 

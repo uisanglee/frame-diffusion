@@ -197,7 +197,8 @@ def test_real_html_pipeline_shared_initial_no_truth_leakage(tmp_path,monkeypatch
 
 
 @pytest.mark.browser
-def test_design2code_self_revision_protocol(tmp_path,monkeypatch):
+@pytest.mark.parametrize('rounds', [1, 3])
+def test_design2code_self_revision_protocol(tmp_path,monkeypatch,rounds):
     root=tmp_path/'dataset';root.mkdir()
     Image.new('RGB',(320,240),'white').save(root/'page.png')
     (root/'page.html').write_text(HTML.replace('Hello','ORACLE PAGE TEXT'))
@@ -209,47 +210,55 @@ def test_design2code_self_revision_protocol(tmp_path,monkeypatch):
             return HTML,{}
         assert args.task=='revise-html'
         assert prompt.startswith('You are an expert web developer')
-        assert HTML in prompt and 'ORACLE PAGE TEXT' in prompt
+        assert '<html' in prompt and 'ORACLE PAGE TEXT' in prompt
         assert args.image_labels==['Reference Webpage:','Current Webpage:']
         return HTML.replace('left:10px','left:25px'),{}
     monkeypatch.setattr('framediff.vlm.generate',generate)
-    args=SimpleNamespace(root=str(root),manifest=None,out=str(tmp_path/'prepared'),rounds=1,
+    args=SimpleNamespace(root=str(root),manifest=None,out=str(tmp_path/'prepared'),rounds=rounds,
         max_nodes=16,max_pixels=1048576,max_new_tokens=4096,limit=0,seed=2024,resume=False,
         backend='openai-compatible',model='fake',revision='main',endpoint='http://unused',
         api_key_env='TEST_KEY',four_bit=False,initial_mode='text-augmented',
         revision_protocol='design2code',repair_conditioning='visual',vlm_retries=0,
         retry_failed=False,dataset='design2code',webui_view='default_1280-720')
     rows=prepare(args)
-    assert [item[0] for item in seen]==['generate-html','revise-html']
+    assert [item[0] for item in seen]==['generate-html'] + ['revise-html'] * rounds
     assert all(item[3] for item in seen)
-    method=rows[0]['methods']['design2code-self-revision']
-    assert not method['failed'] and method['vlm_calls']==2
+    label = 'design2code-self-revision' if rounds == 1 else 'design2code-self-revision-3'
+    method=rows[0]['methods'][label]
+    assert not method['failed'] and method['vlm_calls']==1 + rounds
     assert method['uses_reference_text'] is True
     assert rows[0]['revision_protocol']=='design2code'
     assert 'left:25px' in Path(method['html']).read_text()
-    prompt_json=read_json(next((tmp_path/'prepared/pages').glob('*/design2code-self-revision.prompt.json')))
+    prompt_json=read_json(next((tmp_path/'prepared/pages').glob(f'*/{label}.prompt.json')))
     assert prompt_json['images'][0].endswith('page.png')
-    assert prompt_json['images'][1].endswith('design2code-self-revision-input.png')
+    assert prompt_json['images'][1].endswith(f'{label}-input.png')
 
 
 @pytest.mark.browser
-def test_local_reference_render_is_shared_image_and_dom_target(tmp_path,monkeypatch):
+@pytest.mark.parametrize('dataset', ['design2code', 'webui'])
+def test_local_reference_render_is_shared_image_and_dom_target(tmp_path,monkeypatch,dataset):
     root=tmp_path/'dataset';root.mkdir()
     Image.new('RGB',(320,240),'black').save(root/'page.png')
     (root/'page.html').write_text(HTML)
+    manifest=tmp_path/'input.jsonl'
+    manifest.write_text(json.dumps(dict(id='page/view', html=str(root/'page.html'),
+        screenshot=str(root/'page.png'), reference_kind='webui_recorded_boxes',
+        reference_boxes=[{'stale':True}], viewport=[320,240]))+'\n')
     image_inputs=[]
     def generate(args,prompt,images,runtime):
         image_inputs.append(args.image[0])
         return HTML,{}
     monkeypatch.setattr('framediff.vlm.generate',generate)
-    args=SimpleNamespace(root=str(root),manifest=None,out=str(tmp_path/'prepared'),rounds=0,
+    args=SimpleNamespace(root=None,manifest=str(manifest),out=str(tmp_path/'prepared'),rounds=0,
         max_nodes=16,max_pixels=1048576,max_new_tokens=8192,limit=0,seed=42,resume=False,
         backend='openai-compatible',model='fake',revision='main',endpoint='http://unused',
         api_key_env='TEST_KEY',four_bit=False,initial_mode='direct',
         revision_protocol='shared',repair_conditioning='visual',vlm_retries=0,
-        retry_failed=False,dataset='design2code',webui_view='default_1280-720',
+        retry_failed=False,dataset=dataset,webui_view='default_1280-720',
         target_image_source='reference-render')
     row=prepare(args)[0]
+    assert row['reference_kind']=='rendered_html'
+    assert 'reference_boxes' not in row
     assert row['screenshot'].endswith('A_rendering.png')
     assert row['provided_screenshot']==str(root/'page.png')
     assert image_inputs==[row['screenshot']]
@@ -262,6 +271,15 @@ def test_local_reference_render_is_shared_image_and_dom_target(tmp_path,monkeypa
     assert metrics[0]['pixel_mae']==pytest.approx(0,abs=1e-8)
     assert metrics[0]['dom_box_iou']==pytest.approx(1,abs=1e-8)
     assert 'reported separately from standard Design2Code' in (tmp_path/'evaluation/report.md').read_text()
+    args.reference_manifest=str(tmp_path/'prepared/prepared.jsonl')
+    args.out=str(tmp_path/'second-seed')
+    args.seed=22
+    args.initial_temperature=.7
+    second=prepare(args)[0]
+    assert second['screenshot']==row['screenshot']
+    assert second['reference_observation']==row['reference_observation']
+    assert image_inputs[-1]==row['screenshot']
+
 
 
 @pytest.mark.browser
@@ -351,3 +369,23 @@ def test_official_real_scoring_identity_and_shift(tmp_path):
     for key in ('official_block','official_text','official_position','official_color','official_clip'):
         assert identity[key]==pytest.approx(1,abs=1e-4)
     assert shifted['official_position']<identity['official_position']
+
+
+@pytest.mark.browser
+def test_self_revision_keeps_success_before_later_failure(tmp_path,monkeypatch):
+    Image.new('RGB',(320,240),'white').save(tmp_path/'page.png')
+    (tmp_path/'page.html').write_text(HTML)
+    repaired=HTML.replace('left:10px','left:25px')
+    answers=iter([HTML,repaired,'truncated'])
+    monkeypatch.setattr('framediff.vlm.generate',lambda *a:(next(answers),{}))
+    args=SimpleNamespace(root=str(tmp_path),manifest=None,out=str(tmp_path/'out'),rounds=3,
+        max_nodes=16,max_pixels=1048576,max_new_tokens=4096,limit=0,seed=42,resume=False,
+        backend='openai-compatible',model='fake',revision='main',endpoint='http://unused',
+        api_key_env='TEST_KEY',four_bit=False,initial_mode='text-augmented',
+        revision_protocol='design2code',repair_conditioning='visual',vlm_retries=0)
+    row=prepare(args)[0]
+    from pathlib import Path
+    for step in (2,3):
+        result=row['methods'][f'design2code-self-revision-{step}']
+        assert result['failed']
+        assert Path(result['html']).read_text()==repaired

@@ -20,4 +20,4 @@ options=(--manifest "$1" --out "$2" --resume --rounds "${ROUNDS:-3}"
 evaluation=(--data "$2/results.jsonl" --out "$2/evaluation" --resume
   --max-nodes "${MAX_NODES:-2048}")
 if [[ -n ${OFFICIAL_REPO:-} ]]; then evaluation+=(--official-repo "$OFFICIAL_REPO"); fi
-"$python_bin" -m framediff web-evaluate "${evaluation[@]}"
+"${EVALUATION_PYTHON:-$python_bin}" -m framediff web-evaluate "${evaluation[@]}"

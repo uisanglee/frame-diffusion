@@ -20,7 +20,7 @@ def clipped_boxes(boxes, viewport, exclude=()):
     return result
 
 
-def discover_webui(root, view='default_1280-720', limit=0):
+def discover_webui(root, view='default_1280-720', limit=0, recorded_boxes=True):
     root = Path(root).resolve(); result = []
     images = sorted([*root.rglob('*-screenshot.webp'),*root.rglob('*-screenshot.png')])
     for image in images:
@@ -38,6 +38,12 @@ def discover_webui(root, view='default_1280-720', limit=0):
                 'reference_kind':'webui_recorded_boxes','viewport':viewport,'webui_view':prefix,
                 'reference_boxes':{},'reference_box_error':None,
                 'source_files':[str(p) for p in (ax_path,bb_path,url_path) if p.exists()]}
+        if not recorded_boxes:
+            item.update(reference_kind='rendered_html',source_files=[str(url_path)] if url_path.exists() else [])
+            item.pop('reference_boxes'); item.pop('reference_box_error')
+            result.append(item)
+            if limit and len(result)>=limit: break
+            continue
         try:
             size = re.fullmatch(r'default_(\d+)-(\d+)',prefix)
             if size and viewport!=[int(size[1]),int(size[2])]:
