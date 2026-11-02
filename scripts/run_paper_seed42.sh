@@ -11,11 +11,11 @@ case "$1" in
   qwen)
     export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
     export VLM_SPECS='qwen3vl8b|qwen|Qwen/Qwen3-VL-8B-Instruct|bf16'
-    output=runs/paper-qwen3vl8b-seed42-16k ;;
+    output=runs/paper-qwen3vl8b-seed42-16k-compact-v1 ;;
   llava)
     export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1}
     export VLM_SPECS='llava-next-7b|hf|llava-hf/llava-v1.6-mistral-7b-hf|4bit'
-    output=runs/paper-llava-next-7b-seed42-16k ;;
+    output=runs/paper-llava-next-7b-seed42-16k-compact-v1-temp02 ;;
   *) echo 'Model must be qwen or llava' >&2; exit 2 ;;
 esac
 [[ -f .venv/bin/activate ]] || { echo 'Missing .venv/bin/activate' >&2; exit 2; }
@@ -30,7 +30,7 @@ export OFFICIAL_REPO="$repo_root/external/design2code-official"
 export DETECTOR_CHECKPOINT="$TRAIN_RUN/detector/best.pt"
 export ABSTRACT_CHECKPOINT="$TRAIN_RUN/tuide-s-abstract/replacement/abstract-stage2/best.pt"
 export PAPER_REFERENCE_CACHE="$repo_root/.cache/paper-reference-renders"
-export PYTHONUNBUFFERED=1 INITIAL_SEEDS=42 INITIAL_TEMPERATURE=0.7
+export PYTHONUNBUFFERED=1 INITIAL_SEEDS=42 INITIAL_TEMPERATURE=auto
 export MAX_NEW_TOKENS=16384 PAGE_LIMIT=0 REPAIR_STEPS=20 REVISION_ROUNDS=3
 export RUN_UI2CODEN=1 RUN_ABLATION=0 REPEATS=1
 

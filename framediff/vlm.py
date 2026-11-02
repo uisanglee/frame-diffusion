@@ -12,6 +12,41 @@ from PIL import Image
 from .ir import DEFAULTS, LIMITS, read_json, validate, write_json
 from .data import differences
 
+def initial_temperature(model, requested='auto'):
+    """Paper draft defaults from model cards/configs; explicit overrides stay explicit.
+
+    LLaVA/Pixtral/Gemma values are official examples, not HTML-optimal claims.
+    """
+    defaults = {
+        'Qwen/Qwen3-VL-8B-Instruct': .7,
+        'zai-org/GLM-4.1V-9B-Thinking': .8,
+        'zai-org/UI2Code_N': .8,
+        'google/gemma-3-12b-it': 0.,  # Official image example: do_sample=False.
+        'llava-hf/llava-v1.6-mistral-7b-hf': .2,
+        'mistral-experimental/pixtral-12b': .35,
+        'mistral-community/pixtral-12b': .35,
+        'mistralai/Pixtral-12B-2409': .35,
+    }
+    if requested == 'auto':
+        if model not in defaults:
+            raise ValueError(f'No verified temperature default for {model}; set INITIAL_TEMPERATURE explicitly')
+        return defaults[model]
+    value = float(requested)
+    if not math.isfinite(value) or not 0 <= value <= 2:
+        raise ValueError('initial-temperature must be in [0,2]')
+    return value
+
+
+def generation_metadata(model, generation, max_new_tokens):
+    """Record inherited sampling settings too, not only generate() overrides."""
+    config = getattr(model, 'generation_config', None)
+    result = config.to_dict() if config is not None else {}
+    result.update({k:v for k,v in generation.items()
+                   if k not in ('stopping_criteria', 'logits_processor')})
+    result['max_new_tokens'] = max_new_tokens
+    result['sampling_active'] = bool(result.get('do_sample', False))
+    return result
+
 def json_answer(text):
     text=re.sub(r'^\s*```(?:json)?\s*','',text).strip()
     text=re.sub(r'\s*```\s*$','',text)
@@ -139,6 +174,20 @@ def load_hf_runtime(args):
     processor=AutoProcessor.from_pretrained(args.model,revision=model.config._commit_hash or args.revision)
     return model,processor
 
+def html_generation_options(args, processor, prompt_tokens, qwen=False):
+    from .html_generation import CSSRepeatStop, GeneratedPresencePenalty
+    options = {}
+    guard = None
+    if getattr(args, 'task', '').endswith('html'):
+        guard = CSSRepeatStop(processor, prompt_tokens)
+        options['stopping_criteria'] = [guard]
+    if qwen and getattr(args, 'temperature', 0.) > 0:
+        # Qwen3-VL model card VL settings; preserve the experiment's temperature.
+        options.update(top_p=0.8, top_k=20, repetition_penalty=1.0)
+        options['logits_processor'] = [GeneratedPresencePenalty(prompt_tokens)]
+    return options, guard
+
+
 def qwen_generate(args,prompt,images,runtime=None):
     import torch
     model,processor=runtime or load_qwen_runtime(args)
@@ -156,13 +205,17 @@ def qwen_generate(args,prompt,images,runtime=None):
     torch.cuda.reset_peak_memory_stats();torch.cuda.synchronize();start=time.perf_counter()
     temperature=getattr(args,'temperature',0.)
     # Keep the model's EOS IDs; the token budget is a ceiling, not a required length.
-    generation={'do_sample':temperature>0,'min_new_tokens':0,'min_length':0}
+    generation={'do_sample':temperature>0,'min_new_tokens':0}
     if temperature>0:
         torch.manual_seed(args.seed);generation['temperature']=temperature
+    extra, guard = html_generation_options(args, processor, inputs['input_ids'].shape[1], qwen=True)
+    generation.update(extra)
     with torch.inference_mode():outputs=model.generate(**inputs,max_new_tokens=args.max_new_tokens,**generation)
     torch.cuda.synchronize()
     answer=processor.batch_decode(outputs[:,inputs['input_ids'].shape[1]:],skip_special_tokens=True)[0]
-    return answer,{**getattr(model,'_framediff_placement',{}),'generation_seconds':time.perf_counter()-start,'peak_cuda_bytes':torch.cuda.max_memory_allocated(),
+    return answer,{**getattr(model,'_framediff_placement',{}),'generation_settings':generation_metadata(model,generation,args.max_new_tokens),
+                   'presence_penalty':1.5 if 'logits_processor' in generation else 0.,
+                   'generation_stop_reason':guard.reason if guard else None,'generation_seconds':time.perf_counter()-start,'peak_cuda_bytes':torch.cuda.max_memory_allocated(),
                    'resolved_revision':getattr(model.config,'_commit_hash',None),'input_tokens':inputs['input_ids'].shape[1],
                    'output_tokens':outputs.shape[1]-inputs['input_ids'].shape[1],
                    'weight_precision':'nf4-4bit' if args.four_bit else 'bf16'}
@@ -196,13 +249,17 @@ def hf_generate(args,prompt,images,runtime=None):
     torch.cuda.reset_peak_memory_stats();torch.cuda.synchronize();start=time.perf_counter()
     temperature=getattr(args,'temperature',0.)
     # Keep the model's EOS IDs; the token budget is a ceiling, not a required length.
-    generation={'do_sample':temperature>0,'min_new_tokens':0,'min_length':0}
+    generation={'do_sample':temperature>0,'min_new_tokens':0}
     if temperature>0:
         torch.manual_seed(args.seed);generation['temperature']=temperature
+    extra, guard = html_generation_options(args, processor, inputs['input_ids'].shape[1])
+    generation.update(extra)
     with torch.inference_mode():outputs=model.generate(**inputs,max_new_tokens=args.max_new_tokens,**generation)
     torch.cuda.synchronize();input_tokens=inputs['input_ids'].shape[1]
     answer=decode_hf_answer(processor,outputs[:,input_tokens:])
-    return answer,{**getattr(model,'_framediff_placement',{}),'generation_seconds':time.perf_counter()-start,'peak_cuda_bytes':torch.cuda.max_memory_allocated(),
+    return answer,{**getattr(model,'_framediff_placement',{}),'generation_settings':generation_metadata(model,generation,args.max_new_tokens),
+                   'presence_penalty':1.5 if 'logits_processor' in generation else 0.,
+                   'generation_stop_reason':guard.reason if guard else None,'generation_seconds':time.perf_counter()-start,'peak_cuda_bytes':torch.cuda.max_memory_allocated(),
                    'resolved_revision':getattr(model.config,'_commit_hash',None),'input_tokens':input_tokens,
                    'output_tokens':outputs.shape[1]-input_tokens,
                    'weight_precision':'nf4-4bit' if args.four_bit else 'bf16'}

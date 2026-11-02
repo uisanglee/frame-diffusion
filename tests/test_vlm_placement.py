@@ -5,6 +5,38 @@ import torch
 from PIL import Image
 from framediff.vlm import pin_revision, verify_cuda_placement
 
+@pytest.mark.parametrize('model,expected', [
+    ('Qwen/Qwen3-VL-8B-Instruct', .7),
+    ('zai-org/GLM-4.1V-9B-Thinking', .8),
+    ('zai-org/UI2Code_N', .8),
+    ('google/gemma-3-12b-it', 0.),
+    ('llava-hf/llava-v1.6-mistral-7b-hf', .2),
+    ('mistral-experimental/pixtral-12b', .35),
+])
+def test_paper_temperature_resolution(model, expected):
+    from framediff.vlm import initial_temperature
+    assert initial_temperature(model) == expected
+    assert initial_temperature(model, '0.1') == .1
+
+
+def test_unknown_and_invalid_temperature_fail_explicitly():
+    from framediff.vlm import initial_temperature
+    for model, value in [('unknown', 'auto'), ('unknown', 'nan'), ('unknown', '-1')]:
+        with pytest.raises(ValueError):
+            initial_temperature(model, value)
+
+
+def test_metadata_records_inherited_values_without_mutating_model():
+    from framediff.vlm import generation_metadata
+    base = {'temperature': .8, 'top_p': .6, 'top_k': 2, 'eos_token_id': [1,2], 'do_sample': True}
+    model = SimpleNamespace(generation_config=SimpleNamespace(to_dict=lambda:dict(base)))
+    result = generation_metadata(model, {'do_sample': False, 'stopping_criteria': [object()]}, 16384)
+    assert result['top_p'] == .6 and result['top_k'] == 2
+    assert not result['sampling_active']
+    assert result['eos_token_id'] == [1,2]
+    assert 'stopping_criteria' not in result
+    assert base['do_sample'] is True
+
 
 def test_revision_pin_reused_without_hub(tmp_path, monkeypatch):
     calls=[]
@@ -136,7 +168,7 @@ def test_two_image_revision_keeps_target_first_and_allows_short_output(monkeypat
     answer,meta=getattr(vlm,backend+'_generate')(args,'Revise the HTML',images,(Model(),Processor()))
     assert seen['generation']['max_new_tokens']==16384
     assert seen['generation']['min_new_tokens']==0
-    assert seen['generation']['min_length']==0
+    assert 'min_length' not in seen['generation']  # Avoid conflicting minimum-length options.
     assert 'eos_token_id' not in seen['generation']  # Preserve each model's EOS configuration.
     assert meta['output_tokens']==1
     content=seen['content']

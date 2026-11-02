@@ -174,6 +174,8 @@ def prepare(args):
                 'placeholder_sha':digest(Path(i['html']).parent/'rick.jpg')
                     if i.get('html') and (Path(i['html']).parent/'rick.jpg').exists() else None} for i in items]
     settings = {k:v for k,v in vars(args).items() if k not in ('resume','out','retry_failed')}
+    from .html_generation import CONTRACT
+    settings['html_generation_contract'] = CONTRACT
     if not settings.get('generate_initial'):
         settings.pop('generate_initial',None)
     if not settings.get('reference_cache'):
@@ -205,6 +207,9 @@ def prepare(args):
         c.temperature = getattr(args,'initial_temperature',0.) if label == 'initial' and task == 'generate-html' else 0.
         c.image_labels=image_labels; c.prompt_first=prompt_first
         base_prompt = extra if literal_prompt or task=='repair-plan' else extra + vlm.prompt_for(c)
+        if task.endswith('html'):
+            from .html_generation import PROMPT
+            base_prompt = PROMPT + base_prompt
         def generate(attempt, feedback):
             name = label if attempt==0 else f'{label}.retry-{attempt}'
             c.seed = int.from_bytes(hashlib.sha256(f'{args.seed}|{record["id"]}|{name}'.encode()).digest()[:4], 'big') if c.temperature else args.seed
@@ -226,6 +231,8 @@ def prepare(args):
             output_tokens=int(meta.get('output_tokens',raw_usage.get('completion_tokens',raw_usage.get('output_tokens',0))) or 0)
             usage=record['vlm_usage'].setdefault(label,{'input_tokens':0,'output_tokens':0})
             usage['input_tokens']+=input_tokens;usage['output_tokens']+=output_tokens
+            if meta.get('generation_stop_reason') == 'repeated_css_generation':
+                raise ValueError('repeated_css_generation: stopped runaway CSS output; raw response saved')
             return answer, elapsed
         return validated_generation(generate,validator,retries)
 

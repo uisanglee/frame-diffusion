@@ -45,12 +45,6 @@ for seed in "${seed_entries[@]}"; do
   [[ "$seed" =~ ^[0-9]+$ && "$seen_seeds" != *",$seed,"* ]] || { echo "Invalid or duplicate initial seed: $seed" >&2; exit 2; }
   seen_seeds+="$seed,"
 done
-if [[ ${#seed_entries[@]} -gt 1 ]]; then
-  initial_temperature=${INITIAL_TEMPERATURE:-0.7}
-  [[ "$initial_temperature" != 0 && "$initial_temperature" != 0.0 ]] || { echo 'Multiple initial seeds require sampling; set INITIAL_TEMPERATURE above zero' >&2; exit 2; }
-else
-  initial_temperature=${INITIAL_TEMPERATURE:-0}
-fi
 for entry in "${entries[@]}"; do
   revision=${VLM_REVISION:-main}
   if [[ "$entry" == *'|'* ]]; then
@@ -62,6 +56,20 @@ for entry in "${entries[@]}"; do
   fi
   [[ -n "$alias" && -n "$backend" && -n "$model" ]] || { echo "Invalid VLM spec: $entry" >&2; exit 2; }
   [[ "$backend" == qwen || "$backend" == hf || "$backend" == openai-compatible ]] || { echo "Invalid backend in: $entry" >&2; exit 2; }
+  temperature_request=${INITIAL_TEMPERATURE:-auto}
+  if [[ "$backend" == openai-compatible && "$temperature_request" == auto ]]; then
+    temperature_request=0
+    [[ ${#seed_entries[@]} -le 1 ]] || temperature_request=0.7
+  fi
+  initial_temperature=$(python - "$model" "$temperature_request" "${#seed_entries[@]}" <<'PYTEMP'
+import sys
+from framediff.vlm import initial_temperature
+value = initial_temperature(sys.argv[1], sys.argv[2])
+if int(sys.argv[3]) > 1 and value == 0:
+    raise SystemExit('This model defaults to greedy generation. Use one initial seed, or explicitly set INITIAL_TEMPERATURE above zero for a sampling experiment.')
+print(value)
+PYTEMP
+  )
   case "$precision" in bf16) four_bit=0;; 4bit) four_bit=1;; server) four_bit=0;; *) echo "Precision must be bf16, 4bit, or server: $entry" >&2;exit 2;; esac
   endpoint=${endpoint:-http://localhost:8000/v1/chat/completions}
   api_key_env=${api_key_env:-${VLM_API_KEY_ENV:-VLM_API_KEY}}
@@ -85,7 +93,7 @@ PYREV
     seed_output="$output/$alias/seeds/$seed"
     abstract=0
     [[ "$run_ablation" == 1 && "$alias" == "$representative" && "$seed" == "${seed_entries[0]}" ]] && abstract=1
-    echo "Running $alias initial seed=$seed ($backend, $model, $precision), abstract ablation=$abstract"
+    echo "Running $alias initial seed=$seed temperature=$initial_temperature ($backend, $model, $precision), abstract ablation=$abstract"
     CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} WEB_DATASET="${WEB_DATASET:-design2code}" SELF_REVISION_PROTOCOL=design2code REVISION_ROUNDS="$rounds" \
       TARGET_IMAGE_SOURCE="${TARGET_IMAGE_SOURCE:-reference-render}" REFERENCE_MANIFEST="$shared_target_manifest" \
       INITIAL_TEMPERATURE="$initial_temperature" SEED="$seed" \

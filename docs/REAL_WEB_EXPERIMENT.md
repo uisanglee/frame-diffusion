@@ -373,3 +373,65 @@ shell 호출은 실행하지 않고 같은 network-disabled Chromium 렌더러�
 ```bash
 FRAMEDIFF_OFFICIAL_REPO="$OFFICIAL_REPO" python -m pytest tests/test_web_experiment.py -k official -q
 ```
+
+### Compact HTML generation contract (2026-11-02)
+
+`compact-html-css-repeat-v1` adds a shared compact-CSS instruction to Initial and
+self-revision prompts. The output budget remains 16384; EOS can end generation earlier.
+Local Qwen sampling retains the requested temperature (automatic paper Initial: 0.7), explicitly
+sets top-p=0.8, top-k=20, repetition penalty=1.0, and applies presence penalty=1.5 to
+generated tokens only, following the VL recommendations at
+https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct . Greedy self-revision remains greedy;
+other models retain their model-specific sampling defaults.
+
+For local Qwen/HF HTML generation, every 128 generated tokens after token 512,
+a bounded 8192-token suffix is decoded. An open style block whose last up-to-48
+complete CSS rules contain at least 24 rules, at most four distinct normalized rules,
+and at least six occurrences of each is stopped. Whitespace and numeric nth-child
+indices are normalized. This is a conservative heuristic, not a proof of invalid CSS;
+it does not reject repeated HTML rows or guarantee detection of every runaway output.
+API generation is not streamed, so it does not receive this early-stop optimization.
+
+The raw response and token/time metadata are retained. A repetition stop is recorded
+as `repeated_css_generation`, never as successful HTML, and is not automatically
+retried. Normal HTML validation still applies. `generation_settings`, `presence_penalty`,
+and `generation_stop_reason` are saved with local generation metadata.
+
+The changed protocol is included in the preparation configuration to prevent mixing
+old and new experiment results. `run_paper_seed42.sh` now writes to
+`runs/paper-qwen3vl8b-seed42-16k-compact-v1` or
+`runs/paper-llava-next-7b-seed42-16k-compact-v1-temp02`; shared reference renders and trained
+checkpoints are reused. Existing 16k experiment outputs are preserved. These settings
+are our adapted protocol, not an unchanged reproduction of the Design2Code prompts.
+
+### Model-specific initial sampling
+
+`run_paper_experiments.sh` now defaults to `INITIAL_TEMPERATURE=auto` for local
+models. The resolved numeric temperature is passed to preparation and recorded in
+its resume configuration. Explicit numeric overrides remain supported in this generic
+script; `run_paper_seed42.sh` always selects `auto`.
+
+| Model | Initial temperature | Basis |
+| --- | --- | --- |
+| Qwen3-VL-8B-Instruct | 0.7 | [Official VL hyperparameters](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct#generation-hyperparameters) |
+| GLM-4.1V-9B-Thinking | 0.8 | [Published generation config](https://huggingface.co/zai-org/GLM-4.1V-9B-Thinking/raw/main/generation_config.json) |
+| UI2Code_N | 0.8 | [Published generation config](https://huggingface.co/zai-org/UI2Code_N/blob/main/generation_config.json), not a verified paper evaluation setting |
+| Gemma-3-12b-it | 0 (greedy) | [Official image inference example](https://huggingface.co/google/gemma-3-12b-it) uses `do_sample=False` |
+| LLaVA-NeXT Mistral 7B | 0.2 | [Official VQA script default](https://github.com/haotian-liu/LLaVA/blob/main/llava/eval/model_vqa.py) |
+| Pixtral-12B | 0.35 | [Official Mistral-inference example](https://huggingface.co/mistralai/Pixtral-12B-2409); its vLLM example instead uses 0.7 |
+
+Examples are not claims of optimal HTML generation settings. Self-revision and
+the independent UI2CodeN polishing runner retain their existing greedy protocol.
+GLM/UI2CodeN inherit top-p/top-k from the pinned checkpoint; Qwen's explicit VL
+sampling parameters are applied as described above. Local response metadata now
+records the inherited generation configuration plus overrides and `sampling_active`.
+Temperature/top-p/top-k listed in metadata are inactive when sampling is false.
+
+Multiple initial seeds with a greedy model are rejected, rather than reporting
+duplicate greedy outputs as seed variability. For a full multi-seed matrix including
+Gemma, explicitly choose and document a positive sampling temperature, or run the
+greedy model separately with one seed. Unknown local models require an explicit
+temperature. API model defaults are unchanged (0 for one seed, 0.7 for multiple seeds).
+Changing the numeric temperature requires a new output directory; existing results
+are preserved. The seed42 LLaVA wrapper uses a new `-temp02` output directory for this
+reason, while Qwen's unchanged 0.7 run can resume.
