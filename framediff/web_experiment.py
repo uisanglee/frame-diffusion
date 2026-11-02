@@ -92,6 +92,8 @@ def add_parsers(sub):
     p.add_argument('--retry-failed', action='store_true', help='With resume, regenerate failed preparation pages; use new downstream output directories')
     p.add_argument('--vlm-retries', type=int, default=2, help='Additional validation retries per VLM operation')
     p.add_argument('--initial-mode', choices=['direct','text-augmented'], default='direct')
+    p.add_argument('--generate-initial', action='store_true',
+                   help='Generate a VLM draft instead of using manifest initial_html; leave source manifest unchanged')
     p.add_argument('--revision-protocol', choices=['shared','design2code'], default='shared',
                    help='design2code: paper text-augmented initial + requested visual Self-Revision rounds')
     p.add_argument('--target-image-source', choices=['provided','reference-render'], default='provided',
@@ -148,6 +150,10 @@ def prepare(args):
     if args.limit: items = items[:args.limit]
     if not items or len({i['id'] for i in items}) != len(items):
         raise ValueError('Empty dataset or duplicate IDs')
+    if getattr(args,'generate_initial',False):
+        # Controlled-test manifests contain a synthetic corrupted initial_html.
+        # The VLM comparison must generate its own draft from the target instead.
+        items = [{k:v for k,v in item.items() if k != 'initial_html'} for item in items]
     if revision_protocol == 'design2code':
         if args.initial_mode != 'text-augmented':
             raise ValueError('design2code revision requires --initial-mode text-augmented')
@@ -164,6 +170,8 @@ def prepare(args):
                 'placeholder_sha':digest(Path(i['html']).parent/'rick.jpg')
                     if i.get('html') and (Path(i['html']).parent/'rick.jpg').exists() else None} for i in items]
     settings = {k:v for k,v in vars(args).items() if k not in ('resume','out','retry_failed')}
+    if not settings.get('generate_initial'):
+        settings.pop('generate_initial',None)
     if reference_manifest:
         settings['reference_manifest_sha256']=digest(reference_manifest)
     else:

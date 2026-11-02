@@ -197,8 +197,9 @@ def test_real_html_pipeline_shared_initial_no_truth_leakage(tmp_path,monkeypatch
 
 
 @pytest.mark.browser
-@pytest.mark.parametrize('rounds', [1, 3])
-def test_design2code_self_revision_protocol(tmp_path,monkeypatch,rounds):
+@pytest.mark.parametrize('rounds', [0, 1, 3])
+@pytest.mark.parametrize('generate_initial', [False, True])
+def test_design2code_self_revision_protocol(tmp_path,monkeypatch,rounds,generate_initial):
     root=tmp_path/'dataset';root.mkdir()
     Image.new('RGB',(320,240),'white').save(root/'page.png')
     (root/'page.html').write_text(HTML.replace('Hello','ORACLE PAGE TEXT'))
@@ -220,9 +221,24 @@ def test_design2code_self_revision_protocol(tmp_path,monkeypatch,rounds):
         api_key_env='TEST_KEY',four_bit=False,initial_mode='text-augmented',
         revision_protocol='design2code',repair_conditioning='visual',vlm_retries=0,
         retry_failed=False,dataset='design2code',webui_view='default_1280-720')
+    if generate_initial:
+        manifest=tmp_path/'controlled-pages.jsonl'
+        source=dict(id='page',html=str(root/'page.html'),screenshot=str(root/'page.png'),
+                    initial_html=str(tmp_path/'nonexistent-corruption.html'))
+        original=json.dumps(source)+'\n'
+        manifest.write_text(original)
+        args.root=None; args.manifest=str(manifest); args.dataset='webui'
+        with pytest.raises(ValueError,match='remove initial_html'):
+            prepare(args)
+        args.generate_initial=True
     rows=prepare(args)
+    if generate_initial:
+        assert manifest.read_text()==original
     assert [item[0] for item in seen]==['generate-html'] + ['revise-html'] * rounds
     assert all(item[3] for item in seen)
+    if rounds == 0:
+        assert not rows[0]['methods']['initial']['failed']
+        return
     label = 'design2code-self-revision' if rounds == 1 else 'design2code-self-revision-3'
     method=rows[0]['methods'][label]
     assert not method['failed'] and method['vlm_calls']==1 + rounds

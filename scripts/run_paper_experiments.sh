@@ -32,6 +32,7 @@ PYREV
   )
 fi
 export REPEATS=${REPEATS:-1}
+export GENERATE_INITIAL=1
 abstract_only=1
 [[ "$run_ablation" == 1 ]] && abstract_only=0
 aliases=()

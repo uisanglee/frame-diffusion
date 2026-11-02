@@ -38,8 +38,10 @@ case "${SELF_REVISION_PROTOCOL:-none}" in
   *) echo 'SELF_REVISION_PROTOCOL must be none, shared, or design2code' >&2; exit 2 ;;
 esac
 reference_options=()
+initial_options=()
+[[ "${GENERATE_INITIAL:-0}" == 1 ]] && initial_options=(--generate-initial)
 [[ -n "${REFERENCE_MANIFEST:-}" ]] && reference_options=(--reference-manifest "$REFERENCE_MANIFEST")
-python -m framediff web-prepare "${source_options[@]}" "${vlm_options[@]}" "${reference_options[@]}" \
+python -m framediff web-prepare "${source_options[@]}" "${vlm_options[@]}" "${reference_options[@]}" "${initial_options[@]}" \
   --out "$output_root/prepare" --repair-conditioning visual "${revision_options[@]}" \
   --target-image-source "${TARGET_IMAGE_SOURCE:-provided}" \
   --initial-temperature "${INITIAL_TEMPERATURE:-0}" \
