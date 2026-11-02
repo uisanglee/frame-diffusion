@@ -399,7 +399,7 @@ and `generation_stop_reason` are saved with local generation metadata.
 
 The changed protocol is included in the preparation configuration to prevent mixing
 old and new experiment results. `run_paper_seed42.sh` now writes to
-`runs/paper-qwen3vl8b-seed42-16k-compact-v1` or
+`runs/paper-qwen3vl8b-seed42-16k` or
 `runs/paper-llava-next-7b-seed42-16k-compact-v1-temp02`; shared reference renders and trained
 checkpoints are reused. Existing 16k experiment outputs are preserved. These settings
 are our adapted protocol, not an unchanged reproduction of the Design2Code prompts.

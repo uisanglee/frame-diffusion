@@ -11,7 +11,7 @@ case "$1" in
   qwen)
     export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
     export VLM_SPECS='qwen3vl8b|qwen|Qwen/Qwen3-VL-8B-Instruct|bf16'
-    output=runs/paper-qwen3vl8b-seed42-16k-compact-v1 ;;
+    output=runs/paper-qwen3vl8b-seed42-16k ;;
   llava)
     export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1}
     export VLM_SPECS='llava-next-7b|hf|llava-hf/llava-v1.6-mistral-7b-hf|4bit'
