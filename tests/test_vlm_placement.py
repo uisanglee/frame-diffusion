@@ -5,6 +5,17 @@ import torch
 from PIL import Image
 from framediff.vlm import pin_revision, verify_cuda_placement
 
+@pytest.mark.parametrize('pad,eos,expected', [
+    (None, 2, {'pad_token_id': 2}),
+    (None, [2,3], {'pad_token_id': 2}),
+    (0, 2, {}), (None, None, {}), (None, [], {}),
+])
+def test_explicit_padding_preserves_existing_config(pad, eos, expected):
+    from framediff.vlm import explicit_padding
+    config = SimpleNamespace(pad_token_id=pad, eos_token_id=eos)
+    assert explicit_padding(SimpleNamespace(generation_config=config)) == expected
+    assert config.pad_token_id == pad and config.eos_token_id == eos
+
 @pytest.mark.parametrize('model,expected', [
     ('Qwen/Qwen3-VL-8B-Instruct', .7),
     ('zai-org/GLM-4.1V-9B-Thinking', .8),

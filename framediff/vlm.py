@@ -37,6 +37,17 @@ def initial_temperature(model, requested='auto'):
     return value
 
 
+def explicit_padding(model):
+    """Mirror Transformers' missing-pad fallback without its per-call warning."""
+    config = getattr(model, 'generation_config', None)
+    if config is None or getattr(config, 'pad_token_id', None) is not None:
+        return {}
+    eos = getattr(config, 'eos_token_id', None)
+    if isinstance(eos, (list, tuple)):
+        eos = eos[0] if eos else None
+    return {'pad_token_id': eos} if eos is not None else {}
+
+
 def generation_metadata(model, generation, max_new_tokens):
     """Record inherited sampling settings too, not only generate() overrides."""
     config = getattr(model, 'generation_config', None)
@@ -205,7 +216,7 @@ def qwen_generate(args,prompt,images,runtime=None):
     torch.cuda.reset_peak_memory_stats();torch.cuda.synchronize();start=time.perf_counter()
     temperature=getattr(args,'temperature',0.)
     # Keep the model's EOS IDs; the token budget is a ceiling, not a required length.
-    generation={'do_sample':temperature>0,'min_new_tokens':0}
+    generation={'do_sample':temperature>0,'min_new_tokens':0,**explicit_padding(model)}
     if temperature>0:
         torch.manual_seed(args.seed);generation['temperature']=temperature
     extra, guard = html_generation_options(args, processor, inputs['input_ids'].shape[1], qwen=True)
@@ -249,7 +260,7 @@ def hf_generate(args,prompt,images,runtime=None):
     torch.cuda.reset_peak_memory_stats();torch.cuda.synchronize();start=time.perf_counter()
     temperature=getattr(args,'temperature',0.)
     # Keep the model's EOS IDs; the token budget is a ceiling, not a required length.
-    generation={'do_sample':temperature>0,'min_new_tokens':0}
+    generation={'do_sample':temperature>0,'min_new_tokens':0,**explicit_padding(model)}
     if temperature>0:
         torch.manual_seed(args.seed);generation['temperature']=temperature
     extra, guard = html_generation_options(args, processor, inputs['input_ids'].shape[1])
