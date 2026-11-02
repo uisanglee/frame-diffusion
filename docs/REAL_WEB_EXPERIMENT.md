@@ -238,7 +238,7 @@ python -m framediff web-evaluate \
 ```bash
 python -m framediff web-prepare --root "$D2C_ROOT" --out runs/d2c-paper/prepare \
   --repair-conditioning visual --initial-mode text-augmented --rounds 1 \
-  --revision-protocol design2code --seed 2024 --max-new-tokens 4096 --vlm-retries 0
+  --revision-protocol design2code --seed 2024 --max-new-tokens 16384 --vlm-retries 0
 ```
 
 이때 `initial_html`을 받지 않고 text-augmented initial부터 새로 생성하며 결과 method 이름은

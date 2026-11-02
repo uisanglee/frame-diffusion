@@ -105,7 +105,8 @@ def test_llava_next_loader_uses_nf4_and_one_gpu(monkeypatch):
     assert captured['checked'] is model
 
 
-def test_llava_next_two_image_revision_keeps_target_first(monkeypatch):
+@pytest.mark.parametrize('backend', ['hf', 'qwen'])
+def test_two_image_revision_keeps_target_first_and_allows_short_output(monkeypatch, backend):
     from framediff import vlm
     seen={}
     class Inputs(dict):
@@ -124,14 +125,20 @@ def test_llava_next_two_image_revision_keeps_target_first(monkeypatch):
         config=SimpleNamespace(_commit_hash='b'*40)
         _framediff_placement={'device':'cuda:0'}
         def generate(self,**inputs):
+            seen['generation']=inputs
             return torch.tensor([[1,2,3]])
     monkeypatch.setattr(torch.cuda,'reset_peak_memory_stats',lambda:None)
     monkeypatch.setattr(torch.cuda,'synchronize',lambda:None)
     monkeypatch.setattr(torch.cuda,'max_memory_allocated',lambda:123)
     args=SimpleNamespace(image_labels=['Reference Webpage:','Current Webpage:'],
-        prompt_first=True,max_new_tokens=100,four_bit=True)
+        prompt_first=True,max_new_tokens=16384,four_bit=True)
     images=[Image.new('RGB',(4,4),'red'),Image.new('RGB',(4,4),'blue')]
-    answer,meta=vlm.hf_generate(args,'Revise the HTML',images,(Model(),Processor()))
+    answer,meta=getattr(vlm,backend+'_generate')(args,'Revise the HTML',images,(Model(),Processor()))
+    assert seen['generation']['max_new_tokens']==16384
+    assert seen['generation']['min_new_tokens']==0
+    assert seen['generation']['min_length']==0
+    assert 'eos_token_id' not in seen['generation']  # Preserve each model's EOS configuration.
+    assert meta['output_tokens']==1
     content=seen['content']
     assert [part['type'] for part in content]==['text','text','image','text','image']
     assert [part['text'] for part in content if part['type']=='text']==[

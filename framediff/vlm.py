@@ -155,7 +155,8 @@ def qwen_generate(args,prompt,images,runtime=None):
     inputs=processor.apply_chat_template(messages,tokenize=True,add_generation_prompt=True,return_dict=True,return_tensors='pt').to(model.device)
     torch.cuda.reset_peak_memory_stats();torch.cuda.synchronize();start=time.perf_counter()
     temperature=getattr(args,'temperature',0.)
-    generation={'do_sample':temperature>0}
+    # Keep the model's EOS IDs; the token budget is a ceiling, not a required length.
+    generation={'do_sample':temperature>0,'min_new_tokens':0,'min_length':0}
     if temperature>0:
         torch.manual_seed(args.seed);generation['temperature']=temperature
     with torch.inference_mode():outputs=model.generate(**inputs,max_new_tokens=args.max_new_tokens,**generation)
@@ -194,7 +195,8 @@ def hf_generate(args,prompt,images,runtime=None):
         add_generation_prompt=True,return_dict=True,return_tensors='pt').to(model.device)
     torch.cuda.reset_peak_memory_stats();torch.cuda.synchronize();start=time.perf_counter()
     temperature=getattr(args,'temperature',0.)
-    generation={'do_sample':temperature>0}
+    # Keep the model's EOS IDs; the token budget is a ceiling, not a required length.
+    generation={'do_sample':temperature>0,'min_new_tokens':0,'min_length':0}
     if temperature>0:
         torch.manual_seed(args.seed);generation['temperature']=temperature
     with torch.inference_mode():outputs=model.generate(**inputs,max_new_tokens=args.max_new_tokens,**generation)

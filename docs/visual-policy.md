@@ -205,7 +205,8 @@ bash scripts/run_visual_web.sh "$D2C_ROOT" runs/visual-d2c-self-revision runs/vi
 이 옵션은 공식 코드와 같이 (1) reference HTML에서 추출한 줄 단위 텍스트와 목표 screenshot으로
 initial HTML을 생성하고, (2) 목표 screenshot, initial 렌더링, initial HTML, 같은 텍스트를 입력해
 전체 HTML을 한 번 수정한다. 결과 method는 `initial`과 `design2code-self-revision`이다.
-기본 생성값도 논문의 `seed=2024`, `max_new_tokens=4096`, validation retry 0으로 바뀐다.
+기본 생성값은 `seed=2024`, `max_new_tokens=16384`, validation retry 0이다.
+출력 한도는 원 논문의 4096에서 늘린 실험 설정이며, 모델의 EOS 종료 토큰이 나오면 생성을 마친다. 16384토큰을 채우도록 강제하지 않는다.
 `SEED`, `MAX_NEW_TOKENS`, `VLM_RETRIES`로 명시적으로 덮어쓸 수 있다.
 
 이 baseline은 **reference HTML의 oracle text를 사용**하므로 screenshot-only 결과와 입력 조건이
