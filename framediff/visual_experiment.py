@@ -19,6 +19,7 @@ from .visual import (CONTRACT,ACTION_CONTRACT,abstract_image,elements,image_tens
                      current_features,visual_batch,decode_action,load_policy)
 from .visual_train import load_detector,detect,detector_input
 from .web_experiment import digest,guard_run,signature
+from .runtime_errors import raise_if_fatal
 
 
 def sync(device):
@@ -43,6 +44,7 @@ def rollout(browser,html,tree,viewport,target_path,policy,parser=None,threshold=
                         oracle_elements,diagnostic_target_boxes,goal_threshold,
                         pixel_goal_fraction,pixel_goal_tolerance,stats)
     except Exception as exc:
+        raise_if_fatal(exc)
         # The browser may be dead or contain a partially applied failed edit.
         # Keep the last completed edit, independently of browser availability.
         retained=stats.pop('_last_success_html',html)
@@ -362,7 +364,9 @@ def evaluate(args):
                             getattr(args,'abstract_goal_threshold',-1) if methods[method].cfg.semantic else args.goal_threshold,
                             getattr(args,'pixel_goal_fraction',.99),getattr(args,'pixel_goal_tolerance',.005))
                         if stats.get('failed'):error=stats.get('error') or 'Rollout failed'
-                    except Exception as exc:error=str(exc)
+                    except Exception as exc:
+                        raise_if_fatal(exc)
+                        error=str(exc)
                     if 'seconds' not in stats:stats['seconds']=time.perf_counter()-started
                     path=work/f'{method}-r{repeat+1}.html';path.write_text(html)
                     if target is not None and method!='screenshot-policy':target.save(work/f'{method}-r{repeat+1}-target.png')

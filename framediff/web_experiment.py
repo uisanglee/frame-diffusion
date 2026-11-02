@@ -21,6 +21,7 @@ from .benchmarks import discover_design2code
 from .html_bridge import HtmlBrowser, embed_placeholder, html_answer
 from .ir import execute, read_json, read_jsonl, write_json, write_jsonl
 from .metrics import hungarian_box_metrics
+from .runtime_errors import raise_if_fatal
 
 
 def digest(path):
@@ -92,6 +93,7 @@ def add_parsers(sub):
     p.add_argument('--retry-failed', action='store_true', help='With resume, regenerate failed preparation pages; use new downstream output directories')
     p.add_argument('--vlm-retries', type=int, default=2, help='Additional validation retries per VLM operation')
     p.add_argument('--initial-mode', choices=['direct','text-augmented'], default='direct')
+    p.add_argument('--reference-cache', help='Shared locked reference-render cache across independent seed runs')
     p.add_argument('--generate-initial', action='store_true',
                    help='Generate a VLM draft instead of using manifest initial_html; leave source manifest unchanged')
     p.add_argument('--revision-protocol', choices=['shared','design2code'], default='shared',
@@ -153,7 +155,9 @@ def prepare(args):
     if getattr(args,'generate_initial',False):
         # Controlled-test manifests contain a synthetic corrupted initial_html.
         # The VLM comparison must generate its own draft from the target instead.
-        items = [{k:v for k,v in item.items() if k != 'initial_html'} for item in items]
+        source_fields = {'id','page_id','group','split','source_sha','source_files',
+                         'html','screenshot','viewport','view','webui_view'}
+        items = [{k:v for k,v in item.items() if k in source_fields} for item in items]
     if revision_protocol == 'design2code':
         if args.initial_mode != 'text-augmented':
             raise ValueError('design2code revision requires --initial-mode text-augmented')
@@ -172,6 +176,8 @@ def prepare(args):
     settings = {k:v for k,v in vars(args).items() if k not in ('resume','out','retry_failed')}
     if not settings.get('generate_initial'):
         settings.pop('generate_initial',None)
+    if not settings.get('reference_cache'):
+        settings.pop('reference_cache',None)
     if reference_manifest:
         settings['reference_manifest_sha256']=digest(reference_manifest)
     else:
@@ -258,6 +264,13 @@ def prepare(args):
                     reference_observation = source['reference_observation']
                     if not Path(target_screenshot).is_file() or not Path(reference_observation).is_file():
                         raise FileNotFoundError(f'Missing shared target observation: {item["id"]}')
+                elif getattr(args,'reference_cache',None):
+                    from .paper_reference import shared_reference
+                    target_render_start = time.perf_counter()
+                    target_screenshot, reference_observation = shared_reference(browser,
+                        embed_placeholder(Path(item['html']).read_text(),placeholder),
+                        viewport,args.reference_cache)
+                    target_render_seconds = time.perf_counter()-target_render_start
                 else:
                     target_render_start = time.perf_counter()
                     target_screenshot = str(work/'A_rendering.png')
@@ -311,6 +324,7 @@ def prepare(args):
                     raw,_ = call('generate-html',[target_screenshot],None,work,'initial',extra)
                     initial = raw
             except Exception as error:
+                raise_if_fatal(error)
                 record['errors']['initial'] = str(error)
             initial_path = work/'initial.html'; initial_path.write_text(initial)
             initial_calls = record['vlm_attempts'].get('initial',0)
@@ -348,6 +362,7 @@ def prepare(args):
                         browser.snapshot(embed_placeholder(candidate,placeholder),viewport,max_nodes=args.max_nodes-1)
                         current = candidate
                     except Exception as error:
+                        raise_if_fatal(error)
                         failure = str(error)
                 elapsed += time.perf_counter()-start; renders += browser.executions-before
                 revision_prefix = 'design2code-self-revision' if revision_protocol=='design2code' else 'self-revision-'
@@ -415,6 +430,7 @@ def prepare(args):
                     target['target'][tree['nodes'][0]['id']] = [0,0,*viewport]
                     record['observations']=[target]
             except Exception as error:
+                raise_if_fatal(error)
                 record['errors']['frames'] = str(error)
             record['frame_seconds'] = time.perf_counter()-start
             record['frame_vlm_calls'] = record['vlm_attempts'].get('target-frames',0)+record['vlm_attempts'].get('repair-plan',0)

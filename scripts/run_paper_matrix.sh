@@ -6,6 +6,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 webui=$1; d2c=$2; hard=$3; output=$4; train=$5
 : "${OFFICIAL_REPO:?Set OFFICIAL_REPO}"
 export INITIAL_SEEDS=${INITIAL_SEEDS:-11,22,33} REPEATS=1 RUN_UI2CODEN=1 RUN_ABLATION=0
+export PAPER_REFERENCE_CACHE=${PAPER_REFERENCE_CACHE:-$PWD/.cache/paper-reference-renders}
 # Validate every dataset before starting any generation.
 python - "$webui" "$d2c" "$hard" <<'PY'
 import sys

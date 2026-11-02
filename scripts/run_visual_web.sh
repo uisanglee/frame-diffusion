@@ -41,6 +41,7 @@ reference_options=()
 initial_options=()
 [[ "${GENERATE_INITIAL:-0}" == 1 ]] && initial_options=(--generate-initial)
 [[ -n "${REFERENCE_MANIFEST:-}" ]] && reference_options=(--reference-manifest "$REFERENCE_MANIFEST")
+[[ -n "${PAPER_REFERENCE_CACHE:-}" ]] && reference_options+=(--reference-cache "$PAPER_REFERENCE_CACHE")
 python -m framediff web-prepare "${source_options[@]}" "${vlm_options[@]}" "${reference_options[@]}" "${initial_options[@]}" \
   --out "$output_root/prepare" --repair-conditioning visual "${revision_options[@]}" \
   --target-image-source "${TARGET_IMAGE_SOURCE:-provided}" \
