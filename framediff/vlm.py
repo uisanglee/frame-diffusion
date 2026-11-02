@@ -186,12 +186,15 @@ def load_hf_runtime(args):
     return model,processor
 
 def html_generation_options(args, processor, prompt_tokens, qwen=False):
-    from .html_generation import GeneratedPresencePenalty
+    from .html_generation import CSSRepeatStop, GeneratedPresencePenalty
     options = {}
-    if qwen and getattr(args, 'temperature', 0.) > 0:
-        # Qwen3-VL model card VL settings; preserve the experiment's temperature.
-        options.update(top_p=0.8, top_k=20, repetition_penalty=1.0)
-        options['logits_processor'] = [GeneratedPresencePenalty(prompt_tokens)]
+    if qwen:
+        if getattr(args, 'temperature', 0.) > 0:
+            # Qwen3-VL official evaluation settings; preserve the model's EOS IDs.
+            options.update(top_p=0.8, top_k=20, repetition_penalty=1.0)
+            options['logits_processor'] = [GeneratedPresencePenalty(prompt_tokens)]
+        if getattr(args, 'task', '').endswith('html'):
+            options['stopping_criteria'] = [CSSRepeatStop(processor, prompt_tokens)]
     return options
 
 
@@ -220,9 +223,12 @@ def qwen_generate(args,prompt,images,runtime=None):
     with torch.inference_mode():outputs=model.generate(**inputs,max_new_tokens=args.max_new_tokens,**generation)
     torch.cuda.synchronize()
     answer=processor.batch_decode(outputs[:,inputs['input_ids'].shape[1]:],skip_special_tokens=True)[0]
+    repeat_guard = generation.get('stopping_criteria', [None])[0]
     return answer,{**getattr(model,'_framediff_placement',{}),'generation_settings':generation_metadata(model,generation,args.max_new_tokens),
                    'presence_penalty':1.5 if 'logits_processor' in generation else 0.,
-                   'css_repeat_check':False,'generation_seconds':time.perf_counter()-start,'peak_cuda_bytes':torch.cuda.max_memory_allocated(),
+                   'css_repeat_check':repeat_guard is not None,
+                   'generation_stop_reason':repeat_guard.reason if repeat_guard is not None else None,
+                   'generation_seconds':time.perf_counter()-start,'peak_cuda_bytes':torch.cuda.max_memory_allocated(),
                    'resolved_revision':getattr(model.config,'_commit_hash',None),'input_tokens':inputs['input_ids'].shape[1],
                    'output_tokens':outputs.shape[1]-inputs['input_ids'].shape[1],
                    'weight_precision':'nf4-4bit' if args.four_bit else 'bf16'}

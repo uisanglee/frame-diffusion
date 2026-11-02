@@ -201,6 +201,7 @@ def prepare(args):
     def call(task, images, current, work, label, extra='', validator=html_answer,
              literal_prompt=False, image_labels=None, prompt_first=False):
         nonlocal runtime
+        last_generation = {}
         if args.backend in ('qwen','hf') and runtime is None:
             runtime = (vlm.load_qwen_runtime if args.backend=='qwen' else vlm.load_hf_runtime)(args)
         c = copy.copy(args); c.task = task; c.image = list(map(str,images)); c.current = str(current) if current else None; c.frames = None
@@ -226,13 +227,18 @@ def prepare(args):
             elapsed = time.perf_counter()-started
             (work/f'{name}.raw.txt').write_text(answer)
             write_json(work/f'{name}.meta.json', {**meta,'wall_seconds':elapsed})
+            last_generation.clear();last_generation.update(meta)
             raw_usage=meta.get('usage') or {}
             input_tokens=int(meta.get('input_tokens',raw_usage.get('prompt_tokens',raw_usage.get('input_tokens',0))) or 0)
             output_tokens=int(meta.get('output_tokens',raw_usage.get('completion_tokens',raw_usage.get('output_tokens',0))) or 0)
             usage=record['vlm_usage'].setdefault(label,{'input_tokens':0,'output_tokens':0})
             usage['input_tokens']+=input_tokens;usage['output_tokens']+=output_tokens
             return answer, elapsed
-        return validated_generation(generate,validator,retries)
+        def validate_answer(raw):
+            if last_generation.get('generation_stop_reason') == 'repeated_css_generation':
+                raise ValueError('Repeated CSS generation stopped early; use compact shared CSS rules and complete the HTML document')
+            return validator(raw)
+        return validated_generation(generate,validate_answer,retries)
 
     # Load outside page timers, consistently excluding one-time model startup.
     needs_vlm = any(not i.get('initial_html') for i in items) or args.rounds > 0 or getattr(args,'repair_conditioning','boxes') != 'visual'

@@ -173,13 +173,13 @@ def test_two_image_revision_keeps_target_first_and_allows_short_output(monkeypat
     monkeypatch.setattr(torch.cuda,'reset_peak_memory_stats',lambda:None)
     monkeypatch.setattr(torch.cuda,'synchronize',lambda:None)
     monkeypatch.setattr(torch.cuda,'max_memory_allocated',lambda:123)
-    args=SimpleNamespace(image_labels=['Reference Webpage:','Current Webpage:'],
+    args=SimpleNamespace(task='revise-html',image_labels=['Reference Webpage:','Current Webpage:'],
         prompt_first=True,max_new_tokens=16384,four_bit=True)
     images=[Image.new('RGB',(4,4),'red'),Image.new('RGB',(4,4),'blue')]
     answer,meta=getattr(vlm,backend+'_generate')(args,'Revise the HTML',images,(Model(),Processor()))
     assert seen['generation']['max_new_tokens']==16384
-    assert 'stopping_criteria' not in seen['generation']
-    assert meta['css_repeat_check'] is False
+    assert ('stopping_criteria' in seen['generation']) == (backend == 'qwen')
+    assert meta['css_repeat_check'] is (backend == 'qwen')
     assert seen['generation']['min_new_tokens']==0
     assert 'min_length' not in seen['generation']  # Avoid conflicting minimum-length options.
     assert 'eos_token_id' not in seen['generation']  # Preserve each model's EOS configuration.
