@@ -12,6 +12,8 @@ from PIL import Image
 from .ir import DEFAULTS, LIMITS, read_json, validate, write_json
 from .data import differences
 
+QWEN_BF16_MEMORY_CONTRACT = 'bf16-offloaded-kv-v1'
+
 def initial_temperature(model, requested='auto'):
     """Paper draft defaults from model cards/configs; explicit overrides stay explicit.
 
@@ -136,7 +138,7 @@ def pin_revision(model, revision, output):
 
 
 def verify_cuda_placement(model):
-    """Do not benchmark CPU/disk offload or multi-GPU dispatch as single-GPU inference."""
+    """Verify weight/buffer placement; generation may explicitly offload its KV cache."""
     import torch
     expected = torch.device('cuda', torch.cuda.current_device())
     devices = {tensor.device for tensor in model.parameters()} | {tensor.device for tensor in model.buffers()}
@@ -148,7 +150,7 @@ def verify_cuda_placement(model):
             raise RuntimeError(f'CPU/disk/multi-GPU offload is not allowed: {model.hf_device_map}')
     model._framediff_placement = {'device': str(expected), 'gpu_name': torch.cuda.get_device_name(expected),
                                  'device_map': {k: str(v) for k, v in getattr(model, 'hf_device_map', {}).items()},
-                                 'placement_contract': 'single-cuda-no-offload-v1'}
+                                 'placement_contract': 'single-cuda-no-weight-offload-v2'}
 
 
 def load_qwen_runtime(args):
@@ -198,6 +200,22 @@ def html_generation_options(args, processor, prompt_tokens, qwen=False):
     return options
 
 
+def qwen_inputs_to_device(inputs, device):
+    """Transfer pixels directly in vision-weight precision; preserve integer IDs/grids."""
+    import torch
+    result = {}
+    for key, value in inputs.items():
+        if torch.is_tensor(value):
+            options = {'device': device}
+            if key in ('pixel_values', 'pixel_values_videos') and value.is_floating_point():
+                # Qwen already casts pixels to visual.dtype internally. Do it on
+                # transfer so FP32 pixels do not remain resident throughout decoding.
+                options['dtype'] = torch.bfloat16
+            value = value.to(**options)
+        result[key] = value
+    return result
+
+
 def qwen_generate(args,prompt,images,runtime=None):
     import torch
     model,processor=runtime or load_qwen_runtime(args)
@@ -211,11 +229,16 @@ def qwen_generate(args,prompt,images,runtime=None):
     else:
         content=[{'type':'image','image':im} for im in images]+[{'type':'text','text':prompt}]
     messages=[{'role':'user','content':content}]
-    inputs=processor.apply_chat_template(messages,tokenize=True,add_generation_prompt=True,return_dict=True,return_tensors='pt').to(model.device)
+    inputs=processor.apply_chat_template(messages,tokenize=True,add_generation_prompt=True,return_dict=True,return_tensors='pt')
+    inputs=qwen_inputs_to_device(inputs,model.device)
     torch.cuda.reset_peak_memory_stats();torch.cuda.synchronize();start=time.perf_counter()
     temperature=getattr(args,'temperature',0.)
     # Keep the model's EOS IDs; the token budget is a ceiling, not a required length.
-    generation={'do_sample':temperature>0,'min_new_tokens':0,**explicit_padding(model)}
+    generation={'do_sample':temperature>0,'min_new_tokens':0,**explicit_padding(model),
+                'use_cache':True,'cache_implementation':'dynamic' if args.four_bit else 'offloaded',
+                'logits_to_keep':1,'return_dict_in_generate':False,
+                'output_scores':False,'output_logits':False,
+                'output_attentions':False,'output_hidden_states':False}
     if temperature>0:
         torch.manual_seed(args.seed);generation['temperature']=temperature
     extra = html_generation_options(args, processor, inputs['input_ids'].shape[1], qwen=True)
@@ -231,6 +254,9 @@ def qwen_generate(args,prompt,images,runtime=None):
                    'generation_seconds':time.perf_counter()-start,'peak_cuda_bytes':torch.cuda.max_memory_allocated(),
                    'resolved_revision':getattr(model.config,'_commit_hash',None),'input_tokens':inputs['input_ids'].shape[1],
                    'output_tokens':outputs.shape[1]-inputs['input_ids'].shape[1],
+                   'memory_contract':'nf4-dynamic-kv-v1' if args.four_bit else QWEN_BF16_MEMORY_CONTRACT,
+                   'kv_cache_offloaded':not args.four_bit,
+                   'pixel_dtype':str(inputs['pixel_values'].dtype) if 'pixel_values' in inputs else None,
                    'weight_precision':'nf4-4bit' if args.four_bit else 'bf16'}
 
 def decode_hf_answer(processor, tokens):

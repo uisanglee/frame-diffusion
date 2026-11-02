@@ -115,6 +115,48 @@ def test_glm_loader_pins_processor_and_single_gpu(monkeypatch):
     assert captured['checked'] is model
 
 
+def test_qwen_bf16_loader_does_not_quantize_weights(monkeypatch):
+    from framediff import vlm
+    captured = {}
+    model = SimpleNamespace(config=SimpleNamespace(_commit_hash='c'*40))
+    model.eval = lambda: model
+    def load(name, **kwargs):
+        captured.update(kwargs)
+        return model
+    monkeypatch.setitem(sys.modules, 'transformers', SimpleNamespace(
+        Qwen3VLForConditionalGeneration=SimpleNamespace(from_pretrained=load),
+        AutoProcessor=SimpleNamespace(from_pretrained=lambda *a, **k: object()),
+        BitsAndBytesConfig=lambda **k: pytest.fail('BF16 must not instantiate quantization')))
+    monkeypatch.setattr(torch.cuda, 'is_available', lambda: True)
+    monkeypatch.setattr(torch.cuda, 'current_device', lambda: 0)
+    monkeypatch.setattr(vlm, 'verify_cuda_placement', lambda model: None)
+    args = SimpleNamespace(model='Qwen/Qwen3-VL-8B-Instruct', revision='c'*40,
+                           seed=42, four_bit=False, max_pixels=1048576)
+    vlm.load_qwen_runtime(args)
+    assert captured['dtype'] == torch.bfloat16
+    assert captured['device_map'] == {'': 0}
+    assert captured['attn_implementation'] == 'sdpa'
+    assert 'quantization_config' not in captured
+
+
+def test_qwen_pixel_transfer_preserves_ids_and_grid():
+    from framediff.vlm import qwen_inputs_to_device
+    source = {'input_ids': torch.tensor([[151655, 12345]]),
+              'image_grid_thw': torch.tensor([[1, 32, 64]]),
+              'attention_mask': torch.ones((1, 2), dtype=torch.long),
+              'pixel_values': torch.randn(2, 8),
+              'pixel_values_videos': torch.randn(2, 8)}
+    result = qwen_inputs_to_device(source, torch.device('cpu'))
+    for key in ('input_ids', 'image_grid_thw', 'attention_mask'):
+        assert result[key].dtype == torch.long
+        assert torch.equal(result[key], source[key])
+    for key in ('pixel_values', 'pixel_values_videos'):
+        assert result[key].dtype == torch.bfloat16
+        assert result[key].element_size() == 2
+        assert torch.equal(result[key], source[key].to(torch.bfloat16))
+        assert source[key].dtype == torch.float32
+
+
 def test_llava_next_loader_uses_nf4_and_one_gpu(monkeypatch):
     from framediff import vlm
     captured={}
@@ -149,7 +191,8 @@ def test_llava_next_loader_uses_nf4_and_one_gpu(monkeypatch):
 
 
 @pytest.mark.parametrize('backend', ['hf', 'qwen'])
-def test_two_image_revision_keeps_target_first_and_allows_short_output(monkeypatch, backend):
+@pytest.mark.parametrize('four_bit', [False, True])
+def test_two_image_revision_keeps_target_first_and_allows_short_output(monkeypatch, backend, four_bit):
     from framediff import vlm
     seen={}
     class Inputs(dict):
@@ -174,7 +217,7 @@ def test_two_image_revision_keeps_target_first_and_allows_short_output(monkeypat
     monkeypatch.setattr(torch.cuda,'synchronize',lambda:None)
     monkeypatch.setattr(torch.cuda,'max_memory_allocated',lambda:123)
     args=SimpleNamespace(task='revise-html',image_labels=['Reference Webpage:','Current Webpage:'],
-        prompt_first=True,max_new_tokens=16384,four_bit=True)
+        prompt_first=True,max_new_tokens=16384,four_bit=four_bit)
     images=[Image.new('RGB',(4,4),'red'),Image.new('RGB',(4,4),'blue')]
     answer,meta=getattr(vlm,backend+'_generate')(args,'Revise the HTML',images,(Model(),Processor()))
     assert seen['generation']['max_new_tokens']==16384
@@ -190,7 +233,15 @@ def test_two_image_revision_keeps_target_first_and_allows_short_output(monkeypat
         'Revise the HTML','Reference Webpage:','Current Webpage:']
     assert content[2]['image'] is images[0] and content[4]['image'] is images[1]
     assert answer=='<html><body>ok</body></html>'
-    assert meta['weight_precision']=='nf4-4bit'
+    assert meta['weight_precision']==('nf4-4bit' if four_bit else 'bf16')
+    if backend == 'qwen':
+        assert seen['generation']['cache_implementation'] == ('dynamic' if four_bit else 'offloaded')
+        assert meta['kv_cache_offloaded'] is (not four_bit)
+        assert seen['generation']['use_cache'] is True
+        assert seen['generation']['logits_to_keep'] == 1
+        for key in ('output_scores', 'output_logits', 'output_attentions', 'output_hidden_states',
+                    'return_dict_in_generate'):
+            assert seen['generation'][key] is False
 
 
 @pytest.mark.parametrize('ids,expected', [([1,4,2,5],[5]),([1,4],None),([5],[5])])

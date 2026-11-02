@@ -384,21 +384,36 @@ generated tokens only, following the VL recommendations at
 https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct . Greedy self-revision remains greedy;
 other models retain their model-specific sampling defaults.
 
-Periodic CSS repetition checks have been removed. Generation does not decode token
-prefixes to the CPU or scan CSS every 128 tokens. Normal EOS stopping and the output
-budget remain in effect; complete-HTML validation still runs after generation.
-Metadata records `css_repeat_check=false`. Compact prompts and Qwen's presence
-penalty remain unchanged. The historical prompt contract ID is retained to allow
-resuming existing runs; old records are reused (including cached failures), while
-new calls record the disabled check in their metadata. Record this implementation
-change when reporting results that span both versions.
+Qwen uses a conservative repetition stop check after 1024 generated tokens, then
+every 512 tokens. It scans a bounded suffix for repeated identical CSS rules;
+normal repeated HTML elements are not prohibited. Normal EOS stopping and the
+16384-token ceiling remain in effect. Generation metadata records the check and
+its stop reason; complete-HTML validation still runs after generation.
 
 The changed protocol is included in the preparation configuration to prevent mixing
 old and new experiment results. `run_paper_seed42.sh` now writes to
-`runs/paper-qwen3vl8b-seed42-16k` or
+`runs/paper-qwen3vl8b-bf16-seed42-16k-kv-offload` or
 `runs/paper-llava-next-7b-seed42-16k-compact-v1-temp02`; shared reference renders and trained
 checkpoints are reused. Existing 16k experiment outputs are preserved. These settings
 are our adapted protocol, not an unchanged reproduction of the Design2Code prompts.
+
+### Qwen BF16 memory policy
+
+The Qwen runners default to BF16 weights, SDPA attention, and
+`cache_implementation="offloaded"`. Weights remain on one GPU; the non-quantized
+KV cache uses CPU memory through Transformers' official
+[cache offloading](https://huggingface.co/docs/transformers/v4.57.1/en/kv_cache#cache-offloading).
+This reduces GPU cache memory at the cost of CPU--GPU transfers and potentially
+slower generation. Report this policy alongside latency measurements.
+BF16 and FP16 both use two bytes per value, so switching between them does not
+save memory. Pixel inputs are transferred directly as BF16 instead of retaining
+FP32 inputs on GPU. Integer token IDs and image grids retain their original types.
+Only the next-token logits are requested, with score, attention, and hidden-state
+histories disabled. The output ceiling remains 16384; EOS can stop earlier.
+Metadata records `memory_contract`, `kv_cache_offloaded`, and `pixel_dtype`.
+Older BF16/NF4 outputs are preserved in their existing folders; shared reference
+renders and trained TUIDE/detector checkpoints are reused. This configuration
+reduces OOM risk but does not guarantee that every input fits a 24 GB GPU.
 
 ### Model-specific initial sampling
 

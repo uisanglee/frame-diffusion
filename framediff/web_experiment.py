@@ -174,6 +174,8 @@ def prepare(args):
                 'placeholder_sha':digest(Path(i['html']).parent/'rick.jpg')
                     if i.get('html') and (Path(i['html']).parent/'rick.jpg').exists() else None} for i in items]
     settings = {k:v for k,v in vars(args).items() if k not in ('resume','out','retry_failed')}
+    if args.backend == 'qwen' and not args.four_bit:
+        settings['qwen_memory_contract'] = vlm.QWEN_BF16_MEMORY_CONTRACT
     from .html_generation import CONTRACT
     settings['html_generation_contract'] = CONTRACT
     if not settings.get('generate_initial'):
