@@ -231,8 +231,6 @@ def prepare(args):
             output_tokens=int(meta.get('output_tokens',raw_usage.get('completion_tokens',raw_usage.get('output_tokens',0))) or 0)
             usage=record['vlm_usage'].setdefault(label,{'input_tokens':0,'output_tokens':0})
             usage['input_tokens']+=input_tokens;usage['output_tokens']+=output_tokens
-            if meta.get('generation_stop_reason') == 'repeated_css_generation':
-                raise ValueError('repeated_css_generation: stopped runaway CSS output; raw response saved')
             return answer, elapsed
         return validated_generation(generate,validator,retries)
 

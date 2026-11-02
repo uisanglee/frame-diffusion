@@ -406,23 +406,3 @@ def test_self_revision_keeps_success_before_later_failure(tmp_path,monkeypatch):
         result=row['methods'][f'design2code-self-revision-{step}']
         assert result['failed']
         assert Path(result['html']).read_text()==repaired
-
-
-@pytest.mark.browser
-def test_repeated_generation_retains_raw_and_failure_reason(tmp_path,monkeypatch):
-    Image.new('RGB',(100,100)).save(tmp_path/'a.png')
-    (tmp_path/'a.html').write_text(HTML)
-    # Even syntactically complete output marked by the guard must not be accepted.
-    monkeypatch.setattr('framediff.vlm.generate',lambda *a:(HTML,{
-        'generation_stop_reason':'repeated_css_generation','output_tokens':1024}))
-    args=SimpleNamespace(root=str(tmp_path),manifest=None,out=str(tmp_path/'out'),rounds=0,
-        max_nodes=16,max_pixels=1024,max_new_tokens=16384,limit=0,seed=42,resume=False,
-        backend='openai-compatible',model='fake',revision='main',endpoint='http://unused',
-        api_key_env='TEST_KEY',four_bit=False,initial_mode='direct',vlm_retries=2)
-    row=prepare(args)[0]
-    assert 'repeated_css_generation' in row['errors']['initial']
-    assert row['methods']['initial']['failed']
-    assert row['methods']['initial']['vlm_calls']==1
-    raw=next((tmp_path/'out').rglob('initial.raw.txt'))
-    assert raw.read_text()==HTML
-    assert read_json(raw.with_name('initial.meta.json'))['output_tokens']==1024

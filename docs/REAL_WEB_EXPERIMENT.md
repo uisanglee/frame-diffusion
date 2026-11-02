@@ -384,18 +384,14 @@ generated tokens only, following the VL recommendations at
 https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct . Greedy self-revision remains greedy;
 other models retain their model-specific sampling defaults.
 
-For local Qwen/HF HTML generation, every 128 generated tokens after token 512,
-a bounded 8192-token suffix is decoded. An open style block whose last up-to-48
-complete CSS rules contain at least 24 rules, at most four distinct normalized rules,
-and at least six occurrences of each is stopped. Whitespace and numeric nth-child
-indices are normalized. This is a conservative heuristic, not a proof of invalid CSS;
-it does not reject repeated HTML rows or guarantee detection of every runaway output.
-API generation is not streamed, so it does not receive this early-stop optimization.
-
-The raw response and token/time metadata are retained. A repetition stop is recorded
-as `repeated_css_generation`, never as successful HTML, and is not automatically
-retried. Normal HTML validation still applies. `generation_settings`, `presence_penalty`,
-and `generation_stop_reason` are saved with local generation metadata.
+Periodic CSS repetition checks have been removed. Generation does not decode token
+prefixes to the CPU or scan CSS every 128 tokens. Normal EOS stopping and the output
+budget remain in effect; complete-HTML validation still runs after generation.
+Metadata records `css_repeat_check=false`. Compact prompts and Qwen's presence
+penalty remain unchanged. The historical prompt contract ID is retained to allow
+resuming existing runs; old records are reused (including cached failures), while
+new calls record the disabled check in their metadata. Record this implementation
+change when reporting results that span both versions.
 
 The changed protocol is included in the preparation configuration to prevent mixing
 old and new experiment results. `run_paper_seed42.sh` now writes to

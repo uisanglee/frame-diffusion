@@ -186,17 +186,13 @@ def load_hf_runtime(args):
     return model,processor
 
 def html_generation_options(args, processor, prompt_tokens, qwen=False):
-    from .html_generation import CSSRepeatStop, GeneratedPresencePenalty
+    from .html_generation import GeneratedPresencePenalty
     options = {}
-    guard = None
-    if getattr(args, 'task', '').endswith('html'):
-        guard = CSSRepeatStop(processor, prompt_tokens)
-        options['stopping_criteria'] = [guard]
     if qwen and getattr(args, 'temperature', 0.) > 0:
         # Qwen3-VL model card VL settings; preserve the experiment's temperature.
         options.update(top_p=0.8, top_k=20, repetition_penalty=1.0)
         options['logits_processor'] = [GeneratedPresencePenalty(prompt_tokens)]
-    return options, guard
+    return options
 
 
 def qwen_generate(args,prompt,images,runtime=None):
@@ -219,14 +215,14 @@ def qwen_generate(args,prompt,images,runtime=None):
     generation={'do_sample':temperature>0,'min_new_tokens':0,**explicit_padding(model)}
     if temperature>0:
         torch.manual_seed(args.seed);generation['temperature']=temperature
-    extra, guard = html_generation_options(args, processor, inputs['input_ids'].shape[1], qwen=True)
+    extra = html_generation_options(args, processor, inputs['input_ids'].shape[1], qwen=True)
     generation.update(extra)
     with torch.inference_mode():outputs=model.generate(**inputs,max_new_tokens=args.max_new_tokens,**generation)
     torch.cuda.synchronize()
     answer=processor.batch_decode(outputs[:,inputs['input_ids'].shape[1]:],skip_special_tokens=True)[0]
     return answer,{**getattr(model,'_framediff_placement',{}),'generation_settings':generation_metadata(model,generation,args.max_new_tokens),
                    'presence_penalty':1.5 if 'logits_processor' in generation else 0.,
-                   'generation_stop_reason':guard.reason if guard else None,'generation_seconds':time.perf_counter()-start,'peak_cuda_bytes':torch.cuda.max_memory_allocated(),
+                   'css_repeat_check':False,'generation_seconds':time.perf_counter()-start,'peak_cuda_bytes':torch.cuda.max_memory_allocated(),
                    'resolved_revision':getattr(model.config,'_commit_hash',None),'input_tokens':inputs['input_ids'].shape[1],
                    'output_tokens':outputs.shape[1]-inputs['input_ids'].shape[1],
                    'weight_precision':'nf4-4bit' if args.four_bit else 'bf16'}
@@ -263,14 +259,14 @@ def hf_generate(args,prompt,images,runtime=None):
     generation={'do_sample':temperature>0,'min_new_tokens':0,**explicit_padding(model)}
     if temperature>0:
         torch.manual_seed(args.seed);generation['temperature']=temperature
-    extra, guard = html_generation_options(args, processor, inputs['input_ids'].shape[1])
+    extra = html_generation_options(args, processor, inputs['input_ids'].shape[1])
     generation.update(extra)
     with torch.inference_mode():outputs=model.generate(**inputs,max_new_tokens=args.max_new_tokens,**generation)
     torch.cuda.synchronize();input_tokens=inputs['input_ids'].shape[1]
     answer=decode_hf_answer(processor,outputs[:,input_tokens:])
     return answer,{**getattr(model,'_framediff_placement',{}),'generation_settings':generation_metadata(model,generation,args.max_new_tokens),
                    'presence_penalty':1.5 if 'logits_processor' in generation else 0.,
-                   'generation_stop_reason':guard.reason if guard else None,'generation_seconds':time.perf_counter()-start,'peak_cuda_bytes':torch.cuda.max_memory_allocated(),
+                   'css_repeat_check':False,'generation_seconds':time.perf_counter()-start,'peak_cuda_bytes':torch.cuda.max_memory_allocated(),
                    'resolved_revision':getattr(model.config,'_commit_hash',None),'input_tokens':input_tokens,
                    'output_tokens':outputs.shape[1]-input_tokens,
                    'weight_precision':'nf4-4bit' if args.four_bit else 'bf16'}
