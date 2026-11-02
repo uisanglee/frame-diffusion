@@ -12,7 +12,7 @@ from PIL import Image
 from .ir import DEFAULTS, LIMITS, read_json, validate, write_json
 from .data import differences
 
-QWEN_BF16_MEMORY_CONTRACT = 'bf16-offloaded-kv-v1'
+QWEN_BF16_MEMORY_CONTRACT = 'bf16-dynamic-kv-v1'
 
 def initial_temperature(model, requested='auto'):
     """Paper draft defaults from model cards/configs; explicit overrides stay explicit.
@@ -235,7 +235,7 @@ def qwen_generate(args,prompt,images,runtime=None):
     temperature=getattr(args,'temperature',0.)
     # Keep the model's EOS IDs; the token budget is a ceiling, not a required length.
     generation={'do_sample':temperature>0,'min_new_tokens':0,**explicit_padding(model),
-                'use_cache':True,'cache_implementation':'dynamic' if args.four_bit else 'offloaded',
+                'use_cache':True,'cache_implementation':'dynamic',
                 'logits_to_keep':1,'return_dict_in_generate':False,
                 'output_scores':False,'output_logits':False,
                 'output_attentions':False,'output_hidden_states':False}
@@ -255,7 +255,7 @@ def qwen_generate(args,prompt,images,runtime=None):
                    'resolved_revision':getattr(model.config,'_commit_hash',None),'input_tokens':inputs['input_ids'].shape[1],
                    'output_tokens':outputs.shape[1]-inputs['input_ids'].shape[1],
                    'memory_contract':'nf4-dynamic-kv-v1' if args.four_bit else QWEN_BF16_MEMORY_CONTRACT,
-                   'kv_cache_offloaded':not args.four_bit,
+                   'kv_cache_offloaded':False,
                    'pixel_dtype':str(inputs['pixel_values'].dtype) if 'pixel_values' in inputs else None,
                    'weight_precision':'nf4-4bit' if args.four_bit else 'bf16'}
 

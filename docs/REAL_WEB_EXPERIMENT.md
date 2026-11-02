@@ -392,7 +392,7 @@ its stop reason; complete-HTML validation still runs after generation.
 
 The changed protocol is included in the preparation configuration to prevent mixing
 old and new experiment results. `run_paper_seed42.sh` now writes to
-`runs/paper-qwen3vl8b-bf16-seed42-16k-kv-offload` or
+`runs/paper-qwen3vl8b-bf16-seed42-16k-gpu-kv` or
 `runs/paper-llava-next-7b-seed42-16k-compact-v1-temp02`; shared reference renders and trained
 checkpoints are reused. Existing 16k experiment outputs are preserved. These settings
 are our adapted protocol, not an unchanged reproduction of the Design2Code prompts.
@@ -400,20 +400,19 @@ are our adapted protocol, not an unchanged reproduction of the Design2Code promp
 ### Qwen BF16 memory policy
 
 The Qwen runners default to BF16 weights, SDPA attention, and
-`cache_implementation="offloaded"`. Weights remain on one GPU; the non-quantized
-KV cache uses CPU memory through Transformers' official
-[cache offloading](https://huggingface.co/docs/transformers/v4.57.1/en/kv_cache#cache-offloading).
-This reduces GPU cache memory at the cost of CPU--GPU transfers and potentially
-slower generation. Report this policy alongside latency measurements.
+`cache_implementation="dynamic"`. Weights and the non-quantized KV cache remain
+on one GPU; CPU KV cache offloading is disabled.
 BF16 and FP16 both use two bytes per value, so switching between them does not
 save memory. Pixel inputs are transferred directly as BF16 instead of retaining
 FP32 inputs on GPU. Integer token IDs and image grids retain their original types.
 Only the next-token logits are requested, with score, attention, and hidden-state
 histories disabled. The output ceiling remains 16384; EOS can stop earlier.
-Metadata records `memory_contract`, `kv_cache_offloaded`, and `pixel_dtype`.
+Metadata records `memory_contract="bf16-dynamic-kv-v1"`,
+`kv_cache_offloaded=false`, and `pixel_dtype`. The new output directory prevents
+reuse of results generated with CPU KV cache offloading.
 Older BF16/NF4 outputs are preserved in their existing folders; shared reference
-renders and trained TUIDE/detector checkpoints are reused. This configuration
-reduces OOM risk but does not guarantee that every input fits a 24 GB GPU.
+renders and trained TUIDE/detector checkpoints are reused. BF16 weights plus a long GPU KV cache can exceed 24 GB; the 16384-token
+ceiling does not guarantee that every input fits.
 
 ### Model-specific initial sampling
 

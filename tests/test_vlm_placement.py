@@ -235,8 +235,8 @@ def test_two_image_revision_keeps_target_first_and_allows_short_output(monkeypat
     assert answer=='<html><body>ok</body></html>'
     assert meta['weight_precision']==('nf4-4bit' if four_bit else 'bf16')
     if backend == 'qwen':
-        assert seen['generation']['cache_implementation'] == ('dynamic' if four_bit else 'offloaded')
-        assert meta['kv_cache_offloaded'] is (not four_bit)
+        assert seen['generation']['cache_implementation'] == 'dynamic'
+        assert meta['kv_cache_offloaded'] is False
         assert seen['generation']['use_cache'] is True
         assert seen['generation']['logits_to_keep'] == 1
         for key in ('output_scores', 'output_logits', 'output_attentions', 'output_hidden_states',

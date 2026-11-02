@@ -102,4 +102,4 @@ printf '%s|%s|%s|%s|%s|%s\\n' "$VLM_SPECS" "$CUDA_VISIBLE_DEVICES" "$MAX_NEW_TOK
     assert len(calls) == 3
     for line, dataset in zip(calls, ('webui', 'design2code', 'design2code-hard')):
         assert line == ('qwen3vl8b|qwen|Qwen/Qwen3-VL-8B-Instruct|bf16|0|16384|42|auto|'
-                        'runs/paper-qwen3vl8b-bf16-seed42-16k-kv-offload/' + dataset)
+                        'runs/paper-qwen3vl8b-bf16-seed42-16k-gpu-kv/' + dataset)

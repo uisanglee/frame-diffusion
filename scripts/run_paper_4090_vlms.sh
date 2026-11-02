@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fixed paper matrix: Qwen uses BF16 with CPU KV cache; other VLMs use NF4.
+# Fixed paper matrix: Qwen uses BF16 with GPU KV cache; other VLMs use NF4.
 set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"

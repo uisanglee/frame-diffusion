@@ -10,10 +10,9 @@ fi
 case "$1" in
   qwen)
     export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
-    # BF16 weights remain on GPU; Transformers offloads the non-quantized KV
-    # cache to CPU to leave GPU headroom for the 16K generation budget.
+    # BF16 weights and the dynamic KV cache remain on GPU.
     export VLM_SPECS='qwen3vl8b|qwen|Qwen/Qwen3-VL-8B-Instruct|bf16'
-    output=runs/paper-qwen3vl8b-bf16-seed42-16k-kv-offload ;;
+    output=runs/paper-qwen3vl8b-bf16-seed42-16k-gpu-kv ;;
   llava)
     export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1}
     export VLM_SPECS='llava-next-7b|hf|llava-hf/llava-v1.6-mistral-7b-hf|4bit'
