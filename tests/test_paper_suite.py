@@ -109,3 +109,23 @@ def test_initial_seed_suite_fixes_models_and_varies_drafts(tmp_path):
     (alias / 'seeds/22/repair/config.json').write_text(json.dumps({'checkpoints': ['other']}))
     with pytest.raises(ValueError, match='checkpoint changed'):
         build_initial_seed_suite(tmp_path, ['qwen'], 'qwen', tmp_path / 'wrong-paper', ['11', '22'], False, False)
+
+
+def test_select_second_round_from_three_round_evaluation(tmp_path):
+    alias = tmp_path/'qwen'
+    (alias/'evaluation').mkdir(parents=True)
+    (alias/'prepare').mkdir()
+    (alias/'prepare/prepared.jsonl').write_text(json.dumps({'methods': {
+        'design2code-self-revision-2': {}, 'design2code-self-revision-3': {}}})+'\n')
+    rows = [{'id':'page/repeat-1', 'page_id':'page', 'method':method,
+             'dom_box_iou':score, 'pixel_mae':1-score, 'pipeline_seconds':1., 'failed':False}
+            for method,score in [('initial',.1), ('abstract-policy',.8),
+                                 ('design2code-self-revision-2',.6), ('design2code-self-revision-3',.9)]]
+    (alias/'evaluation/metrics.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in rows))
+    build(tmp_path,['qwen'],'qwen',tmp_path/'paper',include_ablation=False,revision_rounds=2)
+    text=(tmp_path/'paper/main/qwen/paper-report.md').read_text()
+    assert 'D2C Self-Revision (RGB)' in text
+    quality_row = next(line for line in text.splitlines() if line.startswith('| D2C Self-Revision (RGB) |'))
+    assert '0.6000' in quality_row and '0.9000' not in quality_row
+    # The complete evaluation remains intact for separate N=3 reporting.
+    assert len((alias/'evaluation/metrics.jsonl').read_text().splitlines()) == 4

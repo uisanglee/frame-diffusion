@@ -32,7 +32,10 @@ export DETECTOR_CHECKPOINT="$TRAIN_RUN/detector/best.pt"
 export ABSTRACT_CHECKPOINT="$TRAIN_RUN/tuide-s-abstract/replacement/abstract-stage2/best.pt"
 export PAPER_REFERENCE_CACHE="$repo_root/.cache/paper-reference-renders"
 export PYTHONUNBUFFERED=1 INITIAL_SEEDS=42 INITIAL_TEMPERATURE=auto
-export MAX_NEW_TOKENS=16384 PAGE_LIMIT=0 REPAIR_STEPS=20 REVISION_ROUNDS=3
+export MAX_NEW_TOKENS=16384 PAGE_LIMIT=0 REPAIR_STEPS=20
+export REVISION_ROUNDS=${REVISION_ROUNDS:-3}
+[[ "$REVISION_ROUNDS" =~ ^[1-9][0-9]*$ ]] || { echo "REVISION_ROUNDS must be positive" >&2; exit 2; }
+[[ "$REVISION_ROUNDS" == 3 ]] || output="$output-n$REVISION_ROUNDS"
 export RUN_UI2CODEN=1 RUN_ABLATION=0 REPEATS=1
 
 echo "Initial model=$1, GPU=$CUDA_VISIBLE_DEVICES, seed=42, output=$output"

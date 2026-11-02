@@ -102,7 +102,7 @@ def _main_table(summary, out):
 
 def build(root, aliases, representative, out, include_ablation=True, include_ui2coden=False,
           ui2coden_rounds=3, require_three_rounds=False, initial_seed=None,
-          own_initial_alias='ui2coden', require_complete_metrics=False):
+          own_initial_alias='ui2coden', require_complete_metrics=False, revision_rounds=None):
     root = Path(root)
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
@@ -119,10 +119,13 @@ def build(root, aliases, representative, out, include_ablation=True, include_ui2
         prepared = _prepared_by_id(alias_root) if include_ui2coden or initial_seed is not None or require_complete_metrics else None
         if prepared is not None:
             _check_same_inputs(prepared, alias_root / 'repair' / 'results.jsonl', f'{alias} main')
-        if require_three_rounds and not own_initial and any('design2code-self-revision-3' not in row['methods']
+        required_round = revision_rounds or (3 if require_three_rounds else None)
+        revision_method = ('design2code-self-revision' if required_round == 1 else f'design2code-self-revision-{required_round}')
+        if required_round and not own_initial and any(revision_method not in row['methods']
                                         for row in read_jsonl(alias_root / 'prepare' / 'prepared.jsonl')):
-            raise ValueError(f'{alias}: expected exactly three Design2Code self-revision rounds')
-        mapping = ({'initial':'Initial VLM','abstract-policy':'TUIDE'} if own_initial else MAIN_METHODS)
+            raise ValueError(f'{alias}: missing Design2Code self-revision round {required_round}')
+        mapping = ({'initial':'Initial VLM','abstract-policy':'TUIDE'} if own_initial else ({'initial':'Initial VLM', revision_method:'D2C Self-Revision (RGB)',
+                   'abstract-policy':'TUIDE'} if required_round else MAIN_METHODS))
         rows = selected(read_jsonl(path), mapping)
         if include_ui2coden:
             baseline = alias_root / 'ui2coden'
@@ -175,15 +178,15 @@ def build(root, aliases, representative, out, include_ablation=True, include_ui2
 
 def build_initial_seed_suite(root, aliases, representative, out, seeds,
                              include_ablation=True, include_ui2coden=False,
-                             own_initial_alias='ui2coden', require_complete_metrics=False):
+                             own_initial_alias='ui2coden', require_complete_metrics=False, revision_rounds=None):
     """Aggregate fixed-model results across independently sampled initial VLM drafts."""
     root = Path(root); out = Path(out); out.mkdir(parents=True, exist_ok=True)
     if not seeds or len(seeds) != len(set(seeds)):
         raise ValueError('Initial seeds must be nonempty and distinct')
     for index, seed in enumerate(seeds):
         build(root, aliases, representative, out / 'by-initial-seed' / str(seed),
-              include_ablation and index == 0, include_ui2coden, 3, True, seed,
-              own_initial_alias, require_complete_metrics)
+              include_ablation and index == 0, include_ui2coden, revision_rounds or 3, True, seed,
+              own_initial_alias, require_complete_metrics, revision_rounds=revision_rounds)
     lines = ['# Initial-VLM-seed experiment', '',
              'The policy checkpoints and target observations are fixed. Initial VLM drafts vary by generation seed.',
              'Mean ± sample SD is across initial VLM seeds; page-bootstrap CIs are in each seed report.', '']
@@ -278,6 +281,7 @@ def main():
     parser.add_argument('--include-ui2coden', action='store_true')
     parser.add_argument('--ui2coden-rounds', type=int, default=3)
     parser.add_argument('--require-three-rounds', action='store_true')
+    parser.add_argument('--revision-rounds', type=int, choices=range(1, 101))
     parser.add_argument('--initial-seeds', help='Comma-separated generation seeds; policy checkpoints remain fixed')
     parser.add_argument('--own-initial-alias', default='ui2coden')
     parser.add_argument('--require-complete-metrics', action='store_true')
@@ -291,11 +295,12 @@ def main():
             raise ValueError('Initial seeds must be nonnegative integers')
         build_initial_seed_suite(args.root, aliases, args.representative, args.out, seeds,
                                  not args.skip_ablation, args.include_ui2coden,
-                                 args.own_initial_alias, args.require_complete_metrics)
+                                 args.own_initial_alias, args.require_complete_metrics, args.revision_rounds)
     else:
         build(args.root, aliases, args.representative, args.out, not args.skip_ablation,
               args.include_ui2coden, args.ui2coden_rounds, args.require_three_rounds,
-              own_initial_alias=args.own_initial_alias, require_complete_metrics=args.require_complete_metrics)
+              own_initial_alias=args.own_initial_alias, require_complete_metrics=args.require_complete_metrics,
+              revision_rounds=args.revision_rounds)
 
 
 if __name__ == '__main__':

@@ -10,6 +10,8 @@ specs=${VLM_SPECS:-qwen3vl8b\|qwen\|Qwen/Qwen3-VL-8B-Instruct\|bf16}
 IFS=',' read -ra entries <<< "$specs"
 first=${entries[0]};first_alias=${first%%|*};[[ "$first_alias" == "$first" ]] && first_alias=${first%%=*}
 representative=${ABLATION_VLM_ALIAS:-$first_alias}
+revision_rounds=${REVISION_ROUNDS:-3}
+[[ "$revision_rounds" =~ ^[1-9][0-9]*$ ]] || { echo "REVISION_ROUNDS must be positive" >&2; exit 2; }
 run_ablation=${RUN_ABLATION:-0}
 run_ui2coden=${RUN_UI2CODEN:-0}
 [[ "$run_ablation" == 0 || "$run_ablation" == 1 ]] || { echo 'RUN_ABLATION must be 0 or 1' >&2; exit 2; }
@@ -74,7 +76,7 @@ PYTEMP
   endpoint=${endpoint:-http://localhost:8000/v1/chat/completions}
   api_key_env=${api_key_env:-${VLM_API_KEY_ENV:-VLM_API_KEY}}
   revision=${revision:-${VLM_REVISION:-main}}
-  rounds=3
+  rounds=$revision_rounds
   if [[ "$alias" == ui2coden ]]; then
     [[ "$run_ui2coden" == 1 && "$model" == zai-org/UI2Code_N ]] || { echo 'ui2coden group requires its own model and RUN_UI2CODEN=1' >&2; exit 2; }
     revision=$ui_revision
@@ -103,14 +105,14 @@ PYREV
       bash scripts/run_visual_web.sh "$root" "$seed_output" "$train"
     [[ -n "$shared_target_manifest" ]] || shared_target_manifest="$seed_output/prepare/prepared.jsonl"
     if [[ "$run_ui2coden" == 1 ]]; then
-      GPU=${CUDA_VISIBLE_DEVICES:-0} ROUNDS=3 LIMIT=0 MODEL_REVISION="$ui_revision" EVALUATION_PYTHON="$evaluation_python" \
+      GPU=${CUDA_VISIBLE_DEVICES:-0} ROUNDS="$revision_rounds" LIMIT=0 MODEL_REVISION="$ui_revision" EVALUATION_PYTHON="$evaluation_python" \
         bash baselines/ui2coden/run_4090.sh "$seed_output/prepare/prepared.jsonl" "$seed_output/ui2coden"
     fi
   done
 done
 aliases_csv=$(IFS=,; echo "${aliases[*]}")
-suite_options=(--root "$output" --aliases "$aliases_csv" --representative "$representative" --out "$output/paper" --require-complete-metrics --own-initial-alias ui2coden --require-three-rounds --initial-seeds "$initial_seeds")
+suite_options=(--root "$output" --aliases "$aliases_csv" --representative "$representative" --out "$output/paper" --require-complete-metrics --own-initial-alias ui2coden --revision-rounds "$revision_rounds" --initial-seeds "$initial_seeds")
 [[ "$run_ablation" == 0 ]] && suite_options+=(--skip-ablation)
-[[ "$run_ui2coden" == 1 ]] && suite_options+=(--include-ui2coden --ui2coden-rounds 3)
+[[ "$run_ui2coden" == 1 ]] && suite_options+=(--include-ui2coden --ui2coden-rounds "$revision_rounds")
 python -m framediff.paper_suite "${suite_options[@]}"
 echo "Completed ${#entries[@]} VLM(s). Paper tables: $output/paper/README.md"
