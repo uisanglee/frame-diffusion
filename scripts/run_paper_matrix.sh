@@ -10,9 +10,12 @@ export INITIAL_SEEDS=${INITIAL_SEEDS:-11,22,33} REPEATS=1 RUN_UI2CODEN=1 RUN_ABL
 python - "$webui" "$d2c" "$hard" <<'PY'
 import sys
 from framediff.paper_matrix import check_sources
-check_sources(manifest=sys.argv[1], dataset='webui')
-check_sources(root=sys.argv[2])
-check_sources(root=sys.argv[3])
+for name, options in [('WebUI', dict(manifest=sys.argv[1], dataset='webui')),
+                      ('Design2Code', dict(root=sys.argv[2])),
+                      ('Design2Code-Hard', dict(root=sys.argv[3]))]:
+    print(f'Checking {name}: {options}', flush=True)
+    rows = check_sources(**options)
+    print(f'{name}: {len(rows)} records OK', flush=True)
 PY
 WEB_DATASET=webui PAGE_MANIFEST="$webui" bash scripts/run_paper_4090_vlms.sh . "$output/webui" "$train"
 WEB_DATASET=design2code PAGE_MANIFEST='' bash scripts/run_paper_4090_vlms.sh "$d2c" "$output/design2code" "$train"

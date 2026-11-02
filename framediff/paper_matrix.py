@@ -1,5 +1,6 @@
 """Preflight and export the three-dataset, six-initial-model paper comparison."""
 import argparse
+from collections import Counter
 import json
 import math
 from pathlib import Path
@@ -18,6 +19,11 @@ METRICS = ('official_block', 'official_position', 'dom_box_iou', 'improved_page_
 def check_sources(root=None, manifest=None, dataset='design2code', view='default_1280-720', limit=0):
     if bool(root) == bool(manifest):
         raise ValueError('Supply exactly one dataset root or manifest')
+    source = Path(manifest or root).resolve()
+    if manifest and not source.is_file():
+        raise ValueError(f'{dataset}: manifest does not exist: {source}')
+    if root and not source.is_dir():
+        raise ValueError(f'{dataset}: dataset directory does not exist: {source}')
     if manifest:
         rows = list(read_jsonl(manifest))
     elif dataset == 'webui':
@@ -26,8 +32,14 @@ def check_sources(root=None, manifest=None, dataset='design2code', view='default
     else:
         rows = [dict(id=i, screenshot=str(p), html=str(h)) for i,p,h in discover_design2code(root)]
     if limit: rows = rows[:limit]
-    if not rows or len({str(r['id']) for r in rows}) != len(rows):
-        raise ValueError('Empty dataset or duplicate page/view IDs')
+    if not rows:
+        detail = ('manifest has no records' if manifest else
+                  'no matching same-name .png/.html pairs found recursively' if dataset != 'webui' else
+                  f'no WebUI records for view={view}')
+        raise ValueError(f'{dataset}: {detail}: {source}')
+    duplicates = [(key, n) for key, n in Counter(str(r['id']) for r in rows).items() if n > 1]
+    if duplicates:
+        raise ValueError(f'{dataset}: duplicate page/view IDs in {source}; examples={duplicates[:5]}')
     for row in rows:
         if row.get('split','test') != 'test':
             raise ValueError(f'{row["id"]}: paper evaluation requires the held-out test split')
