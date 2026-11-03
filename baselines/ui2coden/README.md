@@ -52,8 +52,16 @@ sudo baselines/ui2coden/.venv/bin/python -m playwright install-deps chromium
 
 기본값: **GPU 한 장, NF4 4비트, BF16 계산, SDPA, batch 1, CPU 2 threads**.
 목표/현재 이미지는 각각 최대 262,144 pixels로 축소해 모델에 넣는다.
-평가 렌더링은 원래 viewport 해상도다. 입력+출력 최대 12,288 tokens,
-출력 최대 4,096 tokens. 입력이 넘치면 코드를 자르지 않고 실패 사유를 기록한다.
+평가 렌더링은 원래 viewport 해상도다. 출력 상한은 16,384 tokens이며 EOS에서 먼저 종료할 수 있다.
+입력+출력 한도는 고정된 모델 revision의 `text_config.max_position_embeddings`를 읽는다.
+`MAX_CONTEXT=0`(기본)은 이 모델 한도를 사용하며 양수를 지정하면 더 낮은 제한을 적용한다.
+입력 17,000 + 출력 예산 16,384는 모델 문맥 한도가 33,384 이상일 때 허용된다.
+실제 입력에는 이미지 토큰·지시문·현재 HTML이 모두 포함된다. 입력이나 출력 예산을
+자동으로 줄이지 않는다. 메모리 확보는 별개이며 긴 입력의 4090 실행을 보장하지 않는다.
+NF4, batch 1, SDPA와 `logits_to_keep=1`을 사용한다. OOM은 즉시 중단한다.
+`runtime.json`에 문맥 한도와 출력 예산, 각 round의 `generation`에 실제 토큰 수를 기록한다.
+논문 실행기에서는 `UI2CODEN_MAX_NEW_TOKENS=16384`, `UI2CODEN_MAX_CONTEXT=0`으로
+다른 모델의 환경변수와 분리한다.
 긴 HTML의 실패율도 함께 보고해야 한다. 데이터 크기에 따라 이 제한을 조정하려면
 별도 출력 폴더를 사용한다. 여유 VRAM이 18 GiB 미만이면 실행을 거절한다.
 이 기준은 사전 자원 점검이지 OOM 방지 보장은 아니다.

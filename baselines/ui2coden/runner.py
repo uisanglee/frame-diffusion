@@ -88,10 +88,28 @@ def load_records(path, path_root, limit):
     return records
 
 
+def context_limit(config, requested=0):
+    """Use the language model's declared context, never the vision config."""
+    text = getattr(config, 'text_config', config)
+    limit = getattr(text, 'max_position_embeddings', None)
+    if not isinstance(limit, int) or limit <= 0:
+        raise ValueError('Model text config has no valid max_position_embeddings')
+    if requested < 0 or requested > limit:
+        raise ValueError(f'Requested context {requested} exceeds model limit {limit} or is negative')
+    return requested or limit
+
+
+def check_budget(input_tokens, output_tokens, limit):
+    if input_tokens + output_tokens > limit:
+        raise ValueError(f'Context budget exceeded: input={input_tokens}, '
+                         f'output_budget={output_tokens}, context_limit={limit}; '
+                         'no input truncation or output budget reduction applied')
+
+
 class Runtime:
     def __init__(self, args):
         import torch
-        from transformers import AutoProcessor, AutoModelForImageTextToText, BitsAndBytesConfig
+        from transformers import AutoConfig, AutoProcessor, AutoModelForImageTextToText, BitsAndBytesConfig
         if not torch.cuda.is_available(): raise RuntimeError('A CUDA GPU is required')
         if torch.cuda.device_count() != 1: raise RuntimeError('Expose exactly one GPU using CUDA_VISIBLE_DEVICES')
         torch.set_num_threads(2)
@@ -100,6 +118,9 @@ class Runtime:
         if free < 18 * 1024**3:
             raise RuntimeError('Less than 18 GiB free VRAM: use an idle RTX 4090 for this preset')
         self.args = args
+        config = AutoConfig.from_pretrained(MODEL, revision=args.revision)
+        self.context_limit = context_limit(config, args.max_context)
+        check_budget(1, args.max_new_tokens, self.context_limit)
         self.processor = AutoProcessor.from_pretrained(MODEL, revision=args.revision)
         self.model = AutoModelForImageTextToText.from_pretrained(MODEL,
             revision=args.revision, torch_dtype=torch.bfloat16, device_map={'': 0},
@@ -109,6 +130,8 @@ class Runtime:
         import transformers
         self.info = dict(model=MODEL, resolved_revision=getattr(self.model.config, '_commit_hash', None),
                          precision='nf4-double-quant/bf16', gpu=torch.cuda.get_device_name(0),
+                         context_limit=self.context_limit, max_new_tokens=args.max_new_tokens,
+                         logits_to_keep=1,
                          torch=torch.__version__, transformers=transformers.__version__, cuda=torch.version.cuda)
 
     def generate(self, target, current, html):
@@ -128,15 +151,16 @@ class Runtime:
         inputs = self.processor.apply_chat_template(messages, tokenize=True,
             add_generation_prompt=True, return_dict=True, return_tensors='pt')
         n = inputs['input_ids'].shape[1]
-        if n + self.args.max_new_tokens > self.args.max_context:
-            raise ValueError(f'Context budget exceeded: input={n}, output_budget={self.args.max_new_tokens}; no truncation applied')
+        check_budget(n, self.args.max_new_tokens, self.context_limit)
         inputs = inputs.to('cuda:0')
         torch.cuda.reset_peak_memory_stats()
         with torch.inference_mode():
             ids = self.model.generate(**inputs, max_new_tokens=self.args.max_new_tokens,
-                do_sample=False, use_cache=True)
+                do_sample=False, use_cache=True, logits_to_keep=1)
         answer = self.processor.decode(ids[0, n:], skip_special_tokens=True)
         stats = dict(input_tokens=n, output_tokens=ids.shape[1]-n,
+                     max_new_tokens=self.args.max_new_tokens, context_limit=self.context_limit,
+                     hit_output_limit=ids.shape[1]-n >= self.args.max_new_tokens,
                      peak_cuda_bytes=torch.cuda.max_memory_allocated())
         del inputs, ids
         return answer, stats
@@ -217,13 +241,13 @@ def main():
     p.add_argument('--path-root', type=Path, default=ROOT)
     p.add_argument('--rounds', type=int, default=3); p.add_argument('--limit', type=int, default=0)
     p.add_argument('--max-pixels', type=int, default=262144)
-    p.add_argument('--max-new-tokens', type=int, default=4096)
-    p.add_argument('--max-context', type=int, default=12288)
+    p.add_argument('--max-new-tokens', type=int, default=16384)
+    p.add_argument('--max-context', type=int, default=0, help='0: use model text config limit; positive: explicit lower cap')
     p.add_argument('--revision', default='main'); p.add_argument('--seed', type=int, default=42)
     p.add_argument('--protocol', choices=['layout', 'general'], default='layout')
     p.add_argument('--resume', action='store_true'); p.add_argument('--check-inputs', action='store_true')
     args = p.parse_args()
-    if min(args.rounds, args.max_pixels, args.max_new_tokens, args.max_context) <= 0 or args.limit < 0:
+    if min(args.rounds, args.max_pixels, args.max_new_tokens) <= 0 or args.max_context < 0 or args.limit < 0:
         p.error('Budgets must be positive and limit nonnegative')
     records = load_records(args.manifest, args.path_root, args.limit)
     if args.check_inputs:

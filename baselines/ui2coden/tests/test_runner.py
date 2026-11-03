@@ -133,3 +133,21 @@ def test_webui_view_ids_do_not_collapse(record, tmp_path):
         screenshot=record['screenshot'], initial_html=record['initial_html'],
         html=record['html']))+'\n')
     assert runner.load_records(path, tmp_path, 0)[0]['page_id'] == 'page/mobile'
+
+
+def test_long_html_keeps_full_output_budget():
+    from types import SimpleNamespace
+    config = SimpleNamespace(text_config=SimpleNamespace(max_position_embeddings=65536),
+                             vision_config=SimpleNamespace(max_position_embeddings=1024))
+    limit = runner.context_limit(config)
+    assert limit == 65536
+    # 17k input must not consume the separate 16k output allowance.
+    runner.check_budget(17000, 16384, limit)
+    runner.check_budget(49152, 16384, limit)
+    with pytest.raises(ValueError, match='no input truncation'):
+        runner.check_budget(49153, 16384, limit)
+    assert runner.context_limit(config, 32768) == 32768
+    with pytest.raises(ValueError, match='model limit'):
+        runner.context_limit(config, 100000)
+    with pytest.raises(ValueError, match='max_position_embeddings'):
+        runner.context_limit(SimpleNamespace())

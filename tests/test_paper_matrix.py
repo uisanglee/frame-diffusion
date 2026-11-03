@@ -60,12 +60,13 @@ def test_shell_wires_own_draft_shared_inputs_and_webui(tmp_path):
     py.chmod(0o755)
     bash = tools/'bash'
     bash.write_text("""#!/bin/sh
-printf '%s|%s|%s|%s|%s|%s|%s|%s\n' "$1" "$VLM_MODEL" "$WEB_DATASET" "$REVISION_ROUNDS" "$REFERENCE_MANIFEST" "$ROUNDS" "$MODEL_REVISION" "$ABSTRACT_ONLY" >> "$CALL_LOG"
+printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$1" "$VLM_MODEL" "$WEB_DATASET" "$REVISION_ROUNDS" "$REFERENCE_MANIFEST" "$ROUNDS" "$MODEL_REVISION" "$ABSTRACT_ONLY" "$MAX_NEW_TOKENS" "$MAX_CONTEXT" >> "$CALL_LOG"
 """)
     bash.chmod(0o755)
     env = dict(os.environ, PATH=str(tools)+os.pathsep+os.environ['PATH'], CALL_LOG=str(tmp_path/'calls'),
         OFFICIAL_REPO='official', RUN_UI2CODEN='1', RUN_ABLATION='0', INITIAL_SEEDS='11,22',
-        WEB_DATASET='webui', PAGE_MANIFEST='pages.jsonl',
+        WEB_DATASET='webui', PAGE_MANIFEST='pages.jsonl', MAX_NEW_TOKENS='16384', MAX_CONTEXT='12288',
+        UI2CODEN_MAX_NEW_TOKENS='16384', UI2CODEN_MAX_CONTEXT='0',
         VLM_SPECS='q|hf|qwen|4bit,ui2coden|hf|zai-org/UI2Code_N|4bit')
     result = subprocess.run(['/bin/bash',str(script),'data','out','train'],cwd=tmp_path,env=env,capture_output=True,text=True)
     assert result.returncode == 0, result.stderr
@@ -77,6 +78,7 @@ printf '%s|%s|%s|%s|%s|%s|%s|%s\n' "$1" "$VLM_MODEL" "$WEB_DATASET" "$REVISION_R
     assert all(r[4]=='out/q/seeds/11/prepare/prepared.jsonl' for r in drafts[1:])
     polish = [r for r in calls if r[0]=='baselines/ui2coden/run_4090.sh']
     assert len(polish)==4 and all(r[5:7]==['3','pinned-sha'] for r in polish)
+    assert all(r[8:10] == ['16384', '0'] for r in polish)
 
 
 def test_seed42_qwen_runner_uses_bf16_and_separate_outputs(tmp_path):

@@ -105,6 +105,7 @@ PYREV
       bash scripts/run_visual_web.sh "$root" "$seed_output" "$train"
     [[ -n "$shared_target_manifest" ]] || shared_target_manifest="$seed_output/prepare/prepared.jsonl"
     if [[ "$run_ui2coden" == 1 ]]; then
+      MAX_NEW_TOKENS="${UI2CODEN_MAX_NEW_TOKENS:-16384}" MAX_CONTEXT="${UI2CODEN_MAX_CONTEXT:-0}" \
       GPU=${CUDA_VISIBLE_DEVICES:-0} ROUNDS="$revision_rounds" LIMIT=0 MODEL_REVISION="$ui_revision" EVALUATION_PYTHON="$evaluation_python" \
         bash baselines/ui2coden/run_4090.sh "$seed_output/prepare/prepared.jsonl" "$seed_output/ui2coden"
     fi
