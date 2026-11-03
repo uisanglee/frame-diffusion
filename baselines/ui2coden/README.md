@@ -33,6 +33,10 @@
 ## 4090 설치 — 한 번만
 
 Linux, Python 3.11/3.12, 동작하는 NVIDIA 드라이버를 전제로 한다.
+설치기는 PyTorch 2.8.0 / torchvision 0.23.0의 CUDA 12.8 휠을 고정하여
+bitsandbytes 0.48과 호환되게 설치하고, 실제 GPU NF4 연산을 검사한다.
+기존 전용 환경에도 다시 실행할 수 있으며 학습 환경과 모델 다운로드 캐시는 유지한다.
+`BNB_CUDA_VERSION`을 따로 설정했다면 해제하고 실행한다.
 
 ```bash
 cd /home/uisang/2027/frame-diffusion
