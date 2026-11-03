@@ -11,6 +11,8 @@ from pathlib import Path
 from PIL import Image
 from .ir import DEFAULTS, LIMITS, read_json, validate, write_json
 from .data import differences
+from .vlm_devices import (deployment_settings, placement_kwargs, verify_cuda_placement,
+    input_device, start_cuda_measurement, finish_cuda_measurement, efficient_generation_options)
 
 QWEN_BF16_MEMORY_CONTRACT = 'bf16-dynamic-kv-v1'
 
@@ -137,41 +139,26 @@ def pin_revision(model, revision, output):
     return sha
 
 
-def verify_cuda_placement(model):
-    """Verify weight/buffer placement; generation may explicitly offload its KV cache."""
-    import torch
-    expected = torch.device('cuda', torch.cuda.current_device())
-    devices = {tensor.device for tensor in model.parameters()} | {tensor.device for tensor in model.buffers()}
-    if devices != {expected}:
-        raise RuntimeError(f'Local VLM must reside entirely on {expected}; found {devices}')
-    for value in getattr(model, 'hf_device_map', {}).values():
-        device = torch.device('cuda', value) if isinstance(value, int) else torch.device(value) if value != 'disk' else None
-        if device is None or device.type != 'cuda' or device.index not in (None, expected.index):
-            raise RuntimeError(f'CPU/disk/multi-GPU offload is not allowed: {model.hf_device_map}')
-    model._framediff_placement = {'device': str(expected), 'gpu_name': torch.cuda.get_device_name(expected),
-                                 'device_map': {k: str(v) for k, v in getattr(model, 'hf_device_map', {}).items()},
-                                 'placement_contract': 'single-cuda-no-weight-offload-v2'}
-
-
 def load_qwen_runtime(args):
     import torch
     from transformers import AutoProcessor, Qwen3VLForConditionalGeneration, BitsAndBytesConfig
     if not torch.cuda.is_available():raise RuntimeError('Local Qwen backend requires CUDA; use an API backend on this host')
     torch.manual_seed(args.seed)
-    kwargs={'revision':args.revision,'dtype':torch.bfloat16,'device_map':{'':torch.cuda.current_device()},'attn_implementation':'sdpa'}
+    kwargs={'revision':args.revision,'dtype':torch.bfloat16,'attn_implementation':'sdpa'}
     if args.four_bit:kwargs['quantization_config']=BitsAndBytesConfig(load_in_4bit=True,bnb_4bit_quant_type='nf4',bnb_4bit_compute_dtype=torch.bfloat16,bnb_4bit_use_double_quant=True)
+    kwargs.update(placement_kwargs(Qwen3VLForConditionalGeneration, args.model, args.revision, args.four_bit))
     model=Qwen3VLForConditionalGeneration.from_pretrained(args.model,**kwargs).eval()
     verify_cuda_placement(model)
     processor=AutoProcessor.from_pretrained(args.model,revision=model.config._commit_hash or args.revision,max_pixels=args.max_pixels)
     return model,processor
 
 def load_hf_runtime(args):
-    """Load a Transformers-native image-to-text model on one CUDA device."""
+    """Load a Transformers-native image-to-text model with explicit CUDA placement."""
     import torch
     from transformers import AutoModelForImageTextToText, AutoProcessor, BitsAndBytesConfig
     if not torch.cuda.is_available():raise RuntimeError('Local Hugging Face backend requires CUDA; use an API backend on this host')
     torch.manual_seed(args.seed)
-    kwargs={'revision':args.revision,'dtype':torch.bfloat16,'device_map':{'':torch.cuda.current_device()},'attn_implementation':'sdpa'}
+    kwargs={'revision':args.revision,'dtype':torch.bfloat16,'attn_implementation':'sdpa'}
     if args.four_bit:
         kwargs['quantization_config']=BitsAndBytesConfig(load_in_4bit=True,bnb_4bit_quant_type='nf4',
             bnb_4bit_compute_dtype=torch.bfloat16,bnb_4bit_use_double_quant=True)
@@ -182,6 +169,7 @@ def load_hf_runtime(args):
     elif args.model.rstrip('/').split('/')[-1].lower() == 'llava-v1.6-mistral-7b-hf':
         from transformers import LlavaNextForConditionalGeneration
         model_class=LlavaNextForConditionalGeneration
+    kwargs.update(placement_kwargs(model_class, args.model, args.revision, args.four_bit))
     model=model_class.from_pretrained(args.model,**kwargs).eval()
     verify_cuda_placement(model)
     processor=AutoProcessor.from_pretrained(args.model,revision=model.config._commit_hash or args.revision)
@@ -230,8 +218,8 @@ def qwen_generate(args,prompt,images,runtime=None):
         content=[{'type':'image','image':im} for im in images]+[{'type':'text','text':prompt}]
     messages=[{'role':'user','content':content}]
     inputs=processor.apply_chat_template(messages,tokenize=True,add_generation_prompt=True,return_dict=True,return_tensors='pt')
-    inputs=qwen_inputs_to_device(inputs,model.device)
-    torch.cuda.reset_peak_memory_stats();torch.cuda.synchronize();start=time.perf_counter()
+    inputs=qwen_inputs_to_device(inputs,input_device(model))
+    start_cuda_measurement(model);start=time.perf_counter()
     temperature=getattr(args,'temperature',0.)
     # Keep the model's EOS IDs; the token budget is a ceiling, not a required length.
     generation={'do_sample':temperature>0,'min_new_tokens':0,**explicit_padding(model),
@@ -244,14 +232,14 @@ def qwen_generate(args,prompt,images,runtime=None):
     extra = html_generation_options(args, processor, inputs['input_ids'].shape[1], qwen=True)
     generation.update(extra)
     with torch.inference_mode():outputs=model.generate(**inputs,max_new_tokens=args.max_new_tokens,**generation)
-    torch.cuda.synchronize()
+    memory=finish_cuda_measurement(model)
     answer=processor.batch_decode(outputs[:,inputs['input_ids'].shape[1]:],skip_special_tokens=True)[0]
     repeat_guard = generation.get('stopping_criteria', [None])[0]
     return answer,{**getattr(model,'_framediff_placement',{}),'generation_settings':generation_metadata(model,generation,args.max_new_tokens),
                    'presence_penalty':1.5 if 'logits_processor' in generation else 0.,
                    'css_repeat_check':repeat_guard is not None,
                    'generation_stop_reason':repeat_guard.reason if repeat_guard is not None else None,
-                   'generation_seconds':time.perf_counter()-start,'peak_cuda_bytes':torch.cuda.max_memory_allocated(),
+                   'generation_seconds':time.perf_counter()-start,**memory,
                    'resolved_revision':getattr(model.config,'_commit_hash',None),'input_tokens':inputs['input_ids'].shape[1],
                    'output_tokens':outputs.shape[1]-inputs['input_ids'].shape[1],
                    'memory_contract':'nf4-dynamic-kv-v1' if args.four_bit else QWEN_BF16_MEMORY_CONTRACT,
@@ -284,21 +272,21 @@ def hf_generate(args,prompt,images,runtime=None):
         content.append({'type':'image','image':image})
     if not getattr(args,'prompt_first',False):content.append({'type':'text','text':prompt})
     inputs=processor.apply_chat_template([{'role':'user','content':content}],tokenize=True,
-        add_generation_prompt=True,return_dict=True,return_tensors='pt').to(model.device)
-    torch.cuda.reset_peak_memory_stats();torch.cuda.synchronize();start=time.perf_counter()
+        add_generation_prompt=True,return_dict=True,return_tensors='pt').to(input_device(model))
+    start_cuda_measurement(model);start=time.perf_counter()
     temperature=getattr(args,'temperature',0.)
     # Keep the model's EOS IDs; the token budget is a ceiling, not a required length.
-    generation={'do_sample':temperature>0,'min_new_tokens':0,**explicit_padding(model)}
+    generation={**efficient_generation_options(model),'do_sample':temperature>0,'min_new_tokens':0,**explicit_padding(model)}
     if temperature>0:
         torch.manual_seed(args.seed);generation['temperature']=temperature
     extra = html_generation_options(args, processor, inputs['input_ids'].shape[1])
     generation.update(extra)
     with torch.inference_mode():outputs=model.generate(**inputs,max_new_tokens=args.max_new_tokens,**generation)
-    torch.cuda.synchronize();input_tokens=inputs['input_ids'].shape[1]
+    memory=finish_cuda_measurement(model);input_tokens=inputs['input_ids'].shape[1]
     answer=decode_hf_answer(processor,outputs[:,input_tokens:])
     return answer,{**getattr(model,'_framediff_placement',{}),'generation_settings':generation_metadata(model,generation,args.max_new_tokens),
                    'presence_penalty':1.5 if 'logits_processor' in generation else 0.,
-                   'css_repeat_check':False,'generation_seconds':time.perf_counter()-start,'peak_cuda_bytes':torch.cuda.max_memory_allocated(),
+                   'css_repeat_check':False,'generation_seconds':time.perf_counter()-start,**memory,
                    'resolved_revision':getattr(model.config,'_commit_hash',None),'input_tokens':input_tokens,
                    'output_tokens':outputs.shape[1]-input_tokens,
                    'weight_precision':'nf4-4bit' if args.four_bit else 'bf16'}

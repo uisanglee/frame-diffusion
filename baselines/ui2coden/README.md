@@ -63,8 +63,30 @@ NF4, batch 1, SDPA와 `logits_to_keep=1`을 사용한다. OOM은 즉시 중단�
 논문 실행기에서는 `UI2CODEN_MAX_NEW_TOKENS=16384`, `UI2CODEN_MAX_CONTEXT=0`으로
 다른 모델의 환경변수와 분리한다.
 긴 HTML의 실패율도 함께 보고해야 한다. 데이터 크기에 따라 이 제한을 조정하려면
-별도 출력 폴더를 사용한다. 여유 VRAM이 18 GiB 미만이면 실행을 거절한다.
+별도 출력 폴더를 사용한다. 단일 GPU 모드는 여유 VRAM이 18 GiB 미만이면 실행을 거절한다.
 이 기준은 사전 자원 점검이지 OOM 방지 보장은 아니다.
+
+### 양자화 없이 BF16, GPU 두 장
+
+`VLM_DEVICE_MAP=balanced UI2CODEN_PRECISION=bf16 GPU=0,1`을 지정하면 동일한
+polishing 루프에서 모델 레이어를 두 GPU에 분산한다. `VLM_GPU_MEMORY_GIB=20`은
+GPU당 **가중치 배치 예산**이며 실행 중 VRAM의 하드 상한이 아니다. 실제 여유 메모리에서
+최소 2 GiB를 제외한 값과 이 예산 중 작은 값으로 배치를 계획한다. 남은 VRAM은
+KV 캐시와 이미지 처리에 쓰인다. 가중치가 두 GPU에 들어가지 않으면 로딩 전에
+실패하며 CPU/disk로 자동 offload하지 않는다. 긴 문맥의 OOM 방지를 보장하지 않는다.
+
+```bash
+GPU=0,1 VLM_DEVICE_MAP=balanced UI2CODEN_PRECISION=bf16 \
+  VLM_GPU_MEMORY_GIB=20 ROUNDS=2 \
+  bash baselines/ui2coden/run_4090.sh INPUT.jsonl NEW_OUTPUT_DIR
+```
+
+`INPUT.jsonl`은 기존 prepared manifest, `NEW_OUTPUT_DIR`은 새 출력 디렉터리로 바꾼다.
+기존 4bit 결과와 같은 디렉터리에서 재개하지 않는다. 두 GPU에 레이어를 나누는
+방식은 처리량을 두 배로 만드는 tensor parallelism이 아니며 속도는 실측해야 한다.
+SDPA, KV 캐시, 지원되는 모델의 마지막 토큰 logits 계산을 사용한다.
+`runtime.json`에는 정밀도·실제 device map·GPU 정보가 저장되고 round별 `generation`에는
+각 GPU의 피크 메모리와 생성 시간이 저장된다. 메모리는 PyTorch allocated 기준이다.
 
 모델 최초 다운로드에는 네트워크와 디스크 공간이 필요하다. HF 캐시는 기존
 `HF_HOME` 설정을 따른다. 학습 캐시는 만들지 않는다. 최초 모델 revision을 SHA로

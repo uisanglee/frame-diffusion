@@ -7,11 +7,11 @@ cd "$root"
 [[ $# == 2 ]] || { echo 'Usage: run_4090.sh INPUT.jsonl OUTPUT_DIR' >&2; exit 2; }
 python_bin="$here/.venv/bin/python"
 [[ -x "$python_bin" ]] || { echo 'Run setup_4090.sh first.' >&2; exit 2; }
-export CUDA_VISIBLE_DEVICES="${GPU:-0}"
+export CUDA_VISIBLE_DEVICES="${GPU:-${CUDA_VISIBLE_DEVICES:-0}}"
 export PYTHONUNBUFFERED=1 TOKENIZERS_PARALLELISM=false
 export OMP_NUM_THREADS=2 MKL_NUM_THREADS=2
 export PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}"
-options=(--manifest "$1" --out "$2" --resume --rounds "${ROUNDS:-3}"
+options=(--precision "${UI2CODEN_PRECISION:-4bit}" --manifest "$1" --out "$2" --resume --rounds "${ROUNDS:-3}"
   --limit "${LIMIT:-0}" --max-new-tokens "${MAX_NEW_TOKENS:-16384}"
   --max-context "${MAX_CONTEXT:-0}" --max-pixels "${MAX_PIXELS:-262144}"
   --revision "${MODEL_REVISION:-main}" --protocol "${PROTOCOL:-layout}")

@@ -15,6 +15,8 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from framediff.html_bridge import HtmlBrowser, html_answer
+from framediff.vlm_devices import (deployment_settings, input_device,
+    start_cuda_measurement, finish_cuda_measurement, efficient_generation_options)
 
 MODEL = 'zai-org/UI2Code_N'
 PROMPT = '''The first image is the target UI design. The second image is the current
@@ -109,29 +111,29 @@ def check_budget(input_tokens, output_tokens, limit):
 class Runtime:
     def __init__(self, args):
         import torch
-        from transformers import AutoConfig, AutoProcessor, AutoModelForImageTextToText, BitsAndBytesConfig
+        from transformers import AutoConfig
+        from framediff.vlm import load_hf_runtime
+        from types import SimpleNamespace
         if not torch.cuda.is_available(): raise RuntimeError('A CUDA GPU is required')
-        if torch.cuda.device_count() != 1: raise RuntimeError('Expose exactly one GPU using CUDA_VISIBLE_DEVICES')
+        if deployment_settings()['device_map'] == 'single':
+            if torch.cuda.device_count() != 1:
+                raise RuntimeError('Single-GPU preset requires exactly one visible GPU; use VLM_DEVICE_MAP=balanced for two')
+            if torch.cuda.mem_get_info()[0] < 18 * 1024**3:
+                raise RuntimeError('Less than 18 GiB free VRAM: use an idle RTX 4090 for this preset')
         torch.set_num_threads(2)
         torch.manual_seed(args.seed)
-        free, _ = torch.cuda.mem_get_info()
-        if free < 18 * 1024**3:
-            raise RuntimeError('Less than 18 GiB free VRAM: use an idle RTX 4090 for this preset')
         self.args = args
         config = AutoConfig.from_pretrained(MODEL, revision=args.revision)
         self.context_limit = context_limit(config, args.max_context)
         check_budget(1, args.max_new_tokens, self.context_limit)
-        self.processor = AutoProcessor.from_pretrained(MODEL, revision=args.revision)
-        self.model = AutoModelForImageTextToText.from_pretrained(MODEL,
-            revision=args.revision, torch_dtype=torch.bfloat16, device_map={'': 0},
-            attn_implementation='sdpa', quantization_config=BitsAndBytesConfig(
-                load_in_4bit=True, bnb_4bit_quant_type='nf4',
-                bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.bfloat16)).eval()
+        options = SimpleNamespace(**{**vars(args), 'model': MODEL, 'four_bit': args.precision == '4bit'})
+        self.model, self.processor = load_hf_runtime(options)
         import transformers
         self.info = dict(model=MODEL, resolved_revision=getattr(self.model.config, '_commit_hash', None),
-                         precision='nf4-double-quant/bf16', gpu=torch.cuda.get_device_name(0),
+                         precision='nf4-4bit' if args.precision == '4bit' else 'bf16',
+                         **self.model._framediff_placement,
                          context_limit=self.context_limit, max_new_tokens=args.max_new_tokens,
-                         logits_to_keep=1,
+                         generation_options=efficient_generation_options(self.model),
                          torch=torch.__version__, transformers=transformers.__version__, cuda=torch.version.cuda)
 
     def generate(self, target, current, html):
@@ -152,28 +154,31 @@ class Runtime:
             add_generation_prompt=True, return_dict=True, return_tensors='pt')
         n = inputs['input_ids'].shape[1]
         check_budget(n, self.args.max_new_tokens, self.context_limit)
-        inputs = inputs.to('cuda:0')
-        torch.cuda.reset_peak_memory_stats()
+        inputs = inputs.to(input_device(self.model))
+        start_cuda_measurement(self.model)
+        started = time.perf_counter()
         with torch.inference_mode():
             ids = self.model.generate(**inputs, max_new_tokens=self.args.max_new_tokens,
-                do_sample=False, use_cache=True, logits_to_keep=1)
+                do_sample=False, **efficient_generation_options(self.model))
+        memory = finish_cuda_measurement(self.model)
+        generation_seconds = time.perf_counter() - started
         answer = self.processor.decode(ids[0, n:], skip_special_tokens=True)
         stats = dict(input_tokens=n, output_tokens=ids.shape[1]-n,
                      max_new_tokens=self.args.max_new_tokens, context_limit=self.context_limit,
                      hit_output_limit=ids.shape[1]-n >= self.args.max_new_tokens,
-                     peak_cuda_bytes=torch.cuda.max_memory_allocated())
+                     generation_seconds=generation_seconds, **memory)
         del inputs, ids
         return answer, stats
 
 
-def run_page(record, folder, rounds, runtime, browser):
+def run_page(record, folder, rounds, runtime, browser, precision='4bit-nf4'):
     folder.mkdir(parents=True, exist_ok=True)
     initial = dict(record['initial_metadata'])
     initial.update(html=record['initial_html'])
     for k, v in dict(failed=False, seconds=0., browser_executions=0, vlm_calls=0).items():
         initial.setdefault(k, v)
     result = {k: v for k, v in record.items() if k not in ('initial_metadata', 'initial_html')}
-    result.update(vlm_model=MODEL, vlm_backend='huggingface', vlm_weight_precision='4bit-nf4')
+    result.update(vlm_model=MODEL, vlm_backend='huggingface', vlm_weight_precision=precision)
     result['methods'] = {'initial': initial}
     current = Path(record['initial_html'])
     seconds = 0.; calls = tokens_in = tokens_out = renders = captures = failures = 0
@@ -243,6 +248,7 @@ def main():
     p.add_argument('--max-pixels', type=int, default=262144)
     p.add_argument('--max-new-tokens', type=int, default=16384)
     p.add_argument('--max-context', type=int, default=0, help='0: use model text config limit; positive: explicit lower cap')
+    p.add_argument('--precision', choices=['bf16', '4bit'], default='4bit')
     p.add_argument('--revision', default='main'); p.add_argument('--seed', type=int, default=42)
     p.add_argument('--protocol', choices=['layout', 'general'], default='layout')
     p.add_argument('--resume', action='store_true'); p.add_argument('--check-inputs', action='store_true')
@@ -260,7 +266,7 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         config = dict(protocol='ui2coden-local-polishing-v1', settings={k: v for k, v in vars(args).items()
             if k not in ('resume', 'check_inputs', 'out', 'path_root')}, prompt=PROMPT, layout_prompt=LAYOUT,
-            runner_sha=sha(__file__), records=records,
+            runner_sha=sha(__file__), deployment=deployment_settings(), records=records,
             files={r[k]: sha(r[k]) for r in records for k in ('screenshot', 'initial_html', 'html', 'reference_observation') if k in r})
         cfg = out / 'config.json'
         if cfg.exists():
@@ -285,7 +291,8 @@ def main():
                 if not all((folder / f'round-{i}.json').exists() for i in range(1, args.rounds+1)):
                     if runtime is None:
                         runtime = Runtime(args); save(out / 'runtime.json', runtime.info)
-                results.append(run_page(record, folder, args.rounds, runtime, browser))
+                results.append(run_page(record, folder, args.rounds, runtime, browser,
+                                        'bf16' if args.precision == 'bf16' else '4bit-nf4'))
         temporary = out / 'results.jsonl.tmp'
         temporary.write_text(''.join(json.dumps(r, ensure_ascii=False) + '\n' for r in results))
         os.replace(temporary, out / 'results.jsonl')

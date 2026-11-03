@@ -181,6 +181,8 @@ def prepare(args):
         settings['qwen_memory_contract'] = vlm.QWEN_BF16_MEMORY_CONTRACT
     from .html_generation import CONTRACT
     settings['html_generation_contract'] = CONTRACT
+    if args.backend in ('qwen', 'hf'):
+        settings['vlm_deployment'] = vlm.deployment_settings()
     if not settings.get('generate_initial'):
         settings.pop('generate_initial',None)
     if not settings.get('reference_cache'):

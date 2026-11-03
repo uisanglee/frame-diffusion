@@ -151,3 +151,42 @@ def test_long_html_keeps_full_output_budget():
         runner.context_limit(config, 100000)
     with pytest.raises(ValueError, match='max_position_embeddings'):
         runner.context_limit(SimpleNamespace())
+
+
+def test_polishing_dispatch_keeps_long_input_and_bf16_metadata(record, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import torch
+    seen = {}
+    class Inputs(dict):
+        def to(self, device):
+            seen['device'] = str(device)
+            return self
+    class Processor:
+        def apply_chat_template(self, messages, **kwargs):
+            seen['messages'] = messages
+            return Inputs(input_ids=torch.zeros((1, 17000), dtype=torch.long))
+        def decode(self, ids, **kwargs): return HTML
+    class Model:
+        device=torch.device('cpu')
+        _framediff_input_device=torch.device('cuda:1')
+        def forward(self, input_ids, logits_to_keep=0): pass
+        def generate(self, **kwargs):
+            seen['generation'] = kwargs
+            return torch.zeros((1, 17001), dtype=torch.long)
+    runtime = runner.Runtime.__new__(runner.Runtime)
+    runtime.args = SimpleNamespace(max_pixels=262144, max_new_tokens=16384, protocol='layout')
+    runtime.context_limit = 65536
+    runtime.model, runtime.processor = Model(), Processor()
+    monkeypatch.setattr(runner, 'start_cuda_measurement', lambda m: None)
+    monkeypatch.setattr(runner, 'finish_cuda_measurement', lambda m: dict(
+        peak_cuda_bytes=200, peak_cuda_bytes_by_device={'0':100,'1':200}, sum_device_peak_cuda_bytes=300))
+    answer, stats = runtime.generate(record['screenshot'], record['screenshot'], HTML)
+    assert answer == HTML and seen['device'] == 'cuda:1'
+    assert seen['generation']['input_ids'].shape[1] == 17000
+    assert seen['generation']['max_new_tokens'] == 16384
+    assert seen['generation']['logits_to_keep'] == 1
+    assert seen['generation']['do_sample'] is False
+    assert stats['input_tokens'] == 17000 and stats['output_tokens'] == 1
+    assert not stats['hit_output_limit']
+    result = runner.run_page(record, tmp_path/'bf16-page', 1, Runtime([HTML]), Browser(), precision='bf16')
+    assert result['vlm_weight_precision'] == 'bf16'

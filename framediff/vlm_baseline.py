@@ -22,6 +22,8 @@ def build_baseline(args):
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
     settings = {key: getattr(args, key) for key in ('backend','model','revision','endpoint','four_bit',
                 'max_new_tokens','max_pixels','seed','rounds','input_mode')}
+    if args.backend in ('qwen', 'hf'):
+        settings['vlm_deployment'] = vlm.deployment_settings()
     results = []; statuses = []; runtime = None
     with Browser() as browser:
         for index, record in enumerate(records):

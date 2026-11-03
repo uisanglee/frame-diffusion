@@ -70,8 +70,11 @@ def usage(meta):
 def revise(args):
     if args.vlm_retries<0 or min(args.max_new_tokens,args.max_pixels)<1:raise ValueError('Invalid VLM settings')
     rows=list(read_jsonl(args.data));out=Path(args.out).resolve()
+    settings={k:v for k,v in vars(args).items() if k not in ('data','out','resume')}
+    if args.backend in ('qwen', 'hf'):
+        settings['vlm_deployment'] = vlm.deployment_settings()
     guard_run(out,{'kind':'abstract-vlm-self-revision-v1','data':digest(args.data),
-        'settings':{k:v for k,v in vars(args).items() if k not in ('data','out','resume')}},args.resume)
+        'settings':settings},args.resume)
     runtime=None;result=[]
     if args.backend in ('qwen','hf') and any(not (out/'pages'/signature(r['id'])[:20]/'record.json').exists() for r in rows):
         runtime=(vlm.load_qwen_runtime if args.backend=='qwen' else vlm.load_hf_runtime)(args)

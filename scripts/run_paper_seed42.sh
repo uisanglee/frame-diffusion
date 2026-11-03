@@ -36,6 +36,12 @@ export MAX_NEW_TOKENS=16384 PAGE_LIMIT=0 REPAIR_STEPS=20
 export REVISION_ROUNDS=${REVISION_ROUNDS:-3}
 [[ "$REVISION_ROUNDS" =~ ^[1-9][0-9]*$ ]] || { echo "REVISION_ROUNDS must be positive" >&2; exit 2; }
 [[ "$REVISION_ROUNDS" == 3 ]] || output="$output-n$REVISION_ROUNDS"
+if [[ ${VLM_DEVICE_MAP:-single} == balanced ]]; then
+  # Keep the existing single-GPU runs untouched when switching deployment.
+  [[ "$1" == qwen ]] || { echo 'Use the BF16 two-GPU pilot for the other models' >&2; exit 2; }
+  export UI2CODEN_PRECISION=bf16
+  output="$output-bf16-2gpu"
+fi
 export RUN_UI2CODEN=1 RUN_ABLATION=0 REPEATS=1
 
 echo "Initial model=$1, GPU=$CUDA_VISIBLE_DEVICES, seed=42, output=$output"

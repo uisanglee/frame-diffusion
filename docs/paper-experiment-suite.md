@@ -40,6 +40,47 @@ The abstraction VLM condition runs in a separate process from target detection, 
 
 ## Run
 
+### RTX 4090 두 장, BF16 예비실험
+
+기존 4bit 실험과 분리해 6개 initial VLM과 UI2CodeN polishing을 모두 BF16으로
+실행하는 preset이다. GPU 두 장은 **하나의 모델 레이어를 분담**하며 모델들은 순서대로
+실행한다. WebUI/Design2Code/Hard 각 10개, seed 42, 수정 2회, TUIDE 20 step을 유지한다.
+TUIDE/평가 모델은 기존 단일 GPU 경로를 사용하며 VLM 프로세스 종료 후 실행된다.
+
+```bash
+cd /home/uisang/2027/frame-diffusion
+mkdir -p log
+nohup setsid env CUDA_VISIBLE_DEVICES=0,1 PYTHONUNBUFFERED=1 \
+  bash scripts/run_paper_pilot10_bf16_2gpu.sh \
+  >> log/paper-pilot10-seed42-n2-bf16-2gpu.log 2>&1 < /dev/null &
+```
+
+출력은 `runs/paper-pilot10-seed42-n2-bf16-2gpu-v1`이다. 기존 initial/4bit 결과는
+삭제하지 않는다. 동일한 새 명령어는 같은 설정의 중간 결과를 재사용한다.
+전체 Qwen 실험만 실행하려면 다음을 사용한다(예비실험과 별도 출력).
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 VLM_DEVICE_MAP=balanced VLM_GPU_MEMORY_GIB=20 \
+  REVISION_ROUNDS=2 bash scripts/run_paper_seed42.sh qwen
+```
+
+기본 단일 GPU 실행 방식은 유지한다. `VLM_DEVICE_MAP=balanced`는 정확히 두 장과
+BF16을 요구하며, 모델 설정과 GPU 여유 메모리를 이용해 가중치 로딩 전에 배치를 계획한다.
+CPU/disk offload는 허용하지 않는다. `VLM_GPU_MEMORY_GIB`(기본 20)는 각 GPU의
+가중치 배치 예산이며 총 실행 메모리 상한이 아니다. SDPA와 KV 캐시를 사용하고,
+지원되는 HF 모델에서는 마지막 토큰의 logits만 계산한다. 출력 길이/샘플링/이미지
+해상도/반복 횟수를 속도를 위해 줄이지 않는다. 추가 FlashAttention 패키지는 필요 없다.
+
+새 결과는 `config.json`에 deployment 설정을 기록하여 다른 배치 설정과 섞어
+재개하지 못하게 한다. GPU 두 장에 분산해도 속도가 두 배가 되지 않으며, 통신 비용이
+추가된다. 속도·최대 메모리는 실제 서버에서 측정해야 한다. 각 생성 meta와 UI2CodeN
+round JSON의 `peak_cuda_bytes_by_device`는 GPU별 피크, `peak_cuda_bytes`는 그중
+최댓값이다. `sum_device_peak_cuda_bytes`는 장치별 피크의 합으로, 동시 총사용량의
+피크와는 다르다. 시간은 사용 GPU를 모두 동기화한 뒤 기록한다. 논문에서는 GPU 수와
+정밀도를 명시하고, 동일 하드웨어 비교와 각 방법의 실제 자원 비용을 구분한다.
+
+### Existing single-GPU suite
+
 ```bash
 cd /home/uisang/2027/frame-diffusion
 source .venv/bin/activate
