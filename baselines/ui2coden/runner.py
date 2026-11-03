@@ -15,6 +15,7 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from framediff.html_bridge import HtmlBrowser, html_answer
+from framediff.html_generation import PROMPT as COMPACT_HTML_PROMPT, viewport_instruction
 from framediff.vlm_devices import (deployment_settings, input_device,
     start_cuda_measurement, finish_cuda_measurement, efficient_generation_options)
 
@@ -28,6 +29,11 @@ LAYOUT = '''This is a layout repair task: preserve the existing text, images, fo
 colors, DOM elements and their hierarchy. Adjust only CSS layout, position, size
 and spacing. Keep existing resource URLs and data URIs unchanged.
 '''
+
+
+def polishing_prompt(html, viewport, protocol):
+    return (COMPACT_HTML_PROMPT + viewport_instruction(viewport) + PROMPT +
+            (LAYOUT if protocol == 'layout' else '') + '\nCurrent HTML:\n' + html)
 
 
 def sha(path):
@@ -143,13 +149,16 @@ class Runtime:
         import torch
         from PIL import Image
         images = []
+        target_viewport = None
         for path in (target, current):
             with Image.open(path) as im:
+                if target_viewport is None:
+                    target_viewport = im.size
                 im = im.convert('RGB')
                 ratio = min(1., math.sqrt(self.args.max_pixels / (im.width * im.height)))
                 if ratio < 1: im = im.resize((max(1, int(im.width * ratio)), max(1, int(im.height * ratio))))
                 images.append(im)
-        prompt = PROMPT + (LAYOUT if self.args.protocol == 'layout' else '') + '\nCurrent HTML:\n' + html
+        prompt = polishing_prompt(html, target_viewport, self.args.protocol)
         messages = [{'role': 'user', 'content': [
             {'type': 'image', 'image': images[0]}, {'type': 'image', 'image': images[1]},
             {'type': 'text', 'text': prompt}]}]

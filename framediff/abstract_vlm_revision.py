@@ -6,6 +6,7 @@ from pathlib import Path
 from . import vlm
 from .design2code_self_revision import extract_text_elements
 from .html_bridge import HtmlBrowser, embed_placeholder, html_answer
+from .html_generation import PROMPT as COMPACT_HTML_PROMPT, viewport_instruction
 from .ir import read_json, read_jsonl, write_json, write_jsonl
 from .train import select_device
 from .visual import abstract_image, elements
@@ -53,8 +54,9 @@ def cache_abstractions(args):
     return result
 
 
-def prompt(current,texts):
-    return ('You are revising HTML/CSS geometry. The two images are canonical layout abstractions with the same fixed '
+def prompt(current,texts,viewport):
+    return (COMPACT_HTML_PROMPT + viewport_instruction(viewport) +
+            'You are revising HTML/CSS geometry. The two images are canonical layout abstractions with the same fixed '
             'semantic color palette. Image 1 is the target layout and image 2 is the current layout. Compare element '
             'position, size and structural alignment. Preserve text, colors and non-layout content. Return a complete, '
             'self-contained HTML document with inline or embedded CSS, no JavaScript, no external URLs, and no explanation.\n'
@@ -92,7 +94,7 @@ def revise(args):
                     nonlocal attempts,input_tokens,output_tokens
                     attempts+=1;c=copy.copy(args);c.task='revise-html';c.image=[record['abstract_target'],record['abstract_current']]
                     c.current=None;c.frames=None;c.image_labels=['Target layout abstraction:','Current layout abstraction:'];c.prompt_first=True
-                    text=prompt(current,texts)+feedback
+                    text=prompt(current,texts,record['viewport'])+feedback
                     write_json(work/f'abstract-vlm{(".retry-"+str(attempt)) if attempt else ""}.prompt.json',{'prompt':text,'images':c.image})
                     answer,meta=vlm.generate(c,text,vlm.images_for(c),runtime);a,b=usage(meta);input_tokens+=a;output_tokens+=b
                     write_json(work/f'abstract-vlm{(".retry-"+str(attempt)) if attempt else ""}.meta.json',meta)

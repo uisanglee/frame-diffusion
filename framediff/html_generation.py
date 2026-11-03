@@ -2,11 +2,21 @@
 import re
 from collections import Counter
 
-CONTRACT = 'compact-html-css-repeat-v1'
+CONTRACT = 'compact-html-css-viewport-v2'
 PROMPT = ('Return one complete HTML document ending with </html>. Keep CSS compact: '
-          'reuse shared classes and grouped selectors. Do not repeat identical CSS rules '
+          'use concise markup, reuse shared classes and grouped selectors, and omit comments '
+          'and avoid introducing redundant wrappers. Preserve all required content. Do not repeat identical CSS rules '
           'or enumerate hundreds of nth-child selectors; use reusable or periodic rules. '
           'Finish the body and close the document within the output budget.\n')
+
+
+def viewport_instruction(viewport):
+    """Describe the evaluation viewport, independent of model image resizing."""
+    width, height = map(int, viewport)
+    if width <= 0 or height <= 0:
+        raise ValueError('Viewport dimensions must be positive')
+    return (f'The target webpage is evaluated at a viewport of {width} by {height} '
+            'CSS pixels. Match the reference layout at this viewport.\n')
 
 
 def repeated_css(text):

@@ -382,8 +382,12 @@ FRAMEDIFF_OFFICIAL_REPO="$OFFICIAL_REPO" python -m pytest tests/test_web_experim
 
 ### Compact HTML generation contract (2026-11-02)
 
-`compact-html-css-repeat-v1` adds a shared compact-CSS instruction to Initial and
-self-revision prompts. The output budget remains 16384; EOS can end generation earlier.
+`compact-html-css-viewport-v2` adds the target image dimensions as the evaluation
+viewport and requests concise HTML/CSS in Initial, self-revision, and UI2CodeN
+polishing prompts. Model input image resizing does not change the stated viewport.
+The output budget remains 16384; EOS can end generation earlier. These prompt
+instructions encourage shorter output but do not guarantee a token count. A new
+output directory is required when changing from the previous prompt contract.
 Local Qwen sampling retains the requested temperature (automatic paper Initial: 0.7), explicitly
 sets top-p=0.8, top-k=20, repetition penalty=1.0, and applies presence penalty=1.5 to
 generated tokens only, following the VL recommendations at

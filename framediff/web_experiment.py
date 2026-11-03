@@ -216,8 +216,8 @@ def prepare(args):
         c.image_labels=image_labels; c.prompt_first=prompt_first
         base_prompt = extra if literal_prompt or task=='repair-plan' else extra + vlm.prompt_for(c)
         if task.endswith('html'):
-            from .html_generation import PROMPT
-            base_prompt = PROMPT + base_prompt
+            from .html_generation import PROMPT, viewport_instruction
+            base_prompt = PROMPT + viewport_instruction(viewport) + base_prompt
         def generate(attempt, feedback):
             name = label if attempt==0 else f'{label}.retry-{attempt}'
             c.seed = int.from_bytes(hashlib.sha256(f'{args.seed}|{record["id"]}|{name}'.encode()).digest()[:4], 'big') if c.temperature else args.seed

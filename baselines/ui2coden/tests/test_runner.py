@@ -10,6 +10,14 @@ spec.loader.exec_module(runner)
 HTML = '<html><body><div style="width:100px;height:40px">hello</div></body></html>'
 
 
+def test_polishing_prompt_uses_target_viewport_and_compact_html():
+    prompt = runner.polishing_prompt(HTML, (1366, 768), 'layout')
+    assert 'viewport of 1366 by 768 CSS pixels' in prompt
+    assert 'use concise markup' in prompt
+    assert runner.LAYOUT in prompt
+    assert prompt.endswith('\nCurrent HTML:\n' + HTML)
+
+
 @pytest.fixture
 def record(tmp_path):
     (tmp_path/'initial.html').write_text(HTML)
