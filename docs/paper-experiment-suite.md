@@ -161,7 +161,7 @@ Each model normally makes two calls per page: one initial screenshot-to-HTML cal
 
 The wrapper uses the official Chat Completions endpoints directly; API keys remain environment variables and are not written to run configuration files.
 
-The paper runner requires `OFFICIAL_REPO`. Before loading any VLM, it checks actual official Block/Position scoring on a small identical HTML pair. Missing dependencies or incomplete evaluation scores stop the paper export; diagnostic-only runs remain available via `run_visual_web.sh`.
+The paper runner requires `OFFICIAL_REPO`. Before loading any VLM, it checks actual official Position/CLIP scoring on a small identical HTML pair. Missing dependencies or incomplete evaluation scores stop the paper export; diagnostic-only runs remain available via `run_visual_web.sh`.
 
 ## Outputs
 
@@ -231,7 +231,7 @@ paper's entire evaluation setup.
 WebUI uses a held-out HTML/screenshot manifest (for example `css/pages-test.jsonl`).
 Its target is rendered locally and the DOM comes from that same observation;
 old recorded accessibility boxes are not used. Design2Code and Design2Code-Hard
-use the same local-render protocol and the same official Block/Position adapter.
+use the same local-render protocol and the same official Position/CLIP adapter.
 Improved is the fraction of pages whose Box IoU exceeds their corresponding Initial.
 
 Activate the main environment, install the official metric dependencies and set
@@ -265,3 +265,26 @@ Failed trials remain in the evaluation with their failure flags. Existing scroll
 preservation rejection is still enforced; it is not a quality-score rollback.
 Resume keeps existing saved results; use a fresh output directory to regenerate
 results produced by an older failure-handling implementation.
+
+The main quality table reports Position, CLIP, Box IoU, and Improved (%). CLIP uses the official Design2Code score (text regions are masked before CLIP encoding), not raw full-screenshot CLIP. Improved (%) remains the fraction of pages with increased Box IoU over their initial implementation. Existing evaluation metrics containing `official_clip` can be re-aggregated without regeneration or rendering; missing CLIP scores must be evaluated before final export. Block remains available in diagnostic reports.
+
+## Ten-page pilot per dataset
+
+Run `bash scripts/run_paper_pilot10.sh` from the repository virtual environment (the wrapper activates `.venv`). Default output: `runs/paper-pilot10-seed42-n2-v1`. It uses fixed seed 42, automatic model decoding settings, up to 16,384 generated tokens, two VLM refinement rounds, and 20 TUIDE steps. All six initial VLMs run sequentially on `CUDA_VISIBLE_DEVICES`; checkpoints are reused without training. The official metrics dependencies, Hugging Face model access, and UI2CodeN environment must already be installed.
+
+Each dataset contributes ten fixed inputs. WebUI selects ten unique pages, preferring the 1280x720 view for each; the other benchmarks select ten image/HTML pairs. These are deterministic smoke-test samples, not a representative accuracy estimate. Input manifests are saved under `inputs/` and checked on resume. WebUI's external asset limitation remains; inspect pilot renderings before scaling up.
+
+```bash
+mkdir -p log
+nohup setsid env CUDA_VISIBLE_DEVICES=0 PYTHONUNBUFFERED=1 \
+  bash scripts/run_paper_pilot10.sh \
+  >> log/paper-pilot10-seed42-n2-gpu0.log 2>&1 < /dev/null &
+```
+
+After all groups finish, `table/vlm-quality.tex` contains Position, CLIP, Box IoU and Improved (%). To rebuild only the table:
+
+```bash
+python -m framediff.paper_matrix export \
+  --root runs/paper-pilot10-seed42-n2-v1 \
+  --out runs/paper-pilot10-seed42-n2-v1/table
+```

@@ -325,6 +325,12 @@ done
 JS/외부 네트워크는 모든 방법에서 비활성화합니다. reference 옆의 `rick.jpg`만 명시적으로 읽어 이미지에 내장하며,
 다른 외부 자산/폰트는 차단됩니다. 원본 screenshot과 재렌더링은 viewport·폰트 때문에 차이가 날 수 있습니다.
 
+WebUI 생성 및 Self-Revision 프롬프트는 `rick.jpg` 사용을 지시하지 않습니다.
+Design2Code/Design2Code-Hard에는 기존 placeholder 지시를 유지합니다.
+이는 프롬프트 분리이며 WebUI 외부 자산을 다운로드하거나 네트워크를 허용하는 변경은 아닙니다.
+WebUI 프롬프트 변경은 실행 설정에 기록되므로 이전 생성 결과와 섞지 않도록 새 출력 폴더를 사용합니다.
+학습 데이터와 체크포인트는 변경하지 않습니다.
+
 ## VLM 출력 오류 재시도와 실패 결과 해석
 
 `web-prepare --vlm-retries 2`는 각 HTML/목표 박스 요청에 최대 2회 추가 검증 재시도를 합니다.

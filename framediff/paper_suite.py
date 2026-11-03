@@ -78,7 +78,7 @@ def _check_same_inputs(prepared, results_path, method):
 
 
 def _main_table(summary, out):
-    keys = [('official_block', 'Block ↑'), ('official_position', 'Position ↑'),
+    keys = [('official_position', 'Position ↑'), ('official_clip', 'CLIP ↑'),
             ('dom_box_iou', 'Box IoU ↑'), ('improved_page_rate', 'Improved pages (%) ↑')]
     lines = ['| Repair method | Pages | ' + ' | '.join(label for _, label in keys) + ' |',
              '|---|---:|' + '---:|' * len(keys)]
@@ -150,7 +150,7 @@ def build(root, aliases, representative, out, include_ablation=True, include_ui2
                 ids = {str(r.get('page_id',re.sub(r'/repeat-\d+$','',r['id']))) for r in found}
                 if ids != expected:
                     raise ValueError(f'{alias}/{method}: incomplete evaluation page set')
-                for metric in ('official_block','official_position','dom_box_iou'):
+                for metric in ('official_position','official_clip','dom_box_iou'):
                     from .paper_report import finite
                     missing_ids = [r['id'] for r in found if not finite(r.get(metric))]
                     if missing_ids:
@@ -252,7 +252,7 @@ def build_initial_seed_suite(root, aliases, representative, out, seeds,
             result['methods'][method] = {'n_pages': n_pages[0], 'metrics': metrics}
         destination = out / 'main' / alias; destination.mkdir(parents=True, exist_ok=True)
         (destination / 'initial-seed-summary.json').write_text(json.dumps(result, indent=2) + '\n')
-        keys = [('official_block', 'Block ↑'), ('official_position', 'Position ↑'),
+        keys = [('official_position', 'Position ↑'), ('official_clip', 'CLIP ↑'),
                 ('dom_box_iou', 'Box IoU ↑'), ('improved_page_rate', 'Improved pages (%) ↑')]
         table = ['| Repair method | ' + ' | '.join(label for _, label in keys) + ' |',
                  '|---|' + '---:|' * len(keys)]

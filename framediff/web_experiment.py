@@ -173,7 +173,10 @@ def prepare(args):
                 'initial_sha':digest(i['initial_html']) if i.get('initial_html') else None,
                 'placeholder_sha':digest(Path(i['html']).parent/'rick.jpg')
                     if i.get('html') and (Path(i['html']).parent/'rick.jpg').exists() else None} for i in items]
+    use_placeholder = getattr(args,'dataset','design2code') == 'design2code'
     settings = {k:v for k,v in vars(args).items() if k not in ('resume','out','retry_failed')}
+    if not use_placeholder:
+        settings['prompt_asset_contract'] = 'webui-no-benchmark-placeholder-v1'
     if args.backend == 'qwen' and not args.four_bit:
         settings['qwen_memory_contract'] = vlm.QWEN_BF16_MEMORY_CONTRACT
     from .html_generation import CONTRACT
@@ -325,10 +328,12 @@ def prepare(args):
                 elif revision_protocol == 'design2code':
                     from .design2code_self_revision import text_augmented_prompt
                     raw,_ = call('generate-html',[target_screenshot],None,work,'initial',
-                        text_augmented_prompt(paper_texts),literal_prompt=True,prompt_first=True)
+                        text_augmented_prompt(paper_texts,use_placeholder=use_placeholder),literal_prompt=True,prompt_first=True)
                     initial = raw
                 else:
-                    extra = 'The image is the TARGET webpage. Use rick.jpg for placeholder images if needed. '
+                    extra = 'The image is the TARGET webpage. '
+                    if use_placeholder:
+                        extra += 'Use rick.jpg for placeholder images if needed. '
                     if args.initial_mode == 'text-augmented':
                         from bs4 import BeautifulSoup
                         soup = BeautifulSoup(Path(item['html']).read_text(), 'html.parser')
@@ -365,7 +370,7 @@ def prepare(args):
                         if revision_protocol == 'design2code':
                             from .design2code_self_revision import revision_prompt
                             raw,_ = call('revise-html',[target_screenshot,screenshot],current_path,work,label,
-                                revision_prompt(current,paper_texts),literal_prompt=True,
+                                revision_prompt(current,paper_texts,use_placeholder=use_placeholder),literal_prompt=True,
                                 image_labels=['Reference Webpage:','Current Webpage:'],prompt_first=True)
                         else:
                             raw,_ = call('revise-html',[target_screenshot,screenshot],current_path,work,label,

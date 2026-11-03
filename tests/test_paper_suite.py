@@ -52,7 +52,7 @@ def test_ui2coden_shares_initial_and_target(tmp_path, name):
     def metric(method, score):
         return {'id': 'page/repeat-1', 'page_id': 'page', 'method': method,
                 'benchmark_protocol': 'local-reference-render-v1', 'dom_box_iou': score,
-                'official_block': score, 'official_position': score, 'pixel_mae': 1-score, 'pipeline_seconds': 1, 'failed': False}
+                'official_clip': score, 'official_position': score, 'pixel_mae': 1-score, 'pipeline_seconds': 1, 'failed': False}
     (evaluation / 'metrics.jsonl').write_text(''.join(json.dumps(metric(m, v)) + '\n' for m, v in (
         ('initial', .3), ('design2code-self-revision-3', .4), ('abstract-policy', .5))))
     ui = alias / 'ui2coden'; ui.mkdir()
@@ -61,14 +61,16 @@ def test_ui2coden_shares_initial_and_target(tmp_path, name):
     (ui_eval / 'metrics.jsonl').write_text(json.dumps(metric('ui2coden-round-3', .6)) + '\n')
     build(tmp_path, [name], name, tmp_path / 'paper', False, True, 3, True, require_complete_metrics=True)
     table = (tmp_path / 'paper/main' / name / 'main-table.md').read_text()
+    assert 'Position ↑ | CLIP ↑ | Box IoU ↑' in table
+    assert 'Block ↑' not in table
     if name == 'ui2coden':
         assert 'UI2CodeN self-revision' in table and 'D2C Self-Revision (RGB)' not in table
     else:
         assert 'UI2CodeN polishing' in table and 'D2C Self-Revision (RGB)' in table
     scores = [json.loads(line) for line in (evaluation/'metrics.jsonl').read_text().splitlines()]
-    scores[0].pop('official_block')
+    scores[0].pop('official_clip')
     (evaluation/'metrics.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in scores))
-    with pytest.raises(ValueError, match='missing official_block'):
+    with pytest.raises(ValueError, match='missing official_clip'):
         build(tmp_path, [name], name, tmp_path/'incomplete', False, True, 3, True, require_complete_metrics=True)
     (ui / 'results.jsonl').write_text(json.dumps({**prepared, 'screenshot': str(target),
                                                   'methods': {'initial': {'html': str(tmp_path / 'wrong.html')}}}) + '\n')

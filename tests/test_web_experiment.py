@@ -237,6 +237,7 @@ def test_design2code_self_revision_protocol(tmp_path,monkeypatch,rounds,generate
         assert manifest.read_text()==original
     assert [item[0] for item in seen]==['generate-html'] + ['revise-html'] * rounds
     assert all(item[3] for item in seen)
+    assert all(('rick.jpg' in item[1]) == (args.dataset == 'design2code') for item in seen)
     if rounds == 0:
         assert not rows[0]['methods']['initial']['failed']
         return

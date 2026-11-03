@@ -13,7 +13,7 @@ DATASETS = [('webui', 'WebUI'), ('design2code', 'Design2Code'), ('design2code-ha
 MODELS = [('qwen3vl8b', 'Qwen3-VL-8B'), ('glm4v-9b-thinking', 'GLM-4.1V-9B'),
           ('gemma3-12b', 'Gemma-3-12B'), ('llava-next-7b', 'LLaVA-NeXT-7B'),
           ('pixtral-12b', 'Pixtral-12B'), ('ui2coden', r'UI2Code$^{n}$')]
-METRICS = ('official_block', 'official_position', 'dom_box_iou', 'improved_page_rate')
+METRICS = ('official_position', 'official_clip', 'dom_box_iou', 'improved_page_rate')
 
 
 def check_sources(root=None, manifest=None, dataset='design2code', view='default_1280-720', limit=0):
@@ -53,14 +53,14 @@ def check_sources(root=None, manifest=None, dataset='design2code', view='default
 def check_official(repo):
     """Run before any VLM loading: verify dependencies, Chromium and actual scores."""
     if not repo:
-        raise ValueError('OFFICIAL_REPO is required for the paper Block/Position columns')
+        raise ValueError('OFFICIAL_REPO is required for the paper Position/CLIP columns')
     from .official_metrics import OfficialMetrics
     from .html_bridge import HtmlBrowser
     scorer = OfficialMetrics(repo)
     html = '<html><body style="margin:0"><div style="margin:20px;width:180px;height:60px">Metric check</div></body></html>'
     with tempfile.TemporaryDirectory(prefix='paper-metrics-') as tmp, HtmlBrowser() as browser:
         scores = scorer.score(browser, html, html, [320,240], tmp)
-    for key in ('official_block','official_position'):
+    for key in ('official_position','official_clip'):
         if not math.isfinite(scores[key]) or scores[key] < .99:
             raise ValueError(f'Official metric identity check failed: {key}={scores[key]}')
     return scorer.source_sha
@@ -110,7 +110,7 @@ def export_matrix(root, out):
            r'\multirow{2}{*}{Initial VLM} & \multirow{2}{*}{Repair method} & '
            r'\multicolumn{4}{c}{WebUI} & \multicolumn{4}{c}{Design2Code} & \multicolumn{4}{c}{Design2Code-Hard} \\',
            r'\cline{3-6}\cline{7-10}\cline{11-14}',
-           '& & '+' & '.join([r'Block $\uparrow$',r'Position $\uparrow$',r'Box IoU $\uparrow$',r'Improved (\%) $\uparrow$']*3)+r' \\',r'\hline']
+           '& & '+' & '.join([r'Position $\uparrow$',r'CLIP $\uparrow$',r'Box IoU $\uparrow$',r'Improved (\%) $\uparrow$']*3)+r' \\',r'\hline']
     coverage={}
     for alias,label in MODELS:
         methods=[('Initial VLM','Initial')]

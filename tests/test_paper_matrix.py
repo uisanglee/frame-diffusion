@@ -16,6 +16,8 @@ def test_matrix_has_all_groups_and_rejects_missing_scores(tmp_path):
             (folder/'initial-seed-summary.json').write_text(json.dumps(summary))
     output = export_matrix(tmp_path, tmp_path/'table')
     table = output.read_text()
+    assert r'Position $\uparrow$ & CLIP $\uparrow$ & Box IoU $\uparrow$' in table
+    assert 'Block $' not in table
     assert table.count(' & Initial & ') == 6
     assert table.count(' & Self Revision & ') == 6
     assert table.count(' & TUIDE & ') == 6
