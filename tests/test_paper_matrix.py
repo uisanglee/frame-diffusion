@@ -11,12 +11,21 @@ def test_matrix_has_all_groups_and_rejects_missing_scores(tmp_path):
             summary = dict(complete_metrics_required=True, target_image_protocol='local-reference-render-v1',
                 initial_seeds=['11','22'], fixed_checkpoint_hashes=['fixed'], methods={
                     m: dict(n_pages=10, metrics={k: dict(mean=.5, sd=.1) for k in METRICS}) for m in methods})
+            summary['cohort_protocol'] = 'initial-success-shared-v1'
+            n = 8 if alias == 'qwen3vl8b' else 10
+            summary['initial_coverage_by_seed'] = {seed: dict(attempted=10, successful=n, failed=10-n) for seed in ('11','22')}
+            for item in summary['methods'].values():
+                item['n_pages'] = n
+                item['n_pages_by_seed'] = {'11': n, '22': n}
+            summary['methods']['Initial VLM']['metrics']['initial_success_rate'] = dict(mean=n/10, sd=0.)
             folder = tmp_path/dataset/'paper/main'/alias
             folder.mkdir(parents=True)
             (folder/'initial-seed-summary.json').write_text(json.dumps(summary))
     output = export_matrix(tmp_path, tmp_path/'table')
     table = output.read_text()
     assert r'Position $\uparrow$ & CLIP $\uparrow$ & Box IoU $\uparrow$' in table
+    assert 'Success / Improved' in table
+    assert '80.000' in table
     assert 'Block $' not in table
     assert table.count(' & Initial & ') == 6
     assert table.count(' & Self Revision & ') == 6

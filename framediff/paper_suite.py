@@ -79,14 +79,16 @@ def _check_same_inputs(prepared, results_path, method):
 
 def _main_table(summary, out):
     keys = [('official_position', 'Position ↑'), ('official_clip', 'CLIP ↑'),
-            ('dom_box_iou', 'Box IoU ↑'), ('improved_page_rate', 'Improved pages (%) ↑')]
+            ('dom_box_iou', 'Box IoU ↑'), ('improved_page_rate', 'Success / Improved (%) ↑')]
     lines = ['| Repair method | Pages | ' + ' | '.join(label for _, label in keys) + ' |',
              '|---|---:|' + '---:|' * len(keys)]
     for item in summary['methods']:
         method = item['method']
         cells = []
         for metric, _ in keys:
-            if metric == 'improved_page_rate':
+            if metric == 'improved_page_rate' and method == 'Initial VLM' and 'initial_success_rate' in item['metrics']:
+                cells.append(f"{item['metrics']['initial_success_rate']['mean'] * 100:.1f}")
+            elif metric == 'improved_page_rate':
                 gain = next((row for row in summary['paired'] if row['method'] == method
                              and row['baseline'] == 'Initial VLM' and row['metric'] == 'dom_box_iou'), None)
                 cells.append(f"{gain['improved_page_rate'] * 100:.1f}" if gain else '--')
@@ -95,7 +97,7 @@ def _main_table(summary, out):
                 cells.append(f"{value['mean']:.3f}" if value['mean'] is not None else '--')
         lines.append(f"| {method} | {item['n_pages']} | " + ' | '.join(cells) + ' |')
     note = ('Values are page means from one frozen VLM draft set. '
-            'Improved pages compares Box IoU with the same page’s initial rendering. '
+            'Initial Success (%) uses all attempted inputs; quality uses only Initial successes shared across methods. Repair failures remain included. Improved pages compares Box IoU with the same page’s initial rendering. '
             'See paper-report.md for page-bootstrap CIs and metric-specific counts.')
     (out / 'main-table.md').write_text('\n'.join(['# Main comparison', '', *lines, '', note, '']))
 
@@ -142,7 +144,14 @@ def build(root, aliases, representative, out, include_ablation=True, include_ui2
         missing = required - {r['method'] for r in rows}
         if missing:
             raise ValueError(f'{alias} is missing main methods: {sorted(missing)}')
-        main_summary = report(rows, out / 'main' / alias)
+        # Use generation status, never metric values or no-block warnings, for eligibility.
+        if prepared is not None:
+            initial_status = {key: not bool(r['methods']['initial'].get('failed') or
+                                           r.get('errors', {}).get('initial')) for key, r in prepared.items()}
+        else:
+            initial_status = {str(r.get('page_id', re.sub(r'/repeat-\d+$', '', r['id']))):
+                              not bool(r.get('failed')) for r in rows if r['method'] == 'Initial VLM'}
+        main_summary = report(rows, out / 'main' / alias, initial_status=initial_status)
         if require_complete_metrics:
             expected = set(prepared)
             for method in required:
@@ -152,7 +161,7 @@ def build(root, aliases, representative, out, include_ablation=True, include_ui2
                     raise ValueError(f'{alias}/{method}: incomplete evaluation page set')
                 for metric in ('official_position','official_clip','dom_box_iou'):
                     from .paper_report import finite
-                    missing_ids = [r['id'] for r in found if not finite(r.get(metric))]
+                    missing_ids = [r['id'] for r in found if initial_status[str(r.get('page_id', re.sub(r'/repeat-\d+$', '', r['id'])))] and not finite(r.get(metric))]
                     if missing_ids:
                         raise ValueError(f'{alias}/{method}: missing {metric} for {len(missing_ids)} trials; '
                                          f'first={missing_ids[0]}. See evaluation errors; final table not exported.')
@@ -228,12 +237,12 @@ def build_initial_seed_suite(root, aliases, representative, out, seeds,
         result = {'protocol': 'fixed-model-vary-initial-vlm-seed-v1', 'initial_seeds': seeds,
                   'target_image_protocol': reports[0]['target_image_protocol'],
                   'complete_metrics_required': require_complete_metrics,
+                  'cohort_protocol': 'initial-success-shared-v1',
+                  'initial_coverage_by_seed': dict(zip(seeds, [r['initial_coverage'] for r in reports])),
                   'fixed_checkpoint_hashes': policy_hashes[0], 'methods': {}}
         for method in sorted(methods):
             items = [next(item for item in report_['methods'] if item['method'] == method) for report_ in reports]
             n_pages = [item['n_pages'] for item in items]
-            if len(set(n_pages)) != 1:
-                raise ValueError(f'{alias}/{method}: page counts differ across seeds')
             metrics = {}
             for metric in items[0]['metrics']:
                 values = [item['metrics'][metric]['mean'] for item in items]
@@ -249,19 +258,21 @@ def build_initial_seed_suite(root, aliases, representative, out, seeds,
                     metrics['improved_page_rate'] = {'mean': statistics.mean(rates),
                                                      'sd': statistics.stdev(rates) if len(rates) > 1 else None,
                                                      'per_seed': dict(zip(seeds, rates))}
-            result['methods'][method] = {'n_pages': n_pages[0], 'metrics': metrics}
+            result['methods'][method] = {'n_pages': n_pages[0] if len(set(n_pages)) == 1 else None,
+                                         'n_pages_by_seed': dict(zip(seeds, n_pages)), 'metrics': metrics}
         destination = out / 'main' / alias; destination.mkdir(parents=True, exist_ok=True)
         (destination / 'initial-seed-summary.json').write_text(json.dumps(result, indent=2) + '\n')
         keys = [('official_position', 'Position ↑'), ('official_clip', 'CLIP ↑'),
-                ('dom_box_iou', 'Box IoU ↑'), ('improved_page_rate', 'Improved pages (%) ↑')]
+                ('dom_box_iou', 'Box IoU ↑'), ('improved_page_rate', 'Success / Improved (%) ↑')]
         table = ['| Repair method | ' + ' | '.join(label for _, label in keys) + ' |',
                  '|---|' + '---:|' * len(keys)]
         for method, item in result['methods'].items():
             cells = []
             for metric, _ in keys:
+                if method == 'Initial VLM' and metric == 'improved_page_rate': metric = 'initial_success_rate'
                 value = item['metrics'].get(metric)
                 if value is None: cells.append('--'); continue
-                factor = 100 if metric == 'improved_page_rate' else 1
+                factor = 100 if metric in ('improved_page_rate', 'initial_success_rate') else 1
                 mean = value['mean'] * factor
                 sd = value['sd']
                 cells.append(f'{mean:.3f} ± {sd * factor:.3f}' if sd is not None else f'{mean:.3f}')

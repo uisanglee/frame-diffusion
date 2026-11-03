@@ -108,6 +108,15 @@ def test_initial_seed_suite_fixes_models_and_varies_drafts(tmp_path):
     assert summary['methods']['TUIDE']['metrics']['dom_box_iou']['mean'] == pytest.approx(.6)
     assert summary['methods']['TUIDE']['metrics']['dom_box_iou']['sd'] == pytest.approx(.141421356)
     assert '0.600 ± 0.141' in (tmp_path / 'paper/main/qwen/main-table.md').read_text()
+    prepared_path = alias / 'seeds/22/prepare/prepared.jsonl'
+    record = json.loads(prepared_path.read_text())
+    record['methods']['initial']['failed'] = True
+    prepared_path.write_text(json.dumps(record) + '\n')
+    build_initial_seed_suite(tmp_path, ['qwen'], 'qwen', tmp_path / 'different-coverage', ['11', '22'], False, False)
+    varying = json.loads((tmp_path / 'different-coverage/main/qwen/initial-seed-summary.json').read_text())
+    assert varying['methods']['TUIDE']['n_pages_by_seed'] == {'11': 1, '22': 0}
+    assert varying['methods']['Initial VLM']['metrics']['initial_success_rate']['mean'] == .5
+    assert 'dom_box_iou' not in varying['methods']['TUIDE']['metrics']
     (alias / 'seeds/22/repair/config.json').write_text(json.dumps({'checkpoints': ['other']}))
     with pytest.raises(ValueError, match='checkpoint changed'):
         build_initial_seed_suite(tmp_path, ['qwen'], 'qwen', tmp_path / 'wrong-paper', ['11', '22'], False, False)

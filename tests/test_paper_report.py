@@ -35,3 +35,27 @@ def test_missing_repeat_metric_not_zero_and_fallback_retained(tmp_path):
     assert method['metrics']['dom_box_iou']['n_pages'] == 1
     assert method['metrics']['dom_box_iou']['mean'] == .5
     assert method['metrics']['pipeline_failure_rate']['mean'] == .5
+
+
+def test_initial_success_cohort_keeps_zero_blocks_and_failed_repairs(tmp_path):
+    rows = []
+    for page, before, after in [('ok', .4, .6), ('no-blocks', 0., 0.), ('failed-initial', 0., .9)]:
+        for method, score in [('Initial VLM', before), ('TUIDE', after)]:
+            rows.append(dict(id=page, method=method, dom_box_iou=score, official_position=0.,
+                             failed=page == 'failed-initial' or (method == 'TUIDE' and page == 'no-blocks')))
+    result = report(rows, tmp_path, initial_status={'ok': True, 'no-blocks': True, 'failed-initial': False})
+    methods = {m['method']: m for m in result['methods']}
+    assert result['initial_coverage'] == {'attempted': 3, 'successful': 2, 'failed': 1}
+    assert methods['Initial VLM']['metrics']['initial_success_rate']['mean'] == pytest.approx(2/3)
+    assert methods['TUIDE']['n_pages'] == 2
+    assert methods['TUIDE']['metrics']['dom_box_iou']['mean'] == .3
+    gain = next(p for p in result['paired'] if p['metric'] == 'dom_box_iou')
+    assert gain['improved_page_rate'] == .5
+
+
+def test_zero_initial_success_is_not_zero_quality(tmp_path):
+    result = report([dict(id='x', method=m, dom_box_iou=0.) for m in ('Initial VLM','TUIDE')],
+                    tmp_path, initial_status={'x': False})
+    methods = {m['method']: m for m in result['methods']}
+    assert methods['Initial VLM']['metrics']['initial_success_rate']['mean'] == 0
+    assert methods['TUIDE']['metrics']['dom_box_iou']['mean'] is None

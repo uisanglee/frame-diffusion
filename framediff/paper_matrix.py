@@ -74,6 +74,9 @@ def export_matrix(root, out):
         for alias,_ in MODELS:
             path=root/dataset/'paper/main'/alias/'initial-seed-summary.json'
             record=json.loads(path.read_text())
+            if record.get('cohort_protocol') != 'initial-success-shared-v1':
+                raise ValueError(f'{path}: regenerate reports with Initial-success cohort reporting')
+            counts.add(tuple(record['initial_coverage_by_seed'][str(seed)]['attempted'] for seed in record['initial_seeds']))
             if not record.get('complete_metrics_required'):
                 raise ValueError(f'{path}: regenerate with --require-complete-metrics')
             if record['target_image_protocol'] != 'local-reference-render-v1':
@@ -88,29 +91,34 @@ def export_matrix(root, out):
             if set(record['methods']) != set(required):
                 raise ValueError(f'{path}: incomplete method group')
             for method in required:
-                item=record['methods'][method]; counts.add(item['n_pages'])
+                item=record['methods'][method]
+                expected_counts = {str(seed): record['initial_coverage_by_seed'][str(seed)]['successful'] for seed in seeds}
+                if item['n_pages_by_seed'] != expected_counts:
+                    raise ValueError(f'{path}: inconsistent Initial-success cohort for {method}')
                 for metric in METRICS:
-                    if method=='Initial VLM' and metric=='improved_page_rate': continue
+                    if method=='Initial VLM' and metric=='improved_page_rate': metric='initial_success_rate'
+                    if metric != 'initial_success_rate' and any(n == 0 for n in expected_counts.values()): continue
                     value=item['metrics'].get(metric)
                     if not value or not isinstance(value.get('mean'), (int,float)) or not math.isfinite(value['mean']):
                         raise ValueError(f'{path}: missing {method}/{metric}')
                     if len(seeds)>1 and (value['sd'] is None or not math.isfinite(value['sd'])):
                         raise ValueError(f'{path}: missing SD for {method}/{metric}')
             records[(dataset,alias)]=record
-        if len(counts)!=1 or next(iter(counts))<=0:
+        if len(counts)!=1 or any(n <= 0 for n in next(iter(counts))):
             raise ValueError(f'{dataset}: all model/method groups must use the same nonempty test set')
     lines=[r'\begin{table*}[t]',r'\centering',
            r'\caption{Layout repair results using locally rendered reference HTML on WebUI, Design2Code, and Design2Code-Hard. '
            r'Within each dataset and initial VLM, repair methods share the same initial HTML. '
            r'Self Revision and UI2Code$^{n}$ polishing use up to three refinement rounds. '
            r'If refinement fails, the last available implementation is retained and remains in the evaluation. '
-           r'Improved (\%) measures Box IoU improvement over the corresponding Initial. '
+           r'Quality is measured on the shared set of successfully generated Initial pages within each model and seed. '
+           r'The last column reports Initial generation success over all attempted inputs, and Box IoU improvement over Initial for repair methods. '
            r'Results are means across initial-generation seeds with fixed model checkpoints; $\pm$ denotes sample standard deviation when multiple seeds are used.}',
            r'\label{tab:vlm-quality}',r'\resizebox{\textwidth}{!}{%',r'\begin{tabular}{ll*{3}{cccc}}',r'\hline',
            r'\multirow{2}{*}{Initial VLM} & \multirow{2}{*}{Repair method} & '
            r'\multicolumn{4}{c}{WebUI} & \multicolumn{4}{c}{Design2Code} & \multicolumn{4}{c}{Design2Code-Hard} \\',
            r'\cline{3-6}\cline{7-10}\cline{11-14}',
-           '& & '+' & '.join([r'Position $\uparrow$',r'CLIP $\uparrow$',r'Box IoU $\uparrow$',r'Improved (\%) $\uparrow$']*3)+r' \\',r'\hline']
+           '& & '+' & '.join([r'Position $\uparrow$',r'CLIP $\uparrow$',r'Box IoU $\uparrow$',r'Success / Improved (\%) $\uparrow$']*3)+r' \\',r'\hline']
     coverage={}
     for alias,label in MODELS:
         methods=[('Initial VLM','Initial')]
@@ -121,10 +129,12 @@ def export_matrix(root, out):
             cells=[]
             for dataset,_ in DATASETS:
                 item=records[dataset,alias]['methods'][method]
-                coverage.setdefault(dataset,{})[alias]=item['n_pages']
+                coverage.setdefault(dataset,{})[alias]=records[dataset,alias]['initial_coverage_by_seed']
                 for metric in METRICS:
-                    if method=='Initial VLM' and metric=='improved_page_rate': cells.append('--'); continue
-                    value=item['metrics'][metric]; factor=100 if metric=='improved_page_rate' else 1
+                    if method=='Initial VLM' and metric=='improved_page_rate': metric='initial_success_rate'
+                    value=item['metrics'].get(metric)
+                    if value is None: cells.append('--'); continue
+                    factor=100 if metric in ('improved_page_rate','initial_success_rate') else 1
                     mean=f'{value["mean"]*factor:.3f}'
                     cells.append('$'+mean+(rf' \pm {value["sd"]*factor:.3f}' if value['sd'] is not None else '')+'$')
             name=rf'\multirow{{{len(methods)}}}{{*}}{{{label}}}' if index==0 else ''

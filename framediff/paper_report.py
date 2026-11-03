@@ -41,11 +41,17 @@ def estimate(values, seed=42):
             'ci95': np.percentile(means, [2.5, 97.5]).tolist()}
 
 
-def report(rows, out):
+def report(rows, out, initial_status=None):
     out = Path(out); out.mkdir(parents=True, exist_ok=True)
     target_protocols=sorted({r.get('benchmark_protocol','provided-screenshot-v1') for r in rows})
     if len(target_protocols)>1:
         raise ValueError(f'Mixed target-image protocols cannot share a paper table: {target_protocols}')
+    all_methods = sorted({r['method'] for r in rows})
+    coverage = None
+    if initial_status is not None:
+        coverage = {'attempted': len(initial_status), 'successful': sum(initial_status.values()),
+                    'failed': sum(not ok for ok in initial_status.values())}
+        rows = [r for r in rows if initial_status[str(r.get('page_id', re.sub(r'/repeat-\d+$', '', r['id'])))]]
     grouped = defaultdict(list)
     for row in rows:
         # Older evaluators only wrote page_id for repaired visual methods;
@@ -70,12 +76,14 @@ def report(rows, out):
             # Require complete repeats; otherwise a method could benefit from
             # excluding its failed measurements. Missing never becomes zero.
             if len(values) == len(trials): pages[key][metric] = float(np.mean(values))
-    methods = sorted({key[1] for key in pages})
+    methods = all_methods
     summaries = []
     for method in methods:
         subset = [v for (page, m), v in pages.items() if m == method]
         metrics = {k: estimate([p[k] for p in subset if k in p])
                    for k in (*QUALITY, *COST, 'pipeline_failure_rate', 'evaluation_failure_rate')}
+        if initial_status is not None and method in ('initial', 'Initial VLM'):
+            metrics['initial_success_rate'] = estimate(list(initial_status.values()))
         summaries.append({'method': method, 'n_pages': len(subset),
                           'n_trials': sum(len(v) for (p, m), v in grouped.items() if m == method), 'metrics': metrics})
     paired = []
@@ -100,6 +108,10 @@ def report(rows, out):
                         'Geometry uses diagnostic Hungarian matching, not official Design2Code scoring.',
                         'Repair time includes target preprocessing; excludes model loading and final evaluation.',
                         'Page bootstrap does not account for correlation between different pages of the same domain.']}
+    if coverage is not None:
+        result['cohort_protocol'] = 'initial-success-shared-v1'
+        result['initial_coverage'] = coverage
+        result['notes'].append('Quality and improvement use the shared Initial-success cohort; repair failures remain. Initial success uses all attempted inputs. No-block warnings do not determine generation success.')
     if 'local-reference-render-v1' in target_protocols:
         result['notes'].append('Target image and target DOM come from one local reference-HTML render; report separately from provided-screenshot Design2Code evaluation.')
     write_json(out / 'paper-summary.json', result)

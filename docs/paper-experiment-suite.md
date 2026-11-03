@@ -329,3 +329,36 @@ python -m framediff.paper_matrix export \
   --root runs/paper-pilot10-seed42-n2-v1 \
   --out runs/paper-pilot10-seed42-n2-v1/table
 ```
+
+### Initial 성공률과 성공 샘플 기준 품질 보고
+
+논문 표의 마지막 열은 `Success / Improved (%)`입니다.
+- Initial: 전체 생성 시도 중 성공한 비율. `prepared.jsonl`의 Initial 실패 상태로 판정하며, 블록 추출 경고나 점수 0은 생성 실패로 취급하지 않습니다.
+- Position, CLIP, Box IoU: 해당 모델·시드에서 Initial 생성에 성공한 동일한 샘플 집합으로 모든 방법을 비교합니다.
+- 복원 방법의 Improved: 위 집합에서 Initial보다 Box IoU가 증가한 비율입니다. 복원 실패도 마지막 유효 구현의 점수로 포함합니다.
+- Initial 성공이 0개면 성공률은 0%, 품질과 개선율은 `--`입니다. 평가기 오류로 점수가 누락되면 성공 샘플을 조용히 제외하지 않고 완전성 검사에서 오류를 냅니다.
+
+`initial-seed-summary.json`의 `initial_coverage_by_seed`에 전체/성공/실패 개수,
+각 방법의 `n_pages_by_seed`에 품질 평가 분모가 기록됩니다. 최종 `table/coverage.json`에도 모델·데이터셋·시드별 개수가 저장됩니다.
+시드 평균과 표준편차는 시드별 점수에서 계산합니다. 모델마다 성공 집합이 다를 수 있으므로 성공률과 함께 해석해야 합니다.
+
+저장된 평가 결과가 있으면 생성·렌더링 없이 보고서만 다시 만들 수 있습니다. 아래는 pilot10의 WebUI 예입니다(완료된 모델만 aliases에 지정).
+
+```bash
+python -m framediff.paper_suite \
+  --root runs/paper-pilot10-seed42-n2-v1/webui \
+  --aliases llava-next-7b --representative llava-next-7b \
+  --out runs/paper-pilot10-seed42-n2-v1/webui/paper \
+  --initial-seeds 42 --revision-rounds 2 --ui2coden-rounds 2 \
+  --include-ui2coden --skip-ablation --require-complete-metrics
+```
+
+같은 방식으로 각 데이터셋·모델 보고서를 갱신한 뒤 전체 결과가 있으면:
+
+```bash
+python -m framediff.paper_matrix export \
+  --root runs/paper-pilot10-seed42-n2-v1 \
+  --out runs/paper-pilot10-seed42-n2-v1/table
+```
+
+기존의 실패 포함 평균 보고서는 새 기준과 혼합하지 않도록 재집계를 요구합니다. 원래 metrics.jsonl 및 생성 결과는 변경하지 않습니다.
