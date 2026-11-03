@@ -37,3 +37,26 @@ python -m framediff.paper_report \
 Replace the example directory with the directory containing your metrics.jsonl.
 These are final image/geometry results, distinct from symbolic declaration-distance
 diagnostics logged during training. No exact teacher-action match metric is added.
+
+### Evaluation reuse and failed Initials
+
+`web-evaluate` now retains failed-Initial rows for coverage without rendering or
+computing Position, CLIP, or Box IoU. These rows carry
+`evaluation_skipped: initial_generation_failed`; scores are absent, not zero.
+Repairs that fail after a valid Initial still evaluate the retained HTML.
+On resume, legacy failed-Initial score caches are converted to skipped rows;
+valid existing evaluation caches remain reusable.
+
+Within a page, identical embedded HTML shares quality scores and the rendered PNG
+across methods. Method-specific failures, token counts, and repair times remain
+separate. Hits record `evaluation_cache_hit: true` and zero evaluation browser
+executions. The cache is page-local, so target, viewport, and scoring settings
+cannot cross-contaminate other pages.
+
+The official scorer also caches OCR-free extracted blocks by HTML content,
+viewport, browser instance, and upstream source hash. Its LRU holds at most 16
+entries; upstream matching receives a deep copy to prevent mutation of cached
+blocks. This cache lives only within the evaluation process. It does not persist
+font-dependent results across machines or change official metric formulas.
+Different predicted HTML still requires fresh scoring (including CLIP); standalone
+target CLIP feature caching is not implemented.

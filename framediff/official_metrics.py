@@ -5,6 +5,8 @@ All metric matching, merging, colors, CLIP and OCR-free extraction remain upstre
 The evaluated viewport is explicitly controlled (unlike upstream's default viewport).
 """
 import hashlib
+import copy
+from collections import OrderedDict
 import importlib
 import math
 import shlex
@@ -22,6 +24,7 @@ class OfficialMetrics:
         source = path.read_text()
         self.source_sha = hashlib.sha256(b''.join(p.read_bytes() for p in sorted((repo/'Design2Code').rglob('*.py')))).hexdigest()
         self.compatibility_patch = None
+        self._block_cache = OrderedDict()
         try:
             compile(source,str(path),'exec')
         except IndentationError:
@@ -82,13 +85,25 @@ class OfficialMetrics:
 
             def blocks(image_path):
                 html, ph, ph1, pp, pp1 = self.ocr.get_itermediate_names(image_path)
+                # Cache extracted blocks, not scores: matching remains upstream.
+                # Scoped to this scorer/browser runtime; no cross-machine font reuse.
+                key = (id(browser), tuple(viewport), self.source_sha,
+                       hashlib.sha256(Path(html).read_bytes()).hexdigest())
+                if key in self._block_cache:
+                    self._block_cache.move_to_end(key)
+                    return copy.deepcopy(self._block_cache[key])
                 self.ocr.process_html(html,ph)
                 self.ocr.process_html(html,ph1,offset=50)
                 render(ph,pp); render(ph1,pp1)
                 pixels = self.ocr.find_different_pixels(pp,pp1)
-                if pixels is None: return []
-                text = self.ocr.flatten_tree(self.ocr.extract_text_with_color(ph))
-                return self.ocr.get_blocks_from_image_diff_pixels(pp,text,pixels)
+                if pixels is None:
+                    result = []
+                else:
+                    text = self.ocr.flatten_tree(self.ocr.extract_text_with_color(ph))
+                    result = self.ocr.get_blocks_from_image_diff_pixels(pp,text,pixels)
+                self._block_cache[key] = copy.deepcopy(result)
+                while len(self._block_cache) > 16: self._block_cache.popitem(last=False)
+                return result
 
             self.module.os = types.SimpleNamespace(system=screenshot_command)
             self.module.get_blocks_ocr_free = blocks

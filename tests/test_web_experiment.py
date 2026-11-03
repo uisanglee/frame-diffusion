@@ -407,3 +407,33 @@ def test_self_revision_keeps_success_before_later_failure(tmp_path,monkeypatch):
         result=row['methods'][f'design2code-self-revision-{step}']
         assert result['failed']
         assert Path(result['html']).read_text()==repaired
+
+
+@pytest.mark.browser
+def test_evaluation_skips_failed_initial_and_reuses_identical_html(tmp_path):
+    html = tmp_path/'page.html'; html.write_text(HTML)
+    png = tmp_path/'target.png'; Image.new('RGB',(320,240),'white').save(png)
+    base = dict(html=str(html), failed=False, seconds=1., browser_executions=0, vlm_calls=1)
+    records = [dict(id='ok', viewport=[320,240], screenshot=str(png), html=str(html),
+                    methods={'initial':dict(base), 'repair':dict(base, failed=True)}),
+               dict(id='failed', viewport=[320,240], screenshot=str(png), html=str(html),
+                    methods={'initial':dict(base, failed=True), 'repair':dict(base, failed=True)})]
+    manifest = tmp_path/'results.jsonl'
+    manifest.write_text(''.join(json.dumps(r)+'\n' for r in records))
+    args = SimpleNamespace(data=str(manifest), out=str(tmp_path/'eval'), max_nodes=128,
+                           official_repo=None, resume=False)
+    rows = evaluate_pages(args)
+    initial, repair, *skipped = rows
+    assert initial['evaluation_browser_executions'] > 0
+    assert repair['evaluation_browser_executions'] == 0 and repair['evaluation_cache_hit']
+    assert repair['failed'] and repair['dom_box_iou'] == initial['dom_box_iou']
+    assert repair['pixel_mae'] == initial['pixel_mae']
+    assert all(r['evaluation_skipped'] == 'initial_generation_failed' for r in skipped)
+    assert all(r['evaluation_browser_executions'] == 0 and 'dom_box_iou' not in r for r in skipped)
+    # Legacy failed-Initial score caches must be replaced by skipped rows on resume.
+    from framediff.web_experiment import signature
+    cache = tmp_path/'eval/pages'/signature('failed')[:20]/'metrics.json'
+    cache.write_text(json.dumps([dict(r, dom_box_iou=0., evaluation_skipped=None) for r in skipped]))
+    args.resume = True
+    resumed = evaluate_pages(args)
+    assert all('dom_box_iou' not in r for r in resumed if r['id'] == 'failed')

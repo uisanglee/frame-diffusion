@@ -604,8 +604,13 @@ def evaluate_pages(args):
         for index, record in enumerate(records):
             work = out/'pages'/signature(record['id'])[:20]; work.mkdir(parents=True,exist_ok=True)
             cache = work/'metrics.json'
+            initial_failed = bool(record.get('methods', {}).get('initial', {}).get('failed') or
+                                  record.get('errors', {}).get('initial'))
             if args.resume and cache.exists():
-                rows.extend(read_json(cache)); write_jsonl(out/'metrics.jsonl',rows); continue
+                saved = read_json(cache)
+                # Upgrade old failed-Initial evaluations without recomputing scores.
+                if not initial_failed or all(r.get('evaluation_skipped') == 'initial_generation_failed' for r in saved):
+                    rows.extend(saved); write_jsonl(out/'metrics.jsonl',rows); continue
             viewport = record['viewport']
             placeholder = Path(record['html']).parent/'rick.jpg' if record.get('html') else None
             placeholder = placeholder if placeholder and placeholder.exists() else None
@@ -614,7 +619,9 @@ def evaluate_pages(args):
             # Reference HTML is opened only here, outside all repair/selection paths.
             reference_error = None
             reference = None
-            if is_webui:
+            if initial_failed:
+                pass
+            elif is_webui:
                 reference_error = record.get('reference_box_error')
             else:
                 try:
@@ -629,6 +636,7 @@ def evaluate_pages(args):
                         reference = browser.snapshot(ref_html,viewport,work/'reference.png',args.max_nodes)
                 except Exception as error: reference_error = str(error)
             page_rows = []
+            score_cache = {}  # One fixed target/viewport/settings; bounded by method count.
             for method in methods:
                 data = record['methods'][method]; started = time.perf_counter(); before = browser.executions
                 row = {'id':record['id'],'method':method,'failed':data['failed'],
@@ -664,8 +672,26 @@ def evaluate_pages(args):
                     row['visual_timing'] = data['visual_timing']
                     row['page_id'] = record.get('page_id',record['id'])
                     row['repeat'] = record.get('repeat',1)
+                if initial_failed:
+                    row.update(evaluation_skipped='initial_generation_failed', evaluation_seconds=0.,
+                               evaluation_browser_executions=0)
+                    page_rows.append(row)
+                    continue
                 try:
                     html = embed_placeholder(Path(data['html']).read_text(),placeholder)
+                    score_key = signature(html)
+                    if score_key in score_cache:
+                        import shutil
+                        scores, cached_png, cached_official = score_cache[score_key]
+                        row.update(copy.deepcopy(scores))
+                        shutil.copyfile(cached_png, work/f'{method}.png')
+                        if cached_official is not None:
+                            write_json(work/method/'official.json', cached_official)
+                        row.update(evaluation_cache_hit=True, evaluation_seconds=time.perf_counter()-started,
+                                   evaluation_browser_executions=0)
+                        page_rows.append(row)
+                        continue
+                    metadata_keys = set(row)
                     png = work/f'{method}.png'
                     observed = browser.snapshot(html,viewport,png,args.max_nodes)
                     with Image.open(record['screenshot']) as a, Image.open(png) as b:
@@ -688,13 +714,18 @@ def evaluate_pages(args):
                             row['geometry_error'] = str(error)
                     if official:
                         row.update(official.score(browser,html,ref_html,viewport,work/method))
+                    if not row.get('geometry_error') and not reference_error:
+                        score_cache[score_key] = ({k:v for k,v in row.items() if k not in metadata_keys}, png,
+                            read_json(work/method/'official.json') if official else None)
+                    row['evaluation_cache_hit'] = False
                 except Exception as error:
                     row['evaluation_error'] = str(error)
                 row['evaluation_seconds'] = time.perf_counter()-started
                 row['evaluation_browser_executions'] = browser.executions-before
                 page_rows.append(row)
             rows.extend(page_rows); write_json(cache,page_rows); write_jsonl(out/'metrics.jsonl',rows)
-            print(f'[{index+1}/{len(records)}] {record["id"]}: evaluated',flush=True)
+            status = 'evaluation skipped: initial_generation_failed' if initial_failed else 'evaluated'
+            print(f'[{index+1}/{len(records)}] {record["id"]}: {status}',flush=True)
     summary = []
     for method in methods:
         group = [r for r in rows if r['method']==method]
@@ -797,7 +828,7 @@ def evaluate_pages(args):
                   'decomposition':decomposition}
         write_json(out/'oracle-ablation.json',ablation)
     lines = ['# Real HTML evaluation','',
-        'All pages, including failed pipelines and their retained fallback HTML. failed is a rate.','',
+        'Initial generation failures are retained for coverage but not scored. Failed repairs of valid initials retain fallback HTML and are scored. failed is a rate.','',
         '| Method | n | failed | geometry IoU | pixel MAE | pipeline seconds | VLM calls |',
         '|---|---:|---:|---:|---:|---:|---:|']
     for s in summary:
