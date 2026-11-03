@@ -83,6 +83,9 @@ def load_records(path, path_root, limit):
             with Image.open(record['screenshot']) as im: size = list(im.size)
             record.setdefault('viewport', size)
             if record['viewport'] != size: raise ValueError('Target image and viewport sizes differ')
+            initial = dict(initial)
+            if raw.get('errors', {}).get('initial'):
+                initial.update(failed=True, error=raw['errors']['initial'])
             record['initial_metadata'] = initial
             records.append(record)
             if limit and len(records) >= limit: break
@@ -180,6 +183,28 @@ def run_page(record, folder, rounds, runtime, browser, precision='4bit-nf4'):
     result = {k: v for k, v in record.items() if k not in ('initial_metadata', 'initial_html')}
     result.update(vlm_model=MODEL, vlm_backend='huggingface', vlm_weight_precision=precision)
     result['methods'] = {'initial': initial}
+    if initial.get('failed'):
+        # Keep a result for coverage and input-integrity checks, but never polish
+        # the placeholder HTML written after failed initial generation.
+        for step in range(1, rounds + 1):
+            method = dict(html=record['initial_html'], html_sha256=sha(record['initial_html']),
+                failed=True, skipped=True, skip_reason='initial_generation_failed',
+                error=initial.get('error') or 'Initial HTML generation failed',
+                seconds=initial['seconds'], repair_seconds=0.,
+                browser_executions=initial['browser_executions'], vlm_calls=initial['vlm_calls'],
+                repair_vlm_calls=0, repair_input_tokens=0, repair_output_tokens=0,
+                candidate_failure_count=0, feedback_mode='screenshot', target_source='screenshot',
+                uses_reference_text=False, revision_protocol='ui2coden-local-polishing-v1',
+                visual_timing=dict(seconds=0., browser_executions=0, browser_screenshots=0, actions=0),
+                generation={})
+            # Retain historical round artifacts if an older version already ran
+            # polishing. The current results manifest records the skipped cohort.
+            checkpoint = folder / f'round-{step}.json'
+            if not checkpoint.exists(): save(checkpoint, method)
+            result['methods'][f'ui2coden-round-{step}'] = method
+        print(json.dumps(dict(id=record['id'], skipped='initial_generation_failed',
+                              repair_vlm_calls=0, repair_seconds=0.)), flush=True)
+        return result
     current = Path(record['initial_html'])
     seconds = 0.; calls = tokens_in = tokens_out = renders = captures = failures = 0
     for step in range(1, rounds + 1):
@@ -288,7 +313,7 @@ def main():
         with HtmlBrowser() as browser:
             for record in records:
                 folder = out / 'pages' / hashlib.sha256(record['id'].encode()).hexdigest()[:24]
-                if not all((folder / f'round-{i}.json').exists() for i in range(1, args.rounds+1)):
+                if not record['initial_metadata'].get('failed') and not all((folder / f'round-{i}.json').exists() for i in range(1, args.rounds+1)):
                     if runtime is None:
                         runtime = Runtime(args); save(out / 'runtime.json', runtime.info)
                 results.append(run_page(record, folder, args.rounds, runtime, browser,

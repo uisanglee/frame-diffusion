@@ -394,7 +394,9 @@ def evaluate(args):
                 page_results.append(trial_record)
             results+=page_results;timings+=local;write_json(cache,{'records':page_results,'timings':local})
             write_jsonl(out/'results.jsonl',results);write_jsonl(out/'timings.jsonl',timings)
-            print(f'[{index+1}/{len(rows)}] {source["id"]}: screenshot/abstraction comparison complete',flush=True)
+            status = ('repair skipped: initial_generation_failed' if record['methods']['initial'].get('failed')
+                      else 'screenshot/abstraction comparison complete')
+            print(f'[{index+1}/{len(rows)}] {source["id"]}: {status}',flush=True)
     write_jsonl(out/'results.jsonl',results);write_jsonl(out/'timings.jsonl',timings)
     summary={}
     for method in methods:

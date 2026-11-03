@@ -190,3 +190,31 @@ def test_polishing_dispatch_keeps_long_input_and_bf16_metadata(record, tmp_path,
     assert not stats['hit_output_limit']
     result = runner.run_page(record, tmp_path/'bf16-page', 1, Runtime([HTML]), Browser(), precision='bf16')
     assert result['vlm_weight_precision'] == 'bf16'
+
+
+def test_failed_initial_never_polished_even_with_old_round_cache(record, tmp_path, capsys):
+    folder = tmp_path/'page'
+    runner.run_page(record, folder, 2, Runtime([HTML, HTML]), Browser())
+    old_round = (folder/'round-1.json').read_bytes()
+    record['initial_metadata'] = dict(failed=True, error='truncated', seconds=10., vlm_calls=1)
+    browser = Browser()
+    result = runner.run_page(record, folder, 2, None, browser)
+    assert browser.executions == 0
+    for step in (1, 2):
+        method = result['methods'][f'ui2coden-round-{step}']
+        assert method['skipped'] and method['failed']
+        assert method['html'] == record['initial_html']
+        assert method['repair_vlm_calls'] == method['repair_seconds'] == 0
+        assert method['visual_timing']['actions'] == 0
+    assert (folder/'round-1.json').read_bytes() == old_round
+    assert 'initial_generation_failed' in capsys.readouterr().out
+
+
+def test_adapter_preserves_legacy_initial_error(record, tmp_path):
+    manifest = tmp_path/'legacy.jsonl'
+    manifest.write_text(json.dumps(dict(id='x', screenshot=record['screenshot'],
+        initial_html=record['initial_html'], errors={'initial': 'truncated'}))+'\n')
+    loaded = runner.load_records(manifest, tmp_path, 0)[0]
+    assert loaded['initial_metadata']['failed']
+    result = runner.run_page(loaded, tmp_path/'skipped', 2, None, Browser())
+    assert result['methods']['ui2coden-round-2']['skip_reason'] == 'initial_generation_failed'
