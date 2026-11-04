@@ -8,11 +8,22 @@ from .browser import Browser
 
 
 def html_answer(answer):
-    answer = re.sub(r'^\s*```(?:html)?\s*', '', answer, flags=re.I)
-    answer = re.sub(r'\s*```\s*$', '', answer).strip()
-    if not re.search(r'<html\b', answer, re.I) or not re.search(r'</html\s*>', answer, re.I):
+    """Extract the document, excluding assistant prose and Markdown wrappers.
+
+    Do not serialize through an HTML parser: preserve the generated CSS/content
+    and doctype, and never silently complete a truncated response.
+    """
+    opening = re.search(r'<html(?=[\s>])[^>]*>', answer, re.I)
+    closing = list(re.finditer(r'</html\s*>', answer, re.I))
+    if opening is None or not closing or closing[-1].start() < opening.end():
         raise ValueError('Expected a complete HTML document; possible truncated generation')
-    return answer
+    start = opening.start()
+    # Retain a directly preceding doctype so extraction does not change layout
+    # by switching the browser between standards and quirks mode.
+    doctype = re.search(r'<!doctype\s+html\b[^>]*>\s*$', answer[:start], re.I)
+    if doctype:
+        start = doctype.start()
+    return answer[start:closing[-1].end()].strip()
 
 
 def embed_placeholder(html, path=None):
@@ -94,9 +105,12 @@ class HtmlBrowser(Browser):
           s.textContent='*,*::before,*::after{animation:none!important;transition:none!important}';
           document.head.appendChild(s);} """)
 
-    def snapshot(self, html, viewport, screenshot=None, max_nodes=127, visual_geometry=True):
+    def snapshot(self, html, viewport, screenshot=None, max_nodes=127, visual_geometry=True,
+                 require_content=False):
         from .visual import VISUAL_GEOMETRY_JS
         self.load(html, viewport)
+        if require_content:
+            self.require_visible_content()
         # Stable IDs are assigned on the initial DOM and persisted in serialized HTML.
         # Existing data-frame-id values are intentionally ignored.
         result = self.page.evaluate('''([limit,visualGeometry]) => {
@@ -134,6 +148,44 @@ class HtmlBrowser(Browser):
             self.screenshots += 1
         result.update(viewport=list(viewport), html=self.page.content())
         return result
+
+    def require_visible_content(self):
+        """Reject empty generated shells under the actual static renderer.
+
+        This is a minimal content check, not a layout quality/target score.
+        Scope it to generated candidates, not references or corruption samples.
+        """
+        present = self.page.evaluate('''() => {
+          const intersects=r=>r.width>0&&r.height>0&&r.right>0&&r.bottom>0&&
+            r.left<innerWidth&&r.top<innerHeight;
+          const opaque=c=>c!=='transparent'&&!/rgba\\([^)]*,\\s*0(?:\\.0+)?\\)$/.test(c);
+          return [...document.body.querySelectorAll('*'),document.body].some(e=>{
+            if(['SCRIPT','STYLE','TEMPLATE','META','LINK'].includes(e.tagName))return false;
+            const s=getComputedStyle(e);
+            if(s.display==='none'||s.visibility!=='visible')return false;
+            for(let p=e;p;p=p.parentElement)if(Number(getComputedStyle(p).opacity)===0)return false;
+            for(const n of e.childNodes){
+              if(n.nodeType===Node.TEXT_NODE&&n.textContent.trim()&&parseFloat(s.fontSize)>0&&opaque(s.color)){
+                const r=document.createRange();r.selectNodeContents(n);
+                if([...r.getClientRects()].some(intersects))return true;
+              }
+            }
+            if(!intersects(e.getBoundingClientRect()))return false;
+            if(e.tagName==='IMG')return e.complete&&e.naturalWidth>0;
+            if(['INPUT','BUTTON','SELECT','TEXTAREA','VIDEO','HR'].includes(e.tagName))return true;
+            if(e.tagName.toLowerCase()==='svg'&&e.querySelector('path,rect,circle,ellipse,line,polygon,polyline,text,use'))return true;
+            for(const pseudo of ['::before','::after']){
+              const p=getComputedStyle(e,pseudo);
+              if(!['none','normal','""',"''"].includes(p.content)&&p.display!=='none'&&p.visibility==='visible'&&Number(p.opacity)>0)return true;
+            }
+            // Empty root/body boxes are not content. Painted child boxes can be
+            // legitimate image placeholders or geometric UI elements.
+            return e!==document.body&&(opaque(s.backgroundColor)||s.backgroundImage.includes('gradient(')||
+              ['Top','Right','Bottom','Left'].some(side=>parseFloat(s['border'+side+'Width'])>0&&opaque(s['border'+side+'Color'])));
+          });
+        }''')
+        if not present:
+            raise ValueError('Generated HTML has no visible content in the static viewport; JavaScript and external resources are disabled')
 
     def tagged_boxes(self, ids):
         """Read stable identities without resampling/reassigning IDs after a reflow."""

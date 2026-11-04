@@ -83,12 +83,53 @@ def test_html_answer_rejects_truncation():
     with pytest.raises(ValueError): html_answer('<html><body>partial')
 
 
+@pytest.mark.parametrize('fenced', [False, True])
+def test_html_answer_excludes_assistant_commentary(fenced):
+    document = '<!DOCTYPE html>\n' + HTML
+    code = '```html\n' + document + '\n```' if fenced else document
+    answer = ('Certainly! Here is the revised HTML code:\n' + code +
+              '\nThis code should render the webpage with the reference layout.')
+    assert html_answer(answer) == document
+
+
+def test_html_answer_preserves_document_contents_and_rejects_wrapped_truncation():
+    document = '<html><body><pre>```html</pre><script>const end="</html>";</script></body></html>'
+    assert html_answer('Here is the code:\n' + document + '\nDone.') == document
+    with pytest.raises(ValueError, match='complete HTML document'):
+        html_answer('Certainly!\n```html\n<html><body>partial\n```\nExplanation.')
+
+
 @pytest.mark.parametrize(('root','manifest'),[(None,None),('',None),('dataset','pages.jsonl')])
 def test_prepare_requires_exactly_one_nonempty_dataset_source(tmp_path,root,manifest):
     args=SimpleNamespace(root=root,manifest=manifest,out=str(tmp_path/'out'),rounds=0,
         max_nodes=16,max_pixels=1048576,max_new_tokens=8192,limit=0,vlm_retries=0)
     with pytest.raises(ValueError,match='exactly one nonempty dataset source'):
         prepare(args)
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize('body', [
+    '<div id="root"></div><script type="text/babel">ReactDOM.render(jsx, root)</script>',
+    '<div style="width:100px;height:100px"></div>',
+    '<div style="display:none">hidden</div>',
+    '<div style="opacity:0"><p>invisible</p></div>',
+])
+def test_generated_empty_shell_is_rejected(body):
+    with HtmlBrowser() as browser:
+        with pytest.raises(ValueError, match='no visible content'):
+            browser.snapshot('<html><body>'+body+'</body></html>', [320,240], require_content=True)
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize('body', [
+    'Text directly in body',
+    '<div style="position:absolute;top:10px">Visible text</div>',
+    '<div style="width:100px;height:100px;background:red"></div>',
+    '<svg width="100" height="100"><circle cx="50" cy="50" r="20"/></svg>',
+])
+def test_generated_static_content_is_accepted(body):
+    with HtmlBrowser() as browser:
+        browser.snapshot('<html><body>'+body+'</body></html>', [320,240], require_content=True)
 
 
 @pytest.mark.browser
@@ -303,10 +344,11 @@ def test_local_reference_render_is_shared_image_and_dom_target(tmp_path,monkeypa
 
 
 @pytest.mark.browser
-def test_failed_html_generation_keeps_page_for_all_methods(tmp_path,monkeypatch):
+@pytest.mark.parametrize('answer', ['truncated HTML', '<html><body><div id="root"></div></body></html>'])
+def test_failed_html_generation_keeps_page_for_all_methods(tmp_path,monkeypatch,answer):
     Image.new('RGB',(100,100)).save(tmp_path/'a.png')
     (tmp_path/'a.html').write_text(HTML)
-    monkeypatch.setattr('framediff.vlm.generate',lambda *a:('truncated HTML',{}))
+    monkeypatch.setattr('framediff.vlm.generate',lambda *a:(answer,{}))
     args=SimpleNamespace(root=str(tmp_path),manifest=None,out=str(tmp_path/'out'),rounds=2,
         max_nodes=16,max_pixels=1024,max_new_tokens=10,limit=0,seed=42,resume=False,
         backend='openai-compatible',model='fake',revision='main',endpoint='http://unused',
@@ -392,11 +434,12 @@ def test_official_real_scoring_identity_and_shift(tmp_path):
 
 
 @pytest.mark.browser
-def test_self_revision_keeps_success_before_later_failure(tmp_path,monkeypatch):
+@pytest.mark.parametrize('bad', ['truncated', '<html><body><div id="root"></div></body></html>'])
+def test_self_revision_keeps_success_before_later_failure(tmp_path,monkeypatch,bad):
     Image.new('RGB',(320,240),'white').save(tmp_path/'page.png')
     (tmp_path/'page.html').write_text(HTML)
     repaired=HTML.replace('left:10px','left:25px')
-    answers=iter([HTML,repaired,'truncated'])
+    answers=iter([HTML,repaired,bad])
     monkeypatch.setattr('framediff.vlm.generate',lambda *a:(next(answers),{}))
     args=SimpleNamespace(root=str(tmp_path),manifest=None,out=str(tmp_path/'out'),rounds=3,
         max_nodes=16,max_pixels=1048576,max_new_tokens=4096,limit=0,seed=42,resume=False,

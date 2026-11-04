@@ -33,10 +33,29 @@ class Browser:
     executions = 0
     screenshots = 0
     def reset_context(self): pass
-    def snapshot(self, html, viewport, png, max_nodes):
+    def snapshot(self, html, viewport, png, max_nodes, require_content=False):
         self.executions += 1
         Image.new('RGB', viewport, 'white').save(png)
         self.screenshots += 1
+
+
+def test_static_rendering_instructions_are_shared():
+    from framediff.html_generation import STATIC_HTML_PROMPT, PROMPT
+    assert STATIC_HTML_PROMPT in runner.PROMPT
+    assert STATIC_HTML_PROMPT in PROMPT
+    assert 'disables JavaScript and external network requests' in STATIC_HTML_PROMPT
+
+
+def test_empty_react_candidate_keeps_previous_html(record, tmp_path):
+    react = '<html><body><div id="root"></div><script type="text/babel">ReactDOM.render(jsx, root)</script></body></html>'
+    runtime = Runtime([react, HTML])
+    with runner.HtmlBrowser() as browser:
+        result = runner.run_page(record, tmp_path/'page', 2, runtime, browser)
+    first = result['methods']['ui2coden-round-1']
+    assert first['failed'] and 'no visible content' in first['error']
+    assert first['html'] == record['initial_html']
+    assert runtime.calls[1] == HTML
+    assert not result['methods']['ui2coden-round-2']['failed']
 
 
 class Runtime:

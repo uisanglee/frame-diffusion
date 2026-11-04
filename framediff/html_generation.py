@@ -2,13 +2,19 @@
 import re
 from collections import Counter
 
-CONTRACT = 'compact-html-css-viewport-v3'
+CONTRACT = 'static-html-css-visible-content-v4'
+STATIC_HTML_PROMPT = (
+    'The renderer disables JavaScript and external network requests. '
+    'Put all visible page content directly in the HTML body and all CSS in a <style> block or inline styles. '
+    'Do not use React, JSX, Babel, Tailwind CDN, external stylesheets, or JavaScript to create the page. '
+    'Use only the supplied local image resources or existing data URIs. '
+    'Return only the HTML document, without reasoning, explanations, or Markdown fences.\n')
 PROMPT = ('Return one complete HTML document ending with </html>. Keep CSS compact: '
           'use concise markup, reuse shared classes and grouped selectors, and omit comments '
           'and avoid introducing redundant wrappers. Preserve all required content. Do not repeat identical CSS rules '
           'or enumerate hundreds of nth-child selectors; use reusable or periodic rules. '
           'Finish the body and close the document within the output budget.\n'
-          'Return a complete, runnable HTML document.\n')
+          'Return a complete, runnable HTML document.\n' + STATIC_HTML_PROMPT)
 
 
 def viewport_instruction(viewport):

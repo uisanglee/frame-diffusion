@@ -256,6 +256,9 @@ def prepare(args):
                 soup=BeautifulSoup(answer,'html.parser')
                 soup.html['data-tuide-image-contract']='webui-five-color-images-v1'
                 answer=str(soup)
+            if task.endswith('html'):
+                browser.snapshot(embed_placeholder(answer,placeholder),viewport,
+                                 max_nodes=args.max_nodes-1,require_content=True)
             return answer
         return validated_generation(generate,validate_answer,retries)
 
@@ -335,10 +338,12 @@ def prepare(args):
                 record['revision_protocol_source']=SOURCE_URL
                 record['reference_text_elements']=len(paper_texts)
             initial = '<html><body style="min-height:100vh;margin:0"></body></html>'
-            start = time.perf_counter(); initial_calls = 0
+            start = time.perf_counter(); initial_calls = 0; initial_before = browser.executions
             try:
                 if item.get('initial_html'):
                     initial = html_answer(Path(item['initial_html']).read_text())
+                    browser.snapshot(embed_placeholder(initial,placeholder),viewport,
+                                     max_nodes=args.max_nodes-1,require_content=True)
                 elif revision_protocol == 'design2code':
                     from .design2code_self_revision import text_augmented_prompt
                     raw,_ = call('generate-html',[target_screenshot],None,work,'initial',
@@ -362,8 +367,9 @@ def prepare(args):
             initial_calls = record['vlm_attempts'].get('initial',0)
             initial_usage=record['vlm_usage'].get('initial',{'input_tokens':0,'output_tokens':0})
             initial_seconds = time.perf_counter()-start
+            initial_renders = browser.executions-initial_before
             record['methods']['initial'] = {'html':str(initial_path),'seconds':initial_seconds,
-                'browser_executions':0,'vlm_calls':initial_calls,'failed':'initial' in record['errors'],
+                'browser_executions':initial_renders,'vlm_calls':initial_calls,'failed':'initial' in record['errors'],
                 'error':record['errors'].get('initial'),'revision_protocol':revision_protocol,
                 'uses_reference_text':revision_protocol=='design2code','repair_seconds':0.,
                 'repair_vlm_calls':0,'repair_input_tokens':0,'repair_output_tokens':0,
@@ -391,7 +397,6 @@ def prepare(args):
                                 'Image 1 is the TARGET; image 2 is the CURRENT webpage. Compare them and correct '
                                 'the HTML/CSS to better match the target, preserving correct content. ')
                         candidate = raw
-                        browser.snapshot(embed_placeholder(candidate,placeholder),viewport,max_nodes=args.max_nodes-1)
                         current = candidate
                     except Exception as error:
                         raise_if_fatal(error)
@@ -402,7 +407,7 @@ def prepare(args):
                 revision_usage=[v for k,v in record['vlm_usage'].items() if k.startswith(revision_prefix)]
                 path = work/f'{label}.html'; path.write_text(current)
                 record['methods'][label] = {'html':str(path),'seconds':elapsed,
-                    'vlm_calls':initial_calls+calls,'browser_executions':renders,'failed':failure is not None,'error':failure,
+                    'vlm_calls':initial_calls+calls,'browser_executions':initial_renders+renders,'failed':failure is not None,'error':failure,
                     'revision_protocol':revision_protocol,'uses_reference_text':revision_protocol=='design2code',
                     'repair_seconds':max(0.,elapsed-initial_seconds),'repair_vlm_calls':calls,
                     'repair_input_tokens':sum(v['input_tokens'] for v in revision_usage),

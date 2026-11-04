@@ -18,12 +18,14 @@
 
 기본 3회 수정이며 초기 상태와 round 1/2/3을 모두 평가한다. `ROUNDS`로 변경한다.
 목표 HTML·정답 박스는 모델에 전달하지 않고 최종 평가에서만 사용한다.
-점수로 후보를 선택하거나 악화 시 rollback하지 않는다. 잘린 HTML이나 렌더링 오류만
+점수로 후보를 선택하거나 악화 시 rollback하지 않는다. 잘린 HTML, 렌더링 오류, 정적 viewport에 표시할 내용이 없는 후보를
 실패로 기록하고 이전 HTML을 유지한다. 실패 페이지도 평가에 포함한다.
 
 `PROTOCOL=simple`은 목표 이미지와 현재 렌더링을 비교해 HTML을 수정하고,
-완전하고 실행 가능한 HTML 문서를 반환하도록 요청한다. compact·viewport·DOM 보존·
-레이아웃 한정·외부 자원 금지 지시는 추가하지 않는다. 이전 layout/general 옵션은
+완전하고 실행 가능한 HTML 문서를 반환하도록 요청한다. 모든 VLM에 공통으로
+JavaScript·외부 요청이 차단된 렌더러임을 명시하며, 본문 HTML과 내장 CSS 및 제공된
+로컬 이미지/data URI만 사용하도록 요청한다. React/JSX/Babel 및 Tailwind CDN은 사용할 수 없다.
+compact·viewport·DOM 보존·레이아웃 한정 지시는 추가하지 않는다. 이전 layout/general 옵션은
 제거했다. 프롬프트 변경 전 결과와 섞이지 않도록 새 출력 디렉터리를 사용한다.
 프롬프트는 `runner.py`와 출력 `config.json`에 기록된다.
 

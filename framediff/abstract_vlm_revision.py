@@ -6,7 +6,7 @@ from pathlib import Path
 from . import vlm
 from .design2code_self_revision import extract_text_elements
 from .html_bridge import HtmlBrowser, embed_placeholder, html_answer
-from .html_generation import PROMPT as COMPACT_HTML_PROMPT, viewport_instruction
+from .html_generation import PROMPT as COMPACT_HTML_PROMPT, viewport_instruction, CONTRACT as HTML_CONTRACT
 from .ir import read_json, read_jsonl, write_json, write_jsonl
 from .train import select_device
 from .visual import abstract_image, elements
@@ -73,6 +73,7 @@ def revise(args):
     if args.vlm_retries<0 or min(args.max_new_tokens,args.max_pixels)<1:raise ValueError('Invalid VLM settings')
     rows=list(read_jsonl(args.data));out=Path(args.out).resolve()
     settings={k:v for k,v in vars(args).items() if k not in ('data','out','resume')}
+    settings['html_generation_contract']=HTML_CONTRACT
     if args.backend in ('qwen', 'hf'):
         settings['vlm_deployment'] = vlm.deployment_settings()
     guard_run(out,{'kind':'abstract-vlm-self-revision-v1','data':digest(args.data),
@@ -102,7 +103,8 @@ def revise(args):
                 candidate,_=validated_generation(generate,html_answer,args.vlm_retries)
                 placeholder=Path(record['html']).parent/'rick.jpg' if record.get('html') else None
                 placeholder=placeholder if placeholder and placeholder.exists() else None
-                browser.snapshot(embed_placeholder(candidate,placeholder),record['viewport'],max_nodes=127)
+                browser.snapshot(embed_placeholder(candidate,placeholder),record['viewport'],max_nodes=127,
+                                 require_content=True)
                 current=candidate
             except Exception as exc:failure=str(exc)
             path=work/'abstract-vlm-self-revision.html';path.write_text(current);repair_seconds=time.perf_counter()-started

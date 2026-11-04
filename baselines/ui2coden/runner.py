@@ -15,6 +15,7 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from framediff.html_bridge import HtmlBrowser, html_answer
+from framediff.html_generation import STATIC_HTML_PROMPT, CONTRACT as HTML_CONTRACT
 from framediff.vlm_devices import (deployment_settings, input_device,
     start_cuda_measurement, finish_cuda_measurement)
 from framediff.vlm import generation_metadata
@@ -24,7 +25,7 @@ GENERATION_CONTRACT = 'ui2coden-official-generation-config-v1'
 PROMPT = '''The first image is the target UI design. The second image is the current
 rendering of the HTML below. Update the HTML to match the target UI.
 Return a complete, runnable HTML document.
-'''
+''' + STATIC_HTML_PROMPT
 
 
 def polishing_prompt(html):
@@ -242,7 +243,8 @@ def run_page(record, folder, rounds, runtime, browser, precision='4bit-nf4'):
                     marked.html['data-tuide-image-contract']=IMAGE_CONTRACT
                     repaired=str(marked)
                 # Validate renderability before adopting. No target scoring/rollback.
-                browser.snapshot(repaired, record['viewport'], folder / f'output-{step}.png', 2048)
+                browser.snapshot(repaired, record['viewport'], folder / f'output-{step}.png', 2048,
+                                 require_content=True)
                 output = folder / f'output-{step}.html'
                 output.write_text(repaired)
             except Exception as exc:
@@ -305,6 +307,7 @@ def main():
     with open(out / '.lock', 'w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         config = dict(protocol='ui2coden-local-polishing-v1', generation_contract=GENERATION_CONTRACT,
+            html_generation_contract=HTML_CONTRACT,
             settings={k: v for k, v in vars(args).items()
             if k not in ('resume', 'check_inputs', 'out', 'path_root')}, prompt=PROMPT,
             runner_sha=sha(__file__), deployment=deployment_settings(), records=records,
