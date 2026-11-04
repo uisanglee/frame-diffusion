@@ -145,6 +145,10 @@ def evaluate_page(args,row,page,out,browser,methods,parser):
     (work/'target.html').write_text(Path(row['target_html']).read_text())
     (work/'initial.html').write_text(initial_html)
     initial_geometry=box_metrics(row['current_boxes'],target_boxes,viewport,(root,))
+    oracle=None
+    if 'abstract-oracle' in methods:
+        from .image_asset_oracle import reference_labels
+        oracle=reference_labels(browser,row)['elements']
     local=[]
     for repeat in range(1,args.repeats+1):
         for method,policy in methods.items():
@@ -152,6 +156,7 @@ def evaluate_page(args,row,page,out,browser,methods,parser):
             try:
                 html,stats,_=rollout(browser,initial_html,copy.deepcopy(tree),viewport,row['target_image'],policy,
                     parser if policy.cfg.mode=='abstract' else None,args.threshold,args.steps,args.time_budget,
+                    oracle_elements=oracle if method=='abstract-oracle' else None,
                     goal_threshold=(args.abstract_goal_threshold if policy.cfg.mode=='abstract' else args.goal_threshold),
                     pixel_goal_fraction=getattr(args,'pixel_goal_fraction',.99),
                     pixel_goal_tolerance=getattr(args,'pixel_goal_tolerance',.005))
@@ -236,6 +241,8 @@ def evaluate(args):
         raise ValueError('Invalid rollout worker/batch settings')
     device=select_device(args.device)
     if device=='cpu':torch.set_num_threads(args.cpu_threads)
+    if getattr(args,'oracle_ablation',False) and not args.abstract_checkpoint:
+        raise ValueError('--oracle-ablation requires an abstract checkpoint')
     methods={};checkpoints=[];parser=None
     if args.raw_checkpoint:
         raw,checkpoint=load_policy(args.raw_checkpoint,device)
@@ -245,12 +252,17 @@ def evaluate(args):
         abstract,checkpoint=load_policy(args.abstract_checkpoint,device)
         if abstract.cfg.mode!='abstract':raise ValueError('Abstract checkpoint is not an abstract policy')
         methods['abstract-policy']=abstract;checkpoints.append(checkpoint)
+        if getattr(args,'oracle_ablation',False):methods['abstract-oracle']=abstract
         parser,checkpoint=load_detector(args.detector_checkpoint,device);checkpoints.append(checkpoint)
     rows=list(read_jsonl(args.data));rows=rows[:args.limit] if args.limit else rows
     page_rows={r['id']:r for r in read_jsonl(args.pages)}
     if not rows:raise ValueError('Empty frozen WebUI test set')
     from .visual import label_contract
     geometry_contract=label_contract(rows)
+    if getattr(args,'oracle_ablation',False):
+        from .visual import VISUAL_GEOMETRY_CONTRACT
+        if geometry_contract!=VISUAL_GEOMETRY_CONTRACT:
+            raise ValueError('Oracle ablation requires full-visible DOM labels')
     if any(c.get('config',{}).get('visual_geometry_contract')!=geometry_contract for c in checkpoints):
         raise ValueError('Rollout data and checkpoints use different visual label versions')
     if len({r['id'] for r in rows})!=len(rows):raise ValueError('Duplicate frozen test row IDs')
@@ -263,6 +275,7 @@ def evaluate(args):
         if checkpoint_overlap(row,checkpoints):raise ValueError('Held-out test overlaps policy/parser training')
     out=Path(args.out).resolve()
     settings={k:v for k,v in vars(args).items() if k not in ('out','resume','workers','inference_batch_size','batch_wait_ms')}
+    if not settings.get('oracle_ablation'):settings.pop('oracle_ablation',None)
     paths=[args.data,args.pages,args.raw_checkpoint,args.abstract_checkpoint,args.detector_checkpoint]
     guard_run(out,{'kind':KIND,'inputs':{p:digest(p) for p in paths if p},'settings':settings},args.resume)
     completed={};pending=[]

@@ -29,7 +29,8 @@ def test_fixed_test_coverage_includes_preprocessing_attrition(tmp_path):
 
 
 @pytest.mark.browser
-def test_frozen_webui_test_rollout_exports_html_png_and_metrics(tmp_path,monkeypatch):
+@pytest.mark.parametrize("oracle",[False,True])
+def test_frozen_webui_test_rollout_exports_html_png_and_metrics(tmp_path,monkeypatch,oracle):
     from framediff.cli import main
     from framediff.html_bridge import HtmlBrowser
     from framediff.plans import dom_tree
@@ -40,7 +41,7 @@ def test_frozen_webui_test_rollout_exports_html_png_and_metrics(tmp_path,monkeyp
     <body><div class="card">card</div></body></html>'''
     target=tmp_path/'target.png';current_png=tmp_path/'current.png';target_html=tmp_path/'target.html';current_html=tmp_path/'current.html'
     with HtmlBrowser() as browser:
-        dom=browser.snapshot(html,[320,240],target,16);tree,target_boxes,_=dom_tree(dom);annotate(browser,tree)
+        dom=browser.snapshot(html,[320,240],target,16);tree,target_boxes,_=dom_tree(dom);annotate(browser,tree,visual_boxes=oracle)
         target_html.write_text(dom['html']);parsed=css_owners.read(browser,tree)
         owner=next(i for i,o in enumerate(parsed['owners']) if o.get('selector')=='.card')
         css_owners.execute(browser,parsed['owners'],[owner,'width','120px',''])
@@ -66,14 +67,22 @@ def test_frozen_webui_test_rollout_exports_html_png_and_metrics(tmp_path,monkeyp
     class Policy(torch.nn.Module):
         def __init__(self):
             super().__init__();self.weight=torch.nn.Parameter(torch.zeros(1));self.cfg=SimpleNamespace(mode='abstract')
-    monkeypatch.setattr(fixed,'load_policy',lambda *a:(Policy(),{}))
-    monkeypatch.setattr(fixed,'load_detector',lambda *a:(object(),{}))
-    monkeypatch.setattr(fixed,'rollout',lambda browser,source,*a,**kw:(source,dict(actions=0,seconds=.1,
-        browser_executions=0,browser_screenshots=0,history=[]),None))
+    checkpoint={'config':{'visual_geometry_contract':tree.get('visual_geometry_contract')}}
+    monkeypatch.setattr(fixed,'load_policy',lambda *a:(Policy(),checkpoint))
+    monkeypatch.setattr(fixed,'load_detector',lambda *a:(object(),checkpoint))
+    oracle_inputs=[]
+    def rollout(browser,source,*a,**kw):
+        oracle_inputs.append(kw.get('oracle_elements'))
+        return source,dict(actions=0,seconds=.1,browser_executions=0,browser_screenshots=0,history=[]),None
+    monkeypatch.setattr(fixed,'rollout',rollout)
     out=tmp_path/'out'
     main(['visual-test-rollout','--data',str(data),'--pages',str(pages),'--out',str(out),
           '--abstract-checkpoint',str(policy_path),'--detector-checkpoint',str(detector_path),
-          '--device','cpu','--steps','1'])
+          '--device','cpu','--steps','1']+(['--oracle-ablation'] if oracle else []))
+    assert oracle_inputs[0] is None
+    if oracle:
+        assert oracle_inputs[1] and all('box' in e and 'label' in e for e in oracle_inputs[1])
+        assert (out/'pages').is_dir()
     result=list(read_jsonl(out/'results.jsonl'))[0]
     assert Path(result['html']).is_file() and Path(result['png']).is_file()
     assert result['initial_box_iou']<1 and result['final_box_iou']==result['initial_box_iou']

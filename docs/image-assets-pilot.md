@@ -62,3 +62,40 @@ Outputs in `runs/webui-image-assets-pilot10`:
 Move the entire output directory to your local machine to open `index.html`.
 The pilot reuses completed preparation/rollouts when restarted. Inspect
 `complete.json` for the actual selected count. Keep settings fixed on resume.
+
+## Detector vs oracle on the same samples
+
+After the paired pilot, run:
+
+```bash
+mkdir -p log
+nohup env CUDA_VISIBLE_DEVICES=0 PYTHONUNBUFFERED=1 \
+  bash scripts/run_image_assets_oracle10.sh \
+  > log/webui-image-assets-oracle10-gpu0.log 2>&1 < /dev/null &
+```
+
+This reuses the existing frozen samples, embedded images, and checkpoint weights.
+It checks the original manifest and checkpoint hashes before running. No new
+sample selection, downloads, VLM calls, or training occur. The original pilot
+outputs remain untouched. Both detector and oracle runs are evaluated again in
+the current environment: 10 pages x 2 image conditions x 2 target abstractions.
+Defaults remain 20 steps, threshold 0.4, one worker, and one repeat.
+
+The oracle uses the same full-visible DOM label collector as detector training,
+not a truncated policy node list. Its rendering must match the saved target PNG.
+Only reference boxes/classes replace detector predictions; target CSS values are
+not supplied to the policy. This is a diagnostic oracle, not the deployable method.
+
+Results are under `runs/webui-image-assets-pilot10/oracle-analysis`:
+
+- `detector-table.md`: class-aware precision/recall at IoU 0.5 and FP/FN counts.
+- `comparison.md`: four-condition repair IoU, improved rate, failures and scroll rollbacks.
+- `paired-results.jsonl`: per-page detection and repair results joined together.
+- `index.html`: target/initial/detector-repair/oracle-repair images.
+- `detector.html`: reference boxes and predicted boxes overlaid on target images.
+
+If image embedding lowers recall and oracle targets improve repair, detector
+errors are a plausible bottleneck. If oracle repair also fails, inspect the policy
+and rollback traces. This isolates target-detector effects; it does not establish
+that missing-image training caused them. That requires a controlled detector
+training comparison. Ten pages are diagnostic examples, not a benchmark estimate.
