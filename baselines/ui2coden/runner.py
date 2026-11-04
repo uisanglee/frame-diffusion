@@ -15,7 +15,6 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from framediff.html_bridge import HtmlBrowser, html_answer
-from framediff.html_generation import PROMPT as COMPACT_HTML_PROMPT, viewport_instruction
 from framediff.vlm_devices import (deployment_settings, input_device,
     start_cuda_measurement, finish_cuda_measurement)
 from framediff.vlm import generation_metadata
@@ -23,21 +22,13 @@ from framediff.vlm import generation_metadata
 MODEL = 'zai-org/UI2Code_N'
 GENERATION_CONTRACT = 'ui2coden-official-generation-config-v1'
 PROMPT = '''The first image is the target UI design. The second image is the current
-rendering of the HTML below. Refine the current implementation to match the target.
-Return only one complete HTML document with CSS, from <html> to </html> (a doctype
-is allowed). Do not return an explanation or a patch. Do not fetch external assets.
-'''
-LAYOUT = '''This is a layout repair task: preserve the existing text, images, fonts,
-colors, DOM elements and their hierarchy. Adjust only CSS layout, position, size
-and spacing. Keep existing resource URLs and data URIs unchanged.
+rendering of the HTML below. Update the HTML to match the target UI.
+Return a complete, runnable HTML document.
 '''
 
 
-def polishing_prompt(html, viewport, protocol):
-    from framediff.webui_placeholders import CONTRACT as IMAGE_CONTRACT, PROMPT as IMAGE_PROMPT
-    return (COMPACT_HTML_PROMPT + viewport_instruction(viewport) + PROMPT +
-            (IMAGE_PROMPT if IMAGE_CONTRACT in html or any(f'rick{i}.jpg' in html for i in range(1,6)) else '') +
-            (LAYOUT if protocol == 'layout' else '') + '\nCurrent HTML:\n' + html)
+def polishing_prompt(html):
+    return PROMPT + '\nCurrent HTML:\n' + html
 
 
 def sha(path):
@@ -158,16 +149,13 @@ class Runtime:
         import torch
         from PIL import Image
         images = []
-        target_viewport = None
         for path in (target, current):
             with Image.open(path) as im:
-                if target_viewport is None:
-                    target_viewport = im.size
                 im = im.convert('RGB')
                 ratio = min(1., math.sqrt(self.args.max_pixels / (im.width * im.height)))
                 if ratio < 1: im = im.resize((max(1, int(im.width * ratio)), max(1, int(im.height * ratio))))
                 images.append(im)
-        prompt = polishing_prompt(html, target_viewport, self.args.protocol)
+        prompt = polishing_prompt(html)
         messages = [{'role': 'user', 'content': [
             {'type': 'image', 'image': images[0]}, {'type': 'image', 'image': images[1]},
             {'type': 'text', 'text': prompt}]}]
@@ -302,7 +290,7 @@ def main():
     p.add_argument('--max-context', type=int, default=0, help='0: use model text config limit; positive: explicit lower cap')
     p.add_argument('--precision', choices=['bf16', '4bit'], default='4bit')
     p.add_argument('--revision', default='main'); p.add_argument('--seed', type=int, default=42)
-    p.add_argument('--protocol', choices=['layout', 'general'], default='layout')
+    p.add_argument('--protocol', choices=['simple'], default='simple')
     p.add_argument('--resume', action='store_true'); p.add_argument('--check-inputs', action='store_true')
     args = p.parse_args()
     if min(args.rounds, args.max_pixels, args.max_new_tokens) <= 0 or args.max_context < 0 or args.limit < 0:
@@ -318,7 +306,7 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         config = dict(protocol='ui2coden-local-polishing-v1', generation_contract=GENERATION_CONTRACT,
             settings={k: v for k, v in vars(args).items()
-            if k not in ('resume', 'check_inputs', 'out', 'path_root')}, prompt=PROMPT, layout_prompt=LAYOUT,
+            if k not in ('resume', 'check_inputs', 'out', 'path_root')}, prompt=PROMPT,
             runner_sha=sha(__file__), deployment=deployment_settings(), records=records,
             files={r[k]: sha(r[k]) for r in records for k in ('screenshot', 'initial_html', 'html', 'reference_observation') if k in r})
         cfg = out / 'config.json'

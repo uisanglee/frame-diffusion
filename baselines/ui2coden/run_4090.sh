@@ -14,7 +14,7 @@ export PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}"
 options=(--precision "${UI2CODEN_PRECISION:-4bit}" --manifest "$1" --out "$2" --resume --rounds "${ROUNDS:-3}"
   --limit "${LIMIT:-0}" --max-new-tokens "${MAX_NEW_TOKENS:-16384}"
   --max-context "${MAX_CONTEXT:-0}" --max-pixels "${MAX_PIXELS:-262144}"
-  --revision "${MODEL_REVISION:-main}" --protocol "${PROTOCOL:-layout}")
+  --revision "${MODEL_REVISION:-main}" --protocol "${PROTOCOL:-simple}")
 # Reject contradictory global budgets once, before model loading or cached failures.
 "$python_bin" - "${MAX_NEW_TOKENS:-16384}" "${MAX_CONTEXT:-0}" <<'PY'
 import sys
