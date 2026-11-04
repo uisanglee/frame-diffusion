@@ -117,3 +117,10 @@ suite_options=(--root "$output" --aliases "$aliases_csv" --representative "$repr
 [[ "$run_ui2coden" == 1 ]] && suite_options+=(--include-ui2coden --ui2coden-rounds "$revision_rounds")
 python -m framediff.paper_suite "${suite_options[@]}"
 echo "Completed ${#entries[@]} VLM(s). Paper tables: $output/paper/README.md"
+
+# Read-only failure analysis after metric evaluation; excluded from repair timing.
+if [[ "${PAPER_DIAGNOSTICS:-1}" == 1 ]]; then
+  python -m framediff.repair_diagnostics --root "$output" --dataset "$(basename "$output")" \
+    --detector-checkpoint "${DETECTOR_CHECKPOINT:-$train/detector/best.pt}" \
+    --device "${DEVICE:-cuda}" --out "$output/diagnostics"
+fi
