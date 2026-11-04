@@ -188,8 +188,8 @@ def html_generation_options(args, processor, prompt_tokens, qwen=False):
     return options
 
 
-def qwen_inputs_to_device(inputs, device):
-    """Transfer pixels directly in vision-weight precision; preserve integer IDs/grids."""
+def image_inputs_to_device(inputs, device):
+    """Transfer image pixels in BF16 and preserve token IDs and image grids."""
     import torch
     result = {}
     for key, value in inputs.items():
@@ -202,6 +202,10 @@ def qwen_inputs_to_device(inputs, device):
             value = value.to(**options)
         result[key] = value
     return result
+
+
+# Retain the public helper name used by the Qwen placement tests.
+qwen_inputs_to_device = image_inputs_to_device
 
 
 def qwen_generate(args,prompt,images,runtime=None):
@@ -218,7 +222,7 @@ def qwen_generate(args,prompt,images,runtime=None):
         content=[{'type':'image','image':im} for im in images]+[{'type':'text','text':prompt}]
     messages=[{'role':'user','content':content}]
     inputs=processor.apply_chat_template(messages,tokenize=True,add_generation_prompt=True,return_dict=True,return_tensors='pt')
-    inputs=qwen_inputs_to_device(inputs,input_device(model))
+    inputs=image_inputs_to_device(inputs,input_device(model))
     start_cuda_measurement(model);start=time.perf_counter()
     temperature=getattr(args,'temperature',0.)
     # Keep the model's EOS IDs; the token budget is a ceiling, not a required length.
@@ -272,7 +276,8 @@ def hf_generate(args,prompt,images,runtime=None):
         content.append({'type':'image','image':image})
     if not getattr(args,'prompt_first',False):content.append({'type':'text','text':prompt})
     inputs=processor.apply_chat_template([{'role':'user','content':content}],tokenize=True,
-        add_generation_prompt=True,return_dict=True,return_tensors='pt').to(input_device(model))
+        add_generation_prompt=True,return_dict=True,return_tensors='pt')
+    inputs=image_inputs_to_device(inputs,input_device(model))
     start_cuda_measurement(model);start=time.perf_counter()
     temperature=getattr(args,'temperature',0.)
     # Keep the model's EOS IDs; the token budget is a ceiling, not a required length.

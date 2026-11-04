@@ -157,6 +157,17 @@ def test_qwen_pixel_transfer_preserves_ids_and_grid():
         assert source[key].dtype == torch.float32
 
 
+def test_pixtral_pixel_transfer_matches_bf16_vision_convolution():
+    from framediff.vlm import image_inputs_to_device
+    source = {'input_ids': torch.tensor([[1, 2]]),
+              'pixel_values': torch.randn(1, 3, 16, 16)}
+    inputs = image_inputs_to_device(source, torch.device('cpu'))
+    vision_patch = torch.nn.Conv2d(3, 4, 2).to(torch.bfloat16)
+    assert vision_patch(inputs['pixel_values']).dtype == torch.bfloat16
+    assert inputs['input_ids'].dtype == torch.long
+    assert source['pixel_values'].dtype == torch.float32
+
+
 def test_llava_next_loader_uses_nf4_and_one_gpu(monkeypatch):
     from framediff import vlm
     captured={}
