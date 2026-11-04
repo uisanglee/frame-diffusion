@@ -6,25 +6,56 @@ import shutil
 from pathlib import Path
 
 
+def original_index(data_root, raw_root=None):
+    """Resolve original screenshots from published source manifests, not after.png."""
+    originals = {}
+    def add(path):
+        path = Path(path)
+        if not path.is_file() or '-screenshot.' not in path.name:
+            return
+        key = (path.parent.name, path.name.rsplit('-screenshot.', 1)[0])
+        values = originals.setdefault(key, [])
+        if path not in values:
+            values.append(path)
+    if raw_root is not None:
+        for pattern in ('*-screenshot.webp', '*-screenshot.png'):
+            for path in raw_root.rglob(pattern):
+                add(path)
+    else:
+        manifests = sorted(set(data_root.glob('*/7000/source/manifest-test.jsonl')) |
+                           set(data_root.glob('*/master/source/manifest-test.jsonl')) |
+                           set(data_root.glob('*/source/manifest-test.jsonl')))
+        # Source manifests preserve the paths to raw WebUI screenshots even when
+        # normalized test manifests point to after.png instead.
+        for manifest in manifests:
+            with manifest.open() as stream:
+                for line in stream:
+                    if line.strip():
+                        row = json.loads(line)
+                        if row.get('screenshot'):
+                            add(row['screenshot'])
+        print(f'Original source manifests: {len(manifests)}; available page/views: {len(originals)}')
+    return originals
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--run', required=True, help='Experiment root containing prepare/prepared.jsonl')
-    parser.add_argument('--raw-root', required=True, help='Extracted original WebUI dataset root')
+    parser.add_argument('--run', default='runs', help='Experiment root containing prepare/prepared.jsonl')
+    parser.add_argument('--raw-root', help='Optional override; otherwise read original paths from source manifests')
+    parser.add_argument('--data-root', default='data')
     parser.add_argument('--out', default='runs/webui-image-comparison')
     parser.add_argument('--count', type=int, default=2)
     args = parser.parse_args()
-    raw_root = Path(args.raw_root)
-    if not raw_root.is_dir():
+    if args.count < 1:
+        parser.error('--count must be positive')
+    raw_root = Path(args.raw_root) if args.raw_root else None
+    if raw_root is not None and not raw_root.is_dir():
         parser.error(f'Original WebUI folder not found: {raw_root}')
-    manifests = sorted(Path(args.run).rglob('prepare/prepared.jsonl'))
+    manifests = sorted(Path(args.run).rglob('prepare/prepared.jsonl'),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
     if not manifests:
         parser.error('No prepare/prepared.jsonl found under --run')
-    # Index original files once, matching both unique page and exact viewport name.
-    originals = {}
-    for pattern in ('*-screenshot.webp', '*-screenshot.png'):
-        for path in raw_root.rglob(pattern):
-            key = (path.parent.name, path.name.rsplit('-screenshot.', 1)[0])
-            originals.setdefault(key, []).append(path)
+    originals = original_index(Path(args.data_root), raw_root)
     out = Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
     selected = []
@@ -61,7 +92,7 @@ def main():
         if len(selected) >= args.count:
             break
     if not selected:
-        parser.error('No matching original/rendered pairs. Check --raw-root contains original page-ID folders.')
+        parser.error('Source manifests did not resolve available original/rendered pairs. Original files may be missing or their stored paths may belong to another server; no normalized image was substituted.')
     sections = []
     for row in selected:
         sections.append(f'<h2>{html.escape(row["id"])}</h2><div class="pair">'
