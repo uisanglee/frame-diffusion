@@ -51,7 +51,30 @@ def test_preflight_requires_heldout_html(tmp_path):
         check_sources(manifest=manifest)
 
 
-def test_shell_wires_own_draft_shared_inputs_and_webui(tmp_path):
+def test_export_two_datasets_without_tuide(tmp_path):
+    datasets=['design2code','design2code-hard']
+    for dataset in datasets:
+        for alias,_ in MODELS:
+            methods=['Initial VLM','UI2CodeN self-revision'] if alias=='ui2coden' else [
+                'Initial VLM','D2C Self-Revision (RGB)','UI2CodeN polishing']
+            record=dict(complete_metrics_required=True,target_image_protocol='local-reference-render-v1',
+                initial_seeds=['42'],fixed_checkpoint_hashes={},cohort_protocol='initial-success-shared-v1',
+                initial_coverage_by_seed={'42':dict(attempted=10,successful=8,failed=2)},methods={})
+            for method in methods:
+                record['methods'][method]=dict(n_pages_by_seed={'42':8},metrics={
+                    k:dict(mean=.5,sd=None) for k in (*METRICS,'initial_success_rate')})
+            folder=tmp_path/dataset/'paper/main'/alias;folder.mkdir(parents=True)
+            (folder/'initial-seed-summary.json').write_text(json.dumps(record))
+    table=export_matrix(tmp_path,tmp_path/'table',datasets,False,2).read_text()
+    assert 'TUIDE' not in table and 'WebUI' not in table
+    assert '2 refinement rounds' in table
+    assert table.count(' & Initial & ')==6 and table.count(' & Self Revision & ')==6
+    assert r'\begin{tabular}{ll*{2}{cccc}}' in table
+    assert all(line.count('&')==9 for line in table.splitlines() if ' & Initial & ' in line)
+
+
+@pytest.mark.parametrize('run_tuide',['0','1'])
+def test_shell_wires_own_draft_shared_inputs_and_webui(tmp_path,run_tuide):
     import os
     import subprocess
     from pathlib import Path
@@ -65,7 +88,7 @@ def test_shell_wires_own_draft_shared_inputs_and_webui(tmp_path):
     baseline.chmod(0o755)
     tools = tmp_path/'bin'; tools.mkdir()
     py = tools/'python'
-    py.write_text('#!/bin/sh\nif [ "$1" = "-" ]; then cat >/dev/null; echo pinned-sha; fi\n')
+    py.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$PY_LOG"\nif [ "$1" = "-" ]; then cat >/dev/null; echo pinned-sha; fi\n')
     py.chmod(0o755)
     bash = tools/'bash'
     bash.write_text("""#!/bin/sh
@@ -73,6 +96,7 @@ printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$1" "$VLM_MODEL" "$WEB_DATASET" "$REVI
 """)
     bash.chmod(0o755)
     env = dict(os.environ, PATH=str(tools)+os.pathsep+os.environ['PATH'], CALL_LOG=str(tmp_path/'calls'),
+        RUN_TUIDE=run_tuide,PY_LOG=str(tmp_path/'python-calls'),PAPER_DIAGNOSTICS='1',
         OFFICIAL_REPO='official', RUN_UI2CODEN='1', RUN_ABLATION='0', INITIAL_SEEDS='11,22',
         WEB_DATASET='webui', PAGE_MANIFEST='pages.jsonl', MAX_NEW_TOKENS='16384', MAX_CONTEXT='12288',
         UI2CODEN_MAX_NEW_TOKENS='16384', UI2CODEN_MAX_CONTEXT='0',
@@ -88,6 +112,9 @@ printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$1" "$VLM_MODEL" "$WEB_DATASET" "$REVI
     polish = [r for r in calls if r[0]=='baselines/ui2coden/run_4090.sh']
     assert len(polish)==4 and all(r[5:7]==['3','pinned-sha'] for r in polish)
     assert all(r[8:10] == ['16384', '0'] for r in polish)
+    py_calls=(tmp_path/'python-calls').read_text()
+    assert ('--skip-tuide' in py_calls)==(run_tuide=='0')
+    assert ('framediff.repair_diagnostics' in py_calls)==(run_tuide=='1')
 
 
 def test_seed42_qwen_runner_uses_bf16_and_separate_outputs(tmp_path):

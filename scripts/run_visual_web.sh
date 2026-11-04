@@ -49,6 +49,13 @@ python -m framediff web-prepare "${source_options[@]}" "${vlm_options[@]}" "${re
   --limit "${PAGE_LIMIT:-0}" --max-nodes 127 --vlm-retries "$vlm_retries" --seed "$seed" \
   --max-new-tokens "$max_new_tokens" --max-pixels "${MAX_PIXELS:-1048576}" --resume
 prepared="$output_root/prepare/prepared.jsonl"
+if [[ "${RUN_TUIDE:-1}" == 0 ]]; then
+  metrics=()
+  [[ -n "${OFFICIAL_REPO:-}" ]] && metrics+=(--official-repo "$OFFICIAL_REPO")
+  python -m framediff web-evaluate --data "$prepared" \
+    --out "$output_root/evaluation" "${metrics[@]}" --resume
+  exit 0
+fi
 if [[ "${ABSTRACT_VLM_REVISION:-0}" == 1 ]]; then
   [[ "${SELF_REVISION_PROTOCOL:-none}" == design2code ]] || { echo 'ABSTRACT_VLM_REVISION=1 requires SELF_REVISION_PROTOCOL=design2code' >&2; exit 2; }
   detector_checkpoint=${DETECTOR_CHECKPOINT:-$train_root/detector/best.pt}

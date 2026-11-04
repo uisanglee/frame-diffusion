@@ -4,6 +4,51 @@ import pytest
 import framediff.paper_matrix as matrix
 
 
+def test_d2c_only_pilot_freezes_inputs(tmp_path, monkeypatch):
+    script=Path('scripts/run_d2c_pilot10_bf16_2gpu.sh').read_text()
+    selection=script.split("<<'PY'\n",1)[1].split('\nPY\n',1)[0]
+    roots=[tmp_path/'raw-d2c',tmp_path/'raw-hard']
+    for root in roots:
+        root.mkdir()
+        (root/'rick.jpg').write_bytes(b'placeholder')
+    rows=[dict(id=f'{i:03d}') for i in reversed(range(12))]
+    monkeypatch.setattr(matrix,'check_sources',lambda **kw: rows.copy())
+    monkeypatch.setattr('sys.argv',['pilot',*map(str,roots),str(tmp_path/'out')])
+    exec(selection,{})
+    for name in ('design2code','design2code-hard'):
+        path=tmp_path/'out/inputs'/f'{name}.jsonl'
+        assert [json.loads(line)['id'] for line in path.read_text().splitlines()]==[f'{i:03d}' for i in range(10)]
+    assert not (tmp_path/'out/inputs/webui.jsonl').exists()
+    exec(selection,{})
+    rows[-1]['changed']=True
+    with pytest.raises(ValueError,match='Pilot inputs changed'):
+        exec(selection,{})
+
+
+def test_vlm_only_path_evaluates_without_checkpoints(tmp_path):
+    import os
+    import subprocess
+    tools=tmp_path/'bin';tools.mkdir()
+    python=tools/'python'
+    python.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$CALL_LOG"\n')
+    python.chmod(0o755)
+    manifest=tmp_path/'pages.jsonl';manifest.write_text('{}\n')
+    env=dict(os.environ,PATH=str(tools)+os.pathsep+os.environ['PATH'],
+        CALL_LOG=str(tmp_path/'calls'),PAGE_MANIFEST=str(manifest),RUN_TUIDE='0',
+        SELF_REVISION_PROTOCOL='design2code',REVISION_ROUNDS='2',
+        TARGET_IMAGE_SOURCE='reference-render',OFFICIAL_REPO='official',
+        GENERATE_INITIAL='1',PAPER_REFERENCE_CACHE=str(tmp_path/'reference-cache'))
+    result=subprocess.run(['/bin/bash','scripts/run_visual_web.sh','.',str(tmp_path/'out'),'missing-checkpoints'],
+        env=env,text=True,capture_output=True)
+    assert result.returncode==0,result.stderr
+    calls=(tmp_path/'calls').read_text().splitlines()
+    assert len(calls)==2
+    assert 'web-prepare' in calls[0] and '--rounds 2' in calls[0]
+    assert '--target-image-source reference-render' in calls[0]
+    assert 'web-evaluate' in calls[1] and 'prepare/prepared.jsonl' in calls[1]
+    assert '--official-repo official' in calls[1]
+
+
 def test_pilot_freezes_ten_unique_pages_and_prefers_desktop(tmp_path, monkeypatch):
     script = Path('scripts/run_paper_pilot10.sh').read_text()
     selection = script.split("<<'PY'\n", 1)[1].split('\nPY\n', 1)[0]

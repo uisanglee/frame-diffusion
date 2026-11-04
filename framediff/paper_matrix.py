@@ -66,10 +66,13 @@ def check_official(repo):
     return scorer.source_sha
 
 
-def export_matrix(root, out):
+def export_matrix(root, out, datasets=None, include_tuide=True, revision_rounds=3):
     root=Path(root); out=Path(out)
+    selected_datasets=DATASETS if datasets is None else [(key,dict(DATASETS)[key]) for key in datasets]
+    if not selected_datasets or len({k for k,_ in selected_datasets})!=len(selected_datasets):
+        raise ValueError('Select distinct, nonempty datasets')
     records={}; seeds=checkpoints=None
-    for dataset,_ in DATASETS:
+    for dataset,_ in selected_datasets:
         counts=set()
         for alias,_ in MODELS:
             path=root/dataset/'paper/main'/alias/'initial-seed-summary.json'
@@ -88,6 +91,7 @@ def export_matrix(root, out):
             seeds=record['initial_seeds']; checkpoints=record['fixed_checkpoint_hashes']
             required = ['Initial VLM', 'UI2CodeN self-revision', 'TUIDE'] if alias=='ui2coden' else [
                 'Initial VLM','D2C Self-Revision (RGB)','UI2CodeN polishing','TUIDE']
+            if not include_tuide:required.remove('TUIDE')
             if set(record['methods']) != set(required):
                 raise ValueError(f'{path}: incomplete method group')
             for method in required:
@@ -107,27 +111,27 @@ def export_matrix(root, out):
         if len(counts)!=1 or any(n <= 0 for n in next(iter(counts))):
             raise ValueError(f'{dataset}: all model/method groups must use the same nonempty test set')
     lines=[r'\begin{table*}[t]',r'\centering',
-           r'\caption{Layout repair results using locally rendered reference HTML on WebUI, Design2Code, and Design2Code-Hard. '
+           r'\caption{Layout repair results using locally rendered reference HTML on '+', '.join(label for _,label in selected_datasets)+'. '
            r'Within each dataset and initial VLM, repair methods share the same initial HTML. '
-           r'Self Revision and UI2Code$^{n}$ polishing use up to three refinement rounds. '
+           r'Self Revision and UI2Code$^{n}$ polishing use '+str(revision_rounds)+' refinement rounds. '
            r'If refinement fails, the last available implementation is retained and remains in the evaluation. '
            r'Quality is measured on the shared set of successfully generated Initial pages within each model and seed. '
            r'The last column reports Initial generation success over all attempted inputs, and Box IoU improvement over Initial for repair methods. '
            r'Results are means across initial-generation seeds with fixed model checkpoints; $\pm$ denotes sample standard deviation when multiple seeds are used.}',
-           r'\label{tab:vlm-quality}',r'\resizebox{\textwidth}{!}{%',r'\begin{tabular}{ll*{3}{cccc}}',r'\hline',
+           r'\label{tab:vlm-quality}',r'\resizebox{\textwidth}{!}{%',r'\begin{tabular}{ll*{'+str(len(selected_datasets))+r'}{cccc}}',r'\hline',
            r'\multirow{2}{*}{Initial VLM} & \multirow{2}{*}{Repair method} & '
-           r'\multicolumn{4}{c}{WebUI} & \multicolumn{4}{c}{Design2Code} & \multicolumn{4}{c}{Design2Code-Hard} \\',
-           r'\cline{3-6}\cline{7-10}\cline{11-14}',
-           '& & '+' & '.join([r'Position $\uparrow$',r'CLIP $\uparrow$',r'Box IoU $\uparrow$',r'Success / Improved (\%) $\uparrow$']*3)+r' \\',r'\hline']
+           +' & '.join(r'\multicolumn{4}{c}{'+label+'}' for _,label in selected_datasets)+r' \\',
+           ''.join(r'\cline{'+f'{3+4*i}-{6+4*i}'+'}' for i in range(len(selected_datasets))),
+           '& & '+' & '.join([r'Position $\uparrow$',r'CLIP $\uparrow$',r'Box IoU $\uparrow$',r'Success / Improved (\%) $\uparrow$']*len(selected_datasets))+r' \\',r'\hline']
     coverage={}
     for alias,label in MODELS:
         methods=[('Initial VLM','Initial')]
         methods += [('UI2CodeN self-revision','Self Revision')] if alias=='ui2coden' else [
             ('D2C Self-Revision (RGB)','Self Revision'),('UI2CodeN polishing',r'UI2Code$^{n}$')]
-        methods += [('TUIDE','TUIDE')]
+        if include_tuide:methods += [('TUIDE','TUIDE')]
         for index,(method,title) in enumerate(methods):
             cells=[]
-            for dataset,_ in DATASETS:
+            for dataset,_ in selected_datasets:
                 item=records[dataset,alias]['methods'][method]
                 coverage.setdefault(dataset,{})[alias]=records[dataset,alias]['initial_coverage_by_seed']
                 for metric in METRICS:
@@ -157,12 +161,15 @@ def main():
     pre.add_argument('--limit',type=int,default=0)
     pre.add_argument('--official-repo',required=True)
     export=sub.add_parser('export'); export.add_argument('--root',required=True); export.add_argument('--out',required=True)
+    export.add_argument('--datasets',nargs='+',choices=[key for key,_ in DATASETS])
+    export.add_argument('--skip-tuide',action='store_true')
+    export.add_argument('--revision-rounds',type=int,choices=range(1,101),default=3)
     args=parser.parse_args()
     if args.command=='check':
         rows=check_sources(args.root,args.manifest,args.dataset,args.webui_view,args.limit)
         sha=check_official(args.official_repo)
         print(json.dumps(dict(pages=len(rows),official_source_sha=sha,protocol='local-reference-render-v1')))
-    else: print(export_matrix(args.root,args.out))
+    else: print(export_matrix(args.root,args.out,args.datasets,not args.skip_tuide,args.revision_rounds))
 
 
 if __name__=='__main__': main()

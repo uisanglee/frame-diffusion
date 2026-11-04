@@ -104,7 +104,8 @@ def _main_table(summary, out):
 
 def build(root, aliases, representative, out, include_ablation=True, include_ui2coden=False,
           ui2coden_rounds=3, require_three_rounds=False, initial_seed=None,
-          own_initial_alias='ui2coden', require_complete_metrics=False, revision_rounds=None):
+          own_initial_alias='ui2coden', require_complete_metrics=False, revision_rounds=None, include_tuide=True):
+    if include_ablation and not include_tuide:raise ValueError('Ablation requires TUIDE')
     root = Path(root)
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
@@ -120,7 +121,8 @@ def build(root, aliases, representative, out, include_ablation=True, include_ui2
             raise FileNotFoundError(f'Missing completed evaluation for {alias}: {path}')
         prepared = _prepared_by_id(alias_root) if include_ui2coden or initial_seed is not None or require_complete_metrics else None
         if prepared is not None:
-            _check_same_inputs(prepared, alias_root / 'repair' / 'results.jsonl', f'{alias} main')
+            main_path = alias_root / 'repair' / 'results.jsonl' if include_tuide else alias_root / 'prepare' / 'prepared.jsonl'
+            _check_same_inputs(prepared, main_path, f'{alias} main')
         required_round = revision_rounds or (3 if require_three_rounds else None)
         revision_method = ('design2code-self-revision' if required_round == 1 else f'design2code-self-revision-{required_round}')
         if required_round and not own_initial and any(revision_method not in row['methods']
@@ -128,6 +130,7 @@ def build(root, aliases, representative, out, include_ablation=True, include_ui2
             raise ValueError(f'{alias}: missing Design2Code self-revision round {required_round}')
         mapping = ({'initial':'Initial VLM','abstract-policy':'TUIDE'} if own_initial else ({'initial':'Initial VLM', revision_method:'D2C Self-Revision (RGB)',
                    'abstract-policy':'TUIDE'} if required_round else MAIN_METHODS))
+        if not include_tuide:mapping={k:v for k,v in mapping.items() if v!='TUIDE'}
         rows = selected(read_jsonl(path), mapping)
         if include_ui2coden:
             baseline = alias_root / 'ui2coden'
@@ -187,7 +190,7 @@ def build(root, aliases, representative, out, include_ablation=True, include_ui2
 
 def build_initial_seed_suite(root, aliases, representative, out, seeds,
                              include_ablation=True, include_ui2coden=False,
-                             own_initial_alias='ui2coden', require_complete_metrics=False, revision_rounds=None):
+                             own_initial_alias='ui2coden', require_complete_metrics=False, revision_rounds=None, include_tuide=True):
     """Aggregate fixed-model results across independently sampled initial VLM drafts."""
     root = Path(root); out = Path(out); out.mkdir(parents=True, exist_ok=True)
     if not seeds or len(seeds) != len(set(seeds)):
@@ -195,7 +198,7 @@ def build_initial_seed_suite(root, aliases, representative, out, seeds,
     for index, seed in enumerate(seeds):
         build(root, aliases, representative, out / 'by-initial-seed' / str(seed),
               include_ablation and index == 0, include_ui2coden, revision_rounds or 3, True, seed,
-              own_initial_alias, require_complete_metrics, revision_rounds=revision_rounds)
+              own_initial_alias, require_complete_metrics, revision_rounds=revision_rounds, include_tuide=include_tuide)
     lines = ['# Initial-VLM-seed experiment', '',
              'The policy checkpoints and target observations are fixed. Initial VLM drafts vary by generation seed.',
              'Mean ± sample SD is across initial VLM seeds; page-bootstrap CIs are in each seed report.', '']
@@ -216,8 +219,8 @@ def build_initial_seed_suite(root, aliases, representative, out, seeds,
                 raise ValueError(f'{alias}/{seed}: initial VLM sampling is disabled')
             initial_hashes.append({page: _sha(row['methods']['initial']['html']) for page, row in prepared.items()})
             target_hashes.append({page: _sha(row['screenshot']) for page, row in prepared.items()})
-            repair_config = json.loads((alias_root / 'repair' / 'config.json').read_text())
-            policy_hashes.append(repair_config['checkpoints'])
+            repair_config = json.loads((alias_root / 'repair' / 'config.json').read_text()) if include_tuide else {}
+            policy_hashes.append(repair_config.get('checkpoints',{}) if not include_tuide else repair_config['checkpoints'])
             summary_path = out / 'by-initial-seed' / str(seed) / 'main' / alias / 'paper-summary.json'
             reports.append(json.loads(summary_path.read_text()))
         if any(target != target_hashes[0] for target in target_hashes[1:]):
@@ -289,6 +292,7 @@ def main():
     parser.add_argument('--representative', required=True)
     parser.add_argument('--out', required=True)
     parser.add_argument('--skip-ablation', action='store_true')
+    parser.add_argument('--skip-tuide', action='store_true', help='Report VLM-only experiments without policy/detector checkpoints')
     parser.add_argument('--include-ui2coden', action='store_true')
     parser.add_argument('--ui2coden-rounds', type=int, default=3)
     parser.add_argument('--require-three-rounds', action='store_true')
@@ -306,12 +310,13 @@ def main():
             raise ValueError('Initial seeds must be nonnegative integers')
         build_initial_seed_suite(args.root, aliases, args.representative, args.out, seeds,
                                  not args.skip_ablation, args.include_ui2coden,
-                                 args.own_initial_alias, args.require_complete_metrics, args.revision_rounds)
+                                 args.own_initial_alias, args.require_complete_metrics, args.revision_rounds,
+                                 include_tuide=not args.skip_tuide)
     else:
         build(args.root, aliases, args.representative, args.out, not args.skip_ablation,
               args.include_ui2coden, args.ui2coden_rounds, args.require_three_rounds,
               own_initial_alias=args.own_initial_alias, require_complete_metrics=args.require_complete_metrics,
-              revision_rounds=args.revision_rounds)
+              revision_rounds=args.revision_rounds, include_tuide=not args.skip_tuide)
 
 
 if __name__ == '__main__':

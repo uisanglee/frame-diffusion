@@ -140,3 +140,38 @@ def test_select_second_round_from_three_round_evaluation(tmp_path):
     assert '0.6000' in quality_row and '0.9000' not in quality_row
     # The complete evaluation remains intact for separate N=3 reporting.
     assert len((alias/'evaluation/metrics.jsonl').read_text().splitlines()) == 4
+
+
+@pytest.mark.parametrize('alias',['qwen3vl8b','ui2coden'])
+def test_vlm_only_seed_suite_without_checkpoints(tmp_path,alias):
+    from framediff.ir import write_json,write_jsonl
+    root=tmp_path/alias/'seeds/42'
+    root.mkdir(parents=True)
+    target=root/'target.png';Image.new('RGB',(8,8),'white').save(target)
+    initial=root/'initial.html';initial.write_text('<html><body>Initial</body></html>')
+    rows=[];metrics=[];ui_metrics=[]
+    for page,failed in [('good',False),('bad',True)]:
+        methods={'initial':dict(html=str(initial),failed=failed),
+                 'design2code-self-revision-2':dict(html=str(initial),failed=failed)}
+        rows.append(dict(id=page,screenshot=str(target),methods=methods,benchmark_protocol='local-reference-render-v1'))
+        for method,score in [('initial',.3),('design2code-self-revision-2',.4),('ui2coden-round-2',.6)]:
+            metric=dict(id=page,method=method,failed=failed,benchmark_protocol='local-reference-render-v1',
+                        **{k:None if failed else score for k in ('official_position','official_clip','dom_box_iou')})
+            (ui_metrics if method.startswith('ui2coden') else metrics).append(metric)
+    write_jsonl(root/'prepare/prepared.jsonl',rows)
+    write_json(root/'prepare/config.json',dict(settings=dict(seed=42,initial_temperature=0)))
+    write_jsonl(root/'evaluation/metrics.jsonl',metrics)
+    write_jsonl(root/'ui2coden/results.jsonl',rows)
+    write_jsonl(root/'ui2coden/evaluation/metrics.jsonl',ui_metrics)
+    build_initial_seed_suite(tmp_path,[alias],alias,tmp_path/'paper',['42'],
+        include_ablation=False,include_ui2coden=True,require_complete_metrics=True,
+        revision_rounds=2,include_tuide=False)
+    summary=json.loads((tmp_path/f'paper/main/{alias}/initial-seed-summary.json').read_text())
+    assert not (root/'repair').exists()
+    assert summary['fixed_checkpoint_hashes']=={}
+    assert 'TUIDE' not in summary['methods']
+    assert len(summary['methods'])==(2 if alias=='ui2coden' else 3)
+    assert all(item['n_pages_by_seed']=={'42':1} for item in summary['methods'].values())
+    assert summary['methods']['Initial VLM']['metrics']['initial_success_rate']['mean']==.5
+    label='UI2CodeN self-revision' if alias=='ui2coden' else 'UI2CodeN polishing'
+    assert summary['methods'][label]['metrics']['dom_box_iou']['mean']==.6

@@ -14,6 +14,10 @@ revision_rounds=${REVISION_ROUNDS:-3}
 [[ "$revision_rounds" =~ ^[1-9][0-9]*$ ]] || { echo "REVISION_ROUNDS must be positive" >&2; exit 2; }
 run_ablation=${RUN_ABLATION:-0}
 run_ui2coden=${RUN_UI2CODEN:-0}
+run_tuide=${RUN_TUIDE:-1}
+[[ "$run_tuide" == 0 || "$run_tuide" == 1 ]] || { echo 'RUN_TUIDE must be 0 or 1' >&2; exit 2; }
+[[ "$run_tuide" == 1 || "$run_ablation" == 0 ]] || { echo 'RUN_TUIDE=0 requires RUN_ABLATION=0' >&2; exit 2; }
+export RUN_TUIDE="$run_tuide"
 [[ "$run_ablation" == 0 || "$run_ablation" == 1 ]] || { echo 'RUN_ABLATION must be 0 or 1' >&2; exit 2; }
 [[ "$run_ui2coden" == 0 || "$run_ui2coden" == 1 ]] || { echo 'RUN_UI2CODEN must be 0 or 1' >&2; exit 2; }
 [[ "${TARGET_IMAGE_SOURCE:-reference-render}" == reference-render ]] || { echo 'Paper runs require reference-render targets' >&2; exit 2; }
@@ -115,11 +119,12 @@ aliases_csv=$(IFS=,; echo "${aliases[*]}")
 suite_options=(--root "$output" --aliases "$aliases_csv" --representative "$representative" --out "$output/paper" --require-complete-metrics --own-initial-alias ui2coden --revision-rounds "$revision_rounds" --initial-seeds "$initial_seeds")
 [[ "$run_ablation" == 0 ]] && suite_options+=(--skip-ablation)
 [[ "$run_ui2coden" == 1 ]] && suite_options+=(--include-ui2coden --ui2coden-rounds "$revision_rounds")
+[[ "$run_tuide" == 0 ]] && suite_options+=(--skip-tuide)
 python -m framediff.paper_suite "${suite_options[@]}"
 echo "Completed ${#entries[@]} VLM(s). Paper tables: $output/paper/README.md"
 
 # Read-only failure analysis after metric evaluation; excluded from repair timing.
-if [[ "${PAPER_DIAGNOSTICS:-1}" == 1 ]]; then
+if [[ "$run_tuide" == 1 && "${PAPER_DIAGNOSTICS:-1}" == 1 ]]; then
   python -m framediff.repair_diagnostics --root "$output" --dataset "$(basename "$output")" \
     --detector-checkpoint "${DETECTOR_CHECKPOINT:-$train/detector/best.pt}" \
     --device "${DEVICE:-cuda}" --out "$output/diagnostics"
