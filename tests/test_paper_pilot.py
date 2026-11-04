@@ -4,6 +4,40 @@ import pytest
 import framediff.paper_matrix as matrix
 
 
+@pytest.mark.parametrize('with_tuide',['0','1'])
+def test_ui2coden_rerun_aggregates_previous_methods(tmp_path,with_tuide):
+    import os, subprocess, sys
+    script=tmp_path/'scripts/rerun_pilot_ui2coden.sh'
+    script.parent.mkdir()
+    script.write_text(Path('scripts/rerun_pilot_ui2coden.sh').read_text())
+    activate=tmp_path/'.venv/bin/activate';activate.parent.mkdir(parents=True);activate.write_text('true\n')
+    old=tmp_path/'old';out=tmp_path/'new'
+    (old/'inputs').mkdir(parents=True)
+    (old/'inputs/design2code.jsonl').write_text('{"id":"page"}\n')
+    for alias in ('llava-next-7b','gemma3-12b','pixtral-12b','glm4v-9b-thinking','qwen3vl8b'):
+        run=old/'design2code'/alias/'seeds/42'
+        for name in ('prepare','evaluation','repair'):(run/name).mkdir(parents=True)
+        (run/'prepare/prepared.jsonl').write_text('{"id":"page"}\n')
+    tools=tmp_path/'bin';tools.mkdir()
+    py=tools/'python'
+    py.write_text('#!/bin/sh\nif [ "$1" = "-" ]; then exec "$REAL_PYTHON" "$@"; fi\nprintf "%s\\n" "$*" >> "$PY_LOG"\n')
+    py.chmod(0o755)
+    bash=tools/'bash';bash.write_text('#!/bin/sh\nprintf "%s|%s\\n" "$RUN_TUIDE" "$*" >> "$BASH_LOG"\n');bash.chmod(0o755)
+    env=dict(os.environ,PATH=str(tools)+os.pathsep+os.environ['PATH'],REAL_PYTHON=sys.executable,
+             RUN_TUIDE=with_tuide,PY_LOG=str(tmp_path/'py.log'),BASH_LOG=str(tmp_path/'bash.log'))
+    result=subprocess.run(['/bin/bash',str(script),str(old),str(out)],env=env,capture_output=True,text=True)
+    assert result.returncode==0,result.stderr
+    calls=(tmp_path/'py.log').read_text()
+    assert 'framediff.paper_suite' in calls and '--aliases llava-next-7b,gemma3-12b' in calls
+    assert 'framediff.paper_matrix export' in calls and '--datasets design2code --revision-rounds 2' in calls
+    assert ('--skip-tuide' in calls)==(with_tuide=='0')
+    assert (out/'design2code/llava-next-7b/seeds/42/evaluation').is_symlink()
+    bashcalls=(tmp_path/'bash.log').read_text().splitlines()
+    assert len(bashcalls)==6
+    assert all(line.startswith(with_tuide+'|') for line in bashcalls)
+    assert 'run_paper_experiments.sh' in bashcalls[-1]
+
+
 def test_d2c_only_pilot_freezes_inputs(tmp_path, monkeypatch):
     script=Path('scripts/run_d2c_pilot10_bf16_2gpu.sh').read_text()
     selection=script.split("<<'PY'\n",1)[1].split('\nPY\n',1)[0]
