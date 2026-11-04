@@ -223,3 +223,18 @@ CUDA 오류 중단, policy manifest 변환, **실제 Chromium → 공통 평가 
 검증한다. 가짜 모델 출력을 사용하는 기능 테스트이며, 로컬 Mac에서는 실제 4090의
 9B 추론·처리량·정확도 및 선택적 공식 CLIP 실행을 검증하지 않았다.
 서버의 2페이지 smoke 결과를 확인한 뒤 전체 실험을 시작한다.
+
+## Polishing 생성 설정
+
+Polishing은 고정한 `zai-org/UI2Code_N` revision의 `generation_config.json`을
+명시적으로 로드한다. `generate()`에는 입력과 `max_new_tokens`만 전달하며,
+`do_sample=False` 등 생성 설정을 덮어쓰지 않는다. 공식 공개 설정은
+`do_sample=true`, `temperature=0.8`, `top_p=0.6`, `top_k=2`이다.
+EOS/padding도 해당 revision의 값을 사용한다. 설정 파일 로딩 실패는 오류로 처리한다.
+출처: https://huggingface.co/zai-org/UI2Code_N/blob/main/generation_config.json
+
+`runtime.json`과 각 round JSON의 `generation.generation_settings`에 실제 설정을
+기록한다. 이전 greedy 결과는 설정/runner 변경 검사로 재개를 거부하므로 새 출력
+디렉터리를 사용해야 한다. 기존 결과를 자동 삭제하거나 다시 실행하지 않는다.
+이는 **생성 설정**의 일치이며, 기존 실험용 프롬프트·이미지 전처리·평가 프로토콜까지
+공식 실험과 동일하다는 의미는 아니다.

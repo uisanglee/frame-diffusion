@@ -177,6 +177,9 @@ def test_polishing_dispatch_keeps_long_input_and_bf16_metadata(record, tmp_path,
     class Model:
         device=torch.device('cpu')
         _framediff_input_device=torch.device('cuda:1')
+        generation_config=SimpleNamespace(to_dict=lambda: dict(
+            do_sample=True,temperature=.8,top_p=.6,top_k=2,
+            eos_token_id=[151329,151336,151338,151348],pad_token_id=151329))
         def forward(self, input_ids, logits_to_keep=0): pass
         def generate(self, **kwargs):
             seen['generation'] = kwargs
@@ -192,8 +195,12 @@ def test_polishing_dispatch_keeps_long_input_and_bf16_metadata(record, tmp_path,
     assert answer == HTML and seen['device'] == 'cuda:1'
     assert seen['generation']['input_ids'].shape[1] == 17000
     assert seen['generation']['max_new_tokens'] == 16384
-    assert seen['generation']['logits_to_keep'] == 1
-    assert seen['generation']['do_sample'] is False
+    assert set(seen['generation']) == {'input_ids','max_new_tokens'}
+    settings=stats['generation_settings']
+    assert settings['do_sample'] is True and settings['sampling_active'] is True
+    assert (settings['temperature'],settings['top_p'],settings['top_k']) == (.8,.6,2)
+    assert settings['eos_token_id']==[151329,151336,151338,151348]
+    assert stats['generation_contract']==runner.GENERATION_CONTRACT
     assert stats['input_tokens'] == 17000 and stats['output_tokens'] == 1
     assert not stats['hit_output_limit']
     result = runner.run_page(record, tmp_path/'bf16-page', 1, Runtime([HTML]), Browser(), precision='bf16')

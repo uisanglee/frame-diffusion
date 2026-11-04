@@ -17,9 +17,11 @@ sys.path.insert(0, str(ROOT))
 from framediff.html_bridge import HtmlBrowser, html_answer
 from framediff.html_generation import PROMPT as COMPACT_HTML_PROMPT, viewport_instruction
 from framediff.vlm_devices import (deployment_settings, input_device,
-    start_cuda_measurement, finish_cuda_measurement, efficient_generation_options)
+    start_cuda_measurement, finish_cuda_measurement)
+from framediff.vlm import generation_metadata
 
 MODEL = 'zai-org/UI2Code_N'
+GENERATION_CONTRACT = 'ui2coden-official-generation-config-v1'
 PROMPT = '''The first image is the target UI design. The second image is the current
 rendering of the HTML below. Refine the current implementation to match the target.
 Return only one complete HTML document with CSS, from <html> to </html> (a doctype
@@ -122,7 +124,7 @@ def check_budget(input_tokens, output_tokens, limit):
 class Runtime:
     def __init__(self, args):
         import torch
-        from transformers import AutoConfig
+        from transformers import AutoConfig, GenerationConfig
         from framediff.vlm import load_hf_runtime
         from types import SimpleNamespace
         if not torch.cuda.is_available(): raise RuntimeError('A CUDA GPU is required')
@@ -139,12 +141,17 @@ class Runtime:
         check_budget(1, args.max_new_tokens, self.context_limit)
         options = SimpleNamespace(**{**vars(args), 'model': MODEL, 'four_bit': args.precision == '4bit'})
         self.model, self.processor = load_hf_runtime(options)
+        # Load the published configuration explicitly: never silently fall back to
+        # greedy defaults if the checkpoint's generation_config.json is unavailable.
+        revision = getattr(self.model.config, '_commit_hash', None) or args.revision
+        self.model.generation_config = GenerationConfig.from_pretrained(MODEL, revision=revision)
         import transformers
         self.info = dict(model=MODEL, resolved_revision=getattr(self.model.config, '_commit_hash', None),
                          precision='nf4-4bit' if args.precision == '4bit' else 'bf16',
                          **self.model._framediff_placement,
                          context_limit=self.context_limit, max_new_tokens=args.max_new_tokens,
-                         generation_options=efficient_generation_options(self.model),
+                         generation_contract=GENERATION_CONTRACT,
+                         generation_settings=generation_metadata(self.model, {}, args.max_new_tokens),
                          torch=torch.__version__, transformers=transformers.__version__, cuda=torch.version.cuda)
 
     def generate(self, target, current, html):
@@ -172,12 +179,15 @@ class Runtime:
         start_cuda_measurement(self.model)
         started = time.perf_counter()
         with torch.inference_mode():
-            ids = self.model.generate(**inputs, max_new_tokens=self.args.max_new_tokens,
-                do_sample=False, **efficient_generation_options(self.model))
+            # Match the official README: only set the output budget; inherit all
+            # sampling/EOS/cache settings from the pinned official checkpoint.
+            ids = self.model.generate(**inputs, max_new_tokens=self.args.max_new_tokens)
         memory = finish_cuda_measurement(self.model)
         generation_seconds = time.perf_counter() - started
         answer = self.processor.decode(ids[0, n:], skip_special_tokens=True)
         stats = dict(input_tokens=n, output_tokens=ids.shape[1]-n,
+                     generation_contract=GENERATION_CONTRACT,
+                     generation_settings=generation_metadata(self.model, {}, self.args.max_new_tokens),
                      max_new_tokens=self.args.max_new_tokens, context_limit=self.context_limit,
                      hit_output_limit=ids.shape[1]-n >= self.args.max_new_tokens,
                      generation_seconds=generation_seconds, **memory)
@@ -306,7 +316,8 @@ def main():
     import fcntl
     with open(out / '.lock', 'w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        config = dict(protocol='ui2coden-local-polishing-v1', settings={k: v for k, v in vars(args).items()
+        config = dict(protocol='ui2coden-local-polishing-v1', generation_contract=GENERATION_CONTRACT,
+            settings={k: v for k, v in vars(args).items()
             if k not in ('resume', 'check_inputs', 'out', 'path_root')}, prompt=PROMPT, layout_prompt=LAYOUT,
             runner_sha=sha(__file__), deployment=deployment_settings(), records=records,
             files={r[k]: sha(r[k]) for r in records for k in ('screenshot', 'initial_html', 'html', 'reference_observation') if k in r})
