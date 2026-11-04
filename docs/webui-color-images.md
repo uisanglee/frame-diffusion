@@ -21,7 +21,7 @@ nohup env PYTHONUNBUFFERED=1 PREPARE_WORKERS=4 \
 ```
 
 Defaults: source `data/webui-full-dom-screened-7k-v1/7000/source/manifest.jsonl`,
-output `data/webui-color-images-v1`. Override `SOURCE_MANIFEST`, `COLOR_DATA`,
+output `data/new`. Override `SOURCE_MANIFEST`, `COLOR_DATA`,
 `DATA_SIZE` (the output scale name) if needed. Source splits are inherited.
 Failed downloads of required active images, unknown intrinsic sizes and >1px changes to any measured DOM
 box are rejected and recorded in `master/source/rejections.jsonl`. Actual counts
@@ -64,10 +64,10 @@ Train in a **new run directory**, using the existing training entry point:
 CUDA_VISIBLE_DEVICES=0 STAGE=all POLICY_MODES=abstract POLICY_SCALE=s \
   ONLINE_WORKERS=4 POLICY_STAGE1_STEPS=15000 POLICY_STAGE2_STEPS=5000 \
   bash scripts/run_webui_scale.sh 7000 \
-  data/webui-color-images-v1 runs/webui-color-images-v1
+  data/new runs/webui-color-images-v1
 ```
 
-Use `data/webui-color-images-v1/7000/css/pages-test.jsonl` as WEBUI_TEST and
+Use `data/new/7000/css/pages-test.jsonl` as WEBUI_TEST and
 `runs/webui-color-images-v1/7000` as TRAIN_RUN for VLM experiments, with the new
 Detector and TUIDE checkpoints. Use a fresh experiment output directory. Initial
 and self-revision prompts automatically detect the reference HTML protocol marker;

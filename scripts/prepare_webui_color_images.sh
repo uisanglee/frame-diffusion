@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 if [[ -f .venv/bin/activate ]]; then source .venv/bin/activate; fi
 export PYTHONUNBUFFERED=1
 source_manifest=${SOURCE_MANIFEST:-data/webui-full-dom-screened-7k-v1/7000/source/manifest.jsonl}
-data=${COLOR_DATA:-data/webui-color-images-v1}
+data=${COLOR_DATA:-data/new}
 size=${DATA_SIZE:-7000}
 workers=${PREPARE_WORKERS:-4}
 python -m framediff.webui_placeholders --manifest "$source_manifest" --out "$data/master/source"
