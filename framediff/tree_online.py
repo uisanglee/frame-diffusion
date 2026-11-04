@@ -229,7 +229,7 @@ def target_pool(rows, manifest=None, cache_dir=None, observation_size=384, diagn
         for key in ('page_id','view'):
             if key in row:target[key]=row[key]
         for key in ('predicted_target_elements','parser_provenance','parser_sha','css_owners',
-                    'target_declaration_state','normalization_contract','visual_geometry_contract'):
+                    'target_declaration_state','normalization_contract','visual_geometry_contract','inspection_cache_dir'):
             if key in row: target[key] = row[key]
         target.update(id=page_id,target_html=str(Path(html).resolve()),corruption_observation_size=observation_size)
         clean_state=row.get('target_declaration_state')
@@ -247,11 +247,12 @@ def target_pool(rows, manifest=None, cache_dir=None, observation_size=384, diagn
     browser = None
     inspected = 0
     cache_hits = 0
-    fingerprint = inspection_fingerprint() if cache_dir is not None else None
+    fingerprint = inspection_fingerprint() if cache_dir is not None or any(
+        t.get('inspection_cache_dir') for t in targets.values()) else None
     try:
         for page_id, target in list(targets.items()):
             html = Path(target['target_html']).read_text()
-            with inspection_cache_entry(cache_dir, target, html, fingerprint) as entry:
+            with inspection_cache_entry(target.get('inspection_cache_dir',cache_dir), target, html, fingerprint) as entry:
                 state = None; error = None; cached = False;metadata={}
                 if entry is not None and entry.exists():
                     try:

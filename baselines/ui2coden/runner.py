@@ -32,7 +32,9 @@ and spacing. Keep existing resource URLs and data URIs unchanged.
 
 
 def polishing_prompt(html, viewport, protocol):
+    from framediff.webui_placeholders import CONTRACT as IMAGE_CONTRACT, PROMPT as IMAGE_PROMPT
     return (COMPACT_HTML_PROMPT + viewport_instruction(viewport) + PROMPT +
+            (IMAGE_PROMPT if IMAGE_CONTRACT in html or any(f'rick{i}.jpg' in html for i in range(1,6)) else '') +
             (LAYOUT if protocol == 'layout' else '') + '\nCurrent HTML:\n' + html)
 
 
@@ -235,6 +237,12 @@ def run_page(record, folder, rounds, runtime, browser, precision='4bit-nf4'):
                 answer, stats = runtime.generate(record['screenshot'], png, html)
                 (folder / f'answer-{step}.txt').write_text(answer)
                 repaired = html_answer(answer)
+                from framediff.webui_placeholders import CONTRACT as IMAGE_CONTRACT
+                if IMAGE_CONTRACT in html:
+                    from bs4 import BeautifulSoup
+                    marked=BeautifulSoup(repaired,'html.parser')
+                    marked.html['data-tuide-image-contract']=IMAGE_CONTRACT
+                    repaired=str(marked)
                 # Validate renderability before adopting. No target scoring/rollback.
                 browser.snapshot(repaired, record['viewport'], folder / f'output-{step}.png', 2048)
                 output = folder / f'output-{step}.html'

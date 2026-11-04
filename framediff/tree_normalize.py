@@ -47,6 +47,8 @@ def _prepare_page(task, persist_seed=True, clean_relabel_source=False):
     if clean_relabel_source and persist_seed:
         raise ValueError('Clean relabel source does not generate a seed corruption')
     args, out, split, index, page_id, row, pages = task
+    clean_only=getattr(args,'clean_targets_only',False)
+    if clean_only:persist_seed=False
     latest=getattr(args,'latest_visual_labels',False)
     expected_contract=VISUAL_GEOMETRY_CONTRACT if latest else row.get('visual_geometry_contract')
     if row.get('lazy_contract'):
@@ -57,6 +59,7 @@ def _prepare_page(task, persist_seed=True, clean_relabel_source=False):
             settings.update(visual_geometry_contract=VISUAL_GEOMETRY_CONTRACT,
                             detector_label_contract=DETECTOR_LABEL_CONTRACT)
         contract=CONTRACT
+        if clean_only:raise ValueError('Clean-target preparation requires eagerly rendered pages')
         new={**row,'lazy_settings':settings,'normalization_contract':contract,
              'teacher_strategy':css_owners.CONTRACT}
         if latest:new['visual_geometry_contract']=expected_contract
@@ -163,6 +166,13 @@ def _prepare_page(task, persist_seed=True, clean_relabel_source=False):
                     # inspected clean state without rendering a throwaway seed.
                     new={**seed,**pool[0], 'id':seed['id'],
                          'declaration_state':copy.deepcopy(pool[0]['target_declaration_state'])}
+            if clean_only:
+                new.update(clean_target_only=True,teacher_strategy=css_owners.CONTRACT,
+                           replacement_edit=None)
+            # Preserve the inspected cache location across subset manifests,
+            # model scales and modalities; entries still validate HTML/code hashes.
+            if clean_only:
+                new['inspection_cache_dir']=str((out/'.online-target-cache').resolve())
             new.update(split=split,normalization_stats=stats,
                        normalization_contract=CONTRACT)
             page={k:pages[page_id][k] for k in ('id','group','split','source_sha','viewport')}
@@ -176,6 +186,9 @@ def _prepare_page(task, persist_seed=True, clean_relabel_source=False):
             if persist_seed:
                 page['initial_html']=str(initial)
                 assets={str(p):digest(p) for p in (normalized,folder/'after.png',initial,png)}
+                write_json(cache,{'source_sha':signature,'row':new,'page':page,'assets':assets})
+            elif clean_only:
+                assets={str(p):digest(p) for p in (normalized,folder/'after.png')}
                 write_json(cache,{'source_sha':signature,'row':new,'page':page,'assets':assets})
         write_json(folder/'page-status.json',{'id':page_id,'status':'kept',
                    'normalization_stats':new.get('normalization_stats')})
@@ -217,6 +230,7 @@ def prepare(args):
         max_css_owners=args.max_css_owners,observation_size=args.observation_size,
         max_pixel_mae=args.max_pixel_mae,max_box_error=args.max_box_error,
         corruption=ONLINE_CONTRACT,sampling=SAMPLING_CONTRACT)
+    if getattr(args,'clean_targets_only',False):config['clean_targets_only']=True
     if getattr(args,'latest_visual_labels',False):
         config['visual_geometry_contract']=VISUAL_GEOMETRY_CONTRACT
         config['visual_labels_sha']=digest(Path(__file__).with_name('visual.py'))

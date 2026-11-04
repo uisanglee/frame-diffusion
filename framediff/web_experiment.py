@@ -177,6 +177,9 @@ def prepare(args):
     settings = {k:v for k,v in vars(args).items() if k not in ('resume','out','retry_failed')}
     if not use_placeholder:
         settings['prompt_asset_contract'] = 'webui-no-benchmark-placeholder-v1'
+        from .webui_placeholders import CONTRACT as IMAGE_CONTRACT
+        if any(i.get('html') and IMAGE_CONTRACT in Path(i['html']).read_text() for i in items):
+            settings['prompt_asset_contract']=IMAGE_CONTRACT
     if args.backend == 'qwen' and not args.four_bit:
         settings['qwen_memory_contract'] = vlm.QWEN_BF16_MEMORY_CONTRACT
     from .html_generation import CONTRACT
@@ -218,6 +221,9 @@ def prepare(args):
         if task.endswith('html'):
             from .html_generation import PROMPT, viewport_instruction
             base_prompt = PROMPT + viewport_instruction(viewport) + base_prompt
+            from .webui_placeholders import CONTRACT as IMAGE_CONTRACT, PROMPT as IMAGE_PROMPT
+            if item.get('html') and IMAGE_CONTRACT in Path(item['html']).read_text():
+                base_prompt += '\n' + IMAGE_PROMPT
         def generate(attempt, feedback):
             name = label if attempt==0 else f'{label}.retry-{attempt}'
             c.seed = int.from_bytes(hashlib.sha256(f'{args.seed}|{record["id"]}|{name}'.encode()).digest()[:4], 'big') if c.temperature else args.seed
@@ -244,7 +250,13 @@ def prepare(args):
         def validate_answer(raw):
             if last_generation.get('generation_stop_reason') == 'repeated_css_generation':
                 raise ValueError('Repeated CSS generation stopped early; use compact shared CSS rules and complete the HTML document')
-            return validator(raw)
+            answer=validator(raw)
+            if task.endswith('html') and settings.get('prompt_asset_contract')=='webui-five-color-images-v1':
+                from bs4 import BeautifulSoup
+                soup=BeautifulSoup(answer,'html.parser')
+                soup.html['data-tuide-image-contract']='webui-five-color-images-v1'
+                answer=str(soup)
+            return answer
         return validated_generation(generate,validate_answer,retries)
 
     # Load outside page timers, consistently excluding one-time model startup.

@@ -79,6 +79,8 @@ class HtmlBrowser(Browser):
 
     def load(self, html, viewport):
         from .explicit_html import reject_flat_html
+        from .webui_placeholders import embed_placeholders
+        html=embed_placeholders(html)
         reject_flat_html(html)
         # Meta refresh can navigate the main frame while set_content/evaluate is
         # running. Dataset HTML is an untrusted static snapshot, so disable it.

@@ -15,7 +15,8 @@ def test_retired_protocols_cannot_enter_current_training():
         with pytest.raises(ValueError,match='Retired'):
             target_pool([{'lazy_contract':'old','lazy_settings':{key:True}}])
 
-def test_preparation_online_training_resume_and_rollout(tmp_path,monkeypatch):
+@pytest.mark.parametrize('clean_targets',[False,True])
+def test_preparation_online_training_resume_and_rollout(tmp_path,monkeypatch,clean_targets):
     import torch
     from framediff.cli import main
     from framediff.ir import write_jsonl,read_jsonl
@@ -31,12 +32,21 @@ def test_preparation_online_training_resume_and_rollout(tmp_path,monkeypatch):
     detection=list(read_jsonl(rendered/'detector-train.jsonl'))[0]
     assert detection['visual_geometry_contract']==VISUAL_GEOMETRY_CONTRACT
     assert all('owner_id' in e for e in detection['elements'] if e['label']==1)
-    prepare=['visual-tree-normalize','--rendered',str(rendered),'--out',str(labels),'--resume']
+    prepare=['visual-tree-normalize','--rendered',str(rendered),'--out',str(labels),'--resume','--observation-size','32']
+    if clean_targets:prepare+=['--clean-targets-only']
     main(prepare)
+    if clean_targets:
+        target=list(read_jsonl(labels/'policy-train.jsonl'))[0]
+        assert target['clean_target_only'] and target['replacement_edit'] is None
+        assert not list(labels.glob('normalized-pages/*/*/initial.html'))
+        assert not detection.get('lazy_contract') and not target.get('lazy_contract')
+        def unexpected(*a,**kw):raise AssertionError('Repeated normalization/candidate inspection')
+        monkeypatch.setattr('framediff.tree_normalize.convert',unexpected)
+        monkeypatch.setattr('framediff.tree_online.inspect_candidates',unexpected)
     saved=(labels/'policy-train.jsonl').read_bytes()
     main(prepare)
     assert saved==(labels/'policy-train.jsonl').read_bytes()
-    main(['visual-tree-freeze','--rendered',str(labels),'--out',str(frozen),'--max-noise','1','--resume'])
+    main(['visual-tree-freeze','--rendered',str(labels),'--out',str(frozen),'--max-noise','1','--resume','--observation-size','32'])
     common=['visual-tree-train','--train',str(frozen/'policy-train.jsonl'),'--val',str(frozen/'policy-val.jsonl'),
         '--out',str(tmp_path/'run'),'--stylesheets','--mode','screenshot','--online-corruption',
         '--online-workers','1','--online-prefetch','1','--device','cpu','--no-pretrained',
@@ -81,6 +91,7 @@ def test_preparation_online_training_resume_and_rollout(tmp_path,monkeypatch):
     main([*stage2,'--steps','1','--predicted-targets','--init-checkpoint',str(tmp_path/'abstract-stage1/best.pt')])
     trained=torch.load(tmp_path/'abstract-stage2/last.pt',weights_only=True)
     assert trained['config']['safe_sizes'] and trained['config']['action_contract']==OWNER_CONTRACT
+    if clean_targets:monkeypatch.undo()
     test=list(read_jsonl(frozen/'policy-test.jsonl'))[0]
     # Executor/evaluator test: inject the known single edit, not a quality claim
     # about the two-step smoke-trained checkpoint.

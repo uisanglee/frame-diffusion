@@ -443,6 +443,10 @@ def train(args):
             raise ValueError('Invalid declaration state node count')
         if any(len(p)!=len(cfg.fields) for p in row['declaration_state']):
             raise ValueError('CSS field schema changed; reprepare six-field size/margin labels')
+        if row.get('clean_target_only'):
+            if row['split']!='train' or not args.online_corruption or not cfg.stylesheets:
+                raise ValueError('Clean targets require online stylesheet training; freeze val/test first')
+            continue
         tok.encode(row['replacement_edit'],node_count)
         from .explicit_html import check_record_edit
         check_record_edit(row,row['replacement_edit'])
