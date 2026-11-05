@@ -158,7 +158,7 @@ printf '%s|%s|%s|%s|%s|%s\\n' "$VLM_SPECS" "$CUDA_VISIBLE_DEVICES" "$MAX_NEW_TOK
 
 def test_official_roster_contains_only_requested_models():
     from pathlib import Path
-    expected = ['llava-next-7b', 'glm4v-9b-thinking', 'design2code-18b', 'ui2coden']
+    expected = ['llava-next-7b', 'glm4v-9b-thinking', 'websight-8b', 'ui2coden']
     assert [alias for alias, _ in MODELS] == expected
     for script in ('run_paper_4090_vlms.sh', 'run_paper_pilot10_bf16_2gpu.sh', 'run_d2c_pilot10_bf16_2gpu.sh'):
         line = next(s for s in (Path('scripts')/script).read_text().splitlines() if s.startswith('export VLM_SPECS='))

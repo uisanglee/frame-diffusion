@@ -131,6 +131,8 @@ from the unmerged single-GPU path. This adaptation is recorded in metadata;
 it is not claimed to be a bitwise-identical reproduction. See
 `baselines/design2code/README.md` for CPU RAM and checkpoint storage requirements.
 
-WebSight startup (including first weight download) has a separate `WEBSIGHT_STARTUP_TIMEOUT=7200` second limit. `WEBSIGHT_TIMEOUT=1800` continues to limit each generation request. Increase the startup limit for slow downloads; resuming preserves the Hugging Face download cache and completed experiment results.
+WebSight startup (including first weight download) has a separate `WEBSIGHT_STARTUP_TIMEOUT=86400` second limit. `WEBSIGHT_TIMEOUT=1800` continues to limit each generation request. Increase the startup limit for slow downloads; resuming preserves the Hugging Face download cache and completed experiment results.
 
 Design2Code-18B downloads its checkpoint and extracts the ZIP in the parent process before starting the SAT worker. `DESIGN2CODE_TIMEOUT` does not limit this download/extraction; it limits worker readiness and generation waits. Stage logs distinguish these operations. Network request timeouts can still occur independently.
+
+The default paper roster is LLaVA-NeXT-7B, GLM-4.1V-9B-Thinking, WebSight VLM-8B, and UI2CodeN. Design2Code-18B remains available only through explicit selection. WebSight has no self-revision stage; its saved Initial can be polished by UI2CodeN or repaired by TUIDE when enabled. Its first download/model startup may take up to 24 hours by default; per-request inference retains the 30-minute limit.

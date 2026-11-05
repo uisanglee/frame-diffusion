@@ -22,7 +22,7 @@ fi
 export MAX_NEW_TOKENS=$output_budget
 export UI2CODEN_MAX_NEW_TOKENS=$MAX_NEW_TOKENS
 echo "Dataset=${WEB_DATASET:-design2code}, Initial/Self Revision/UI2CodeN max_new_tokens=$MAX_NEW_TOKENS"
-specs=${VLM_SPECS:-'llava-next-7b|hf|llava-hf/llava-v1.6-mistral-7b-hf|bf16,glm4v-9b-thinking|hf|zai-org/GLM-4.1V-9B-Thinking|bf16,design2code-18b|design2code-sat|SALT-NLP/Design2Code-18B-v0|bf16,ui2coden|hf|zai-org/UI2Code_N|bf16'}
+specs=${VLM_SPECS:-'llava-next-7b|hf|llava-hf/llava-v1.6-mistral-7b-hf|bf16,glm4v-9b-thinking|hf|zai-org/GLM-4.1V-9B-Thinking|bf16,websight-8b|websight|HuggingFaceM4/VLM_WebSight_finetuned|bf16,ui2coden|hf|zai-org/UI2Code_N|bf16'}
 IFS=',' read -ra entries <<< "$specs"
 # Fail before generating any pages if a selected legacy runtime is missing.
 for selected_entry in "${entries[@]}"; do

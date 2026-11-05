@@ -11,7 +11,7 @@ from .ir import read_jsonl
 
 DATASETS = [('webui', 'WebUI'), ('design2code', 'Design2Code'), ('design2code-hard', 'Design2Code-Hard')]
 MODELS = [('llava-next-7b', 'LLaVA-NeXT-7B'), ('glm4v-9b-thinking', 'GLM-4.1V-9B'),
-          ('design2code-18b', 'Design2Code-18B-v0'),
+          ('websight-8b', 'WebSight VLM-8B'),
           ('ui2coden', r'UI2Code$^{n}$')]
 # These public checkpoints have an image-only drafting protocol, not a chat
 # protocol taking current HTML and two images for self-revision.
@@ -20,7 +20,7 @@ NO_SELF_REVISION_ALIASES = frozenset({'websight-8b', 'design2code-18b'})
 LEGACY_MODELS = [('qwen3vl8b', 'Qwen3-VL-8B'), ('glm4v-9b-thinking', 'GLM-4.1V-9B'),
                  ('gemma3-12b', 'Gemma-3-12B'), ('llava-next-7b', 'LLaVA-NeXT-7B'),
                  ('pixtral-12b', 'Pixtral-12B'), ('ui2coden', r'UI2Code$^{n}$')]
-MODEL_LABELS = dict([*LEGACY_MODELS, ('websight-8b', 'WebSight VLM-8B'), *MODELS])
+MODEL_LABELS = dict([*LEGACY_MODELS, ('design2code-18b', 'Design2Code-18B-v0'), *MODELS])
 
 METRICS = ('official_position', 'official_clip', 'dom_box_iou', 'improved_page_rate')
 

@@ -88,7 +88,7 @@ class WebSightRuntime:
     """One long-lived model process; WEBSIGHT_PYTHON may select a legacy venv."""
     def __init__(self, args):
         self.timeout = float(os.environ.get('WEBSIGHT_TIMEOUT', '1800'))
-        self.startup_timeout = float(os.environ.get('WEBSIGHT_STARTUP_TIMEOUT', '7200'))
+        self.startup_timeout = float(os.environ.get('WEBSIGHT_STARTUP_TIMEOUT', '86400'))
         import math
         for name, value in [('WEBSIGHT_TIMEOUT', self.timeout), ('WEBSIGHT_STARTUP_TIMEOUT', self.startup_timeout)]:
             if not math.isfinite(value) or value <= 0:
