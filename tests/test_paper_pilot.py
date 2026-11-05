@@ -38,7 +38,8 @@ def test_ui2coden_rerun_aggregates_previous_methods(tmp_path,with_tuide):
     assert 'run_paper_experiments.sh' in bashcalls[-1]
 
 
-def test_d2c_only_pilot_freezes_inputs(tmp_path, monkeypatch):
+@pytest.mark.parametrize('count', [3, 10])
+def test_d2c_only_pilot_freezes_inputs(tmp_path, monkeypatch, count):
     script=Path('scripts/run_d2c_pilot10_bf16_2gpu.sh').read_text()
     selection=script.split("<<'PY'\n",1)[1].split('\nPY\n',1)[0]
     roots=[tmp_path/'raw-d2c',tmp_path/'raw-hard']
@@ -47,11 +48,11 @@ def test_d2c_only_pilot_freezes_inputs(tmp_path, monkeypatch):
         (root/'rick.jpg').write_bytes(b'placeholder')
     rows=[dict(id=f'{i:03d}') for i in reversed(range(12))]
     monkeypatch.setattr(matrix,'check_sources',lambda **kw: rows.copy())
-    monkeypatch.setattr('sys.argv',['pilot',*map(str,roots),str(tmp_path/'out')])
+    monkeypatch.setattr('sys.argv',['pilot',*map(str,roots),str(tmp_path/'out'),str(count)])
     exec(selection,{})
     for name in ('design2code','design2code-hard'):
         path=tmp_path/'out/inputs'/f'{name}.jsonl'
-        assert [json.loads(line)['id'] for line in path.read_text().splitlines()]==[f'{i:03d}' for i in range(10)]
+        assert [json.loads(line)['id'] for line in path.read_text().splitlines()]==[f'{i:03d}' for i in range(count)]
     assert not (tmp_path/'out/inputs/webui.jsonl').exists()
     exec(selection,{})
     rows[-1]['changed']=True
