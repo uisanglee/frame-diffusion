@@ -497,4 +497,38 @@ Warm-up 후 각 페이지의 backend 실행 순서를 무작위화하고 각 반
 - `tests/`: mutation·loss·누수 방지·adapter·proxy/browser parity.
 - `environment.yml`, `environment-4090.yml`: CPU/개발 및 4090 학습용 Conda bootstrap 환경.
 
+## WebUI 색상 이미지 전처리의 최종 분할
+
+`scripts/prepare_webui_color_images.sh`는 이미지 치환·Detector 렌더링·정규화 결과를
+`data/new/master`에 캐시한 뒤, 최종 사용 가능한 고유 페이지를 seed 42로 8:1:1 분할한다.
+같은 `page_id`의 성공한 해상도는 모두 같은 split에 들어간다. 실패한 해상도만 제외하며,
+모든 해상도가 실패한 페이지는 전체에서 제외한다. N이 10의 배수가 아니면 Val/Test는
+각각 `floor(N/10)`, Train은 나머지다. 이는 페이지 단위 분할이며 도메인 독립 분할은 아니다.
+기존 도메인은 `source_group`, 원래 split은 `source_split`에 남긴다.
+
+이미 완료한 원본 렌더링·이미지 치환·정규화·후보 검사 및 호환되는 고정 손상 샘플을
+재사용한다. 새 Val/Test 페이지에 고정 손상 샘플이 없을 때만 추가 생성한다. 이때 실패한
+해상도/페이지를 제외하고 다시 할당하여 최종 사용 가능한 페이지 수에 맞춰 비율을 맞춘다.
+Train은 정규화된 clean target으로 온라인 손상을 생성한다. 과거 split 이름이 자산 폴더에
+남아 있어도 최종 manifest의 `split`이 학습·평가의 기준이다.
+
+전체 전처리 또는 중단 후 재개:
+
+```bash
+COLOR_DATA=data/new PREPARE_WORKERS=4 bash scripts/prepare_webui_color_images.sh
+```
+
+`master/labels` 정규화까지 완료됐다면 이미지 처리와 렌더링 단계를 건너뛰고 최종 분할만 실행:
+
+```bash
+python -m framediff.webui_final_split --data data/new --size 7000 --seed 42 --workers 4
+```
+
+학습 입력은 `data/new/7000/rendered`와 `data/new/7000/css`에 저장한다. `7000`은 기존
+경로를 유지하는 이름이며, 실제 고유 페이지 수와 해상도별 렌더링 수는
+`data/new/split-report.json`에 기록한다. 7,000개를 자동으로 보충하지 않는다.
+기존 공개 manifest는 변경 시 `data/new/split-history`에 백업하며 master 자산은 유지한다.
+원래 단계의 탈락 기록은 master의 보고서에 보존한다. 분할이 달라졌으므로 기존 분할에서
+학습한 체크포인트를 재개하거나 새 Test의 성능으로 보고하지 말고 새 학습 출력 폴더를 사용한다.
+
 배경 논문: [Diffusion On Syntax Trees For Program Synthesis, ICLR 2025](https://proceedings.iclr.cc/paper_files/paper/2025/hash/666dd0d92a64396e753c691db93493d4-Abstract-Conference.html). 이 구현의 차이와 실측 검증은 `docs/VALIDATION.md`에 기록합니다.

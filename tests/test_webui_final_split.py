@@ -1,0 +1,108 @@
+from pathlib import Path
+
+import pytest
+
+from framediff import webui_final_split as split
+from framediff.ir import read_json,read_jsonl,write_json,write_jsonl
+from framediff.visual_data import validate_splits
+
+
+def corpus(root,n=20):
+    master=root/'master';source=[];tables={s:{k:[] for k in kinds} for s,kinds in
+        [('rendered',('pages','policy','detector')),('labels',('pages','policy'))]}
+    for i in range(n):
+        for v in range(2):
+            view=f'p{i}/v{v}';folder=master/'assets'/f'p{i}'/f'v{v}';folder.mkdir(parents=True)
+            html=folder/'target.html';html.write_text(f'<html><body>{view}</body></html>')
+            image=folder/'target.png';image.write_bytes(b'fixture-image')
+            row=dict(id=view,page_id=f'p{i}',view=f'v{v}',group='domain:shared.example',
+                split='train',source_sha=f'sha-{i}',html=str(html),screenshot=str(image),viewport=[320,240])
+            source.append(row)
+            for stage in tables:tables[stage]['pages'].append(row)
+            clean=dict(row,id=view+'/seed',target_html=str(html),target_image=str(image),clean_target_only=True,
+                       visual_geometry_contract='fixture',teacher_strategy='fixture')
+            tables['labels']['policy'].append(clean)
+            tables['rendered']['policy'].append(dict(clean,id=view+'/clean'))
+            tables['rendered']['detector'].append(dict(clean,id=view+'/clean',image=str(image)))
+    write_jsonl(master/'source/manifest.jsonl',source)
+    for stage,kinds in tables.items():
+        for kind,rows in kinds.items():
+            for s in split.SPLITS:write_jsonl(master/stage/f'{kind}-{s}.jsonl',rows if s=='train' else [])
+    return master
+
+
+def fake_sampler(monkeypatch,fail=()):
+    from framediff import tree_freeze
+    calls=[]
+    monkeypatch.setattr(split,'page_map',lambda fn,tasks,workers:map(fn,tasks))
+    monkeypatch.setattr(tree_freeze,'_inspect_page',lambda task:([
+        dict(task[0],id=task[0]['id'].rsplit('/',1)[0])],None))
+    class Sampler:
+        def __init__(self,rows,*a,**kw):self.row=rows[0]
+        def generate(self,index):
+            calls.append(self.row['id'])
+            if self.row['id'] in fail:raise ValueError('fixture generation failure')
+            return dict(self.row,id=self.row['id']+f'/online-{index}',
+                current_html_text='<html>Corrupted</html>',current_image=b'png',clean_target_only=False)
+        def close(self):pass
+    monkeypatch.setattr(tree_freeze,'OnlineSampler',Sampler)
+    return calls
+
+
+def test_page_split_reuses_assets_and_rebalances_failures(tmp_path,monkeypatch):
+    master=corpus(tmp_path)
+    original={str(p):p.read_bytes() for p in master.rglob('*') if p.is_file()}
+    initial,_=split.allocate([f'p{i}' for i in range(20)],42)
+    failed_page=next(p for p,s in initial.items() if s=='test')
+    calls=fake_sampler(monkeypatch,fail=[failed_page+'/v0',failed_page+'/v1'])
+    result=split.publish(tmp_path,workers=2)
+    assert result['unique_pages']==19
+    assert result['sizes']['7000']=={'train':17,'val':1,'test':1}
+    all_rows=[]
+    for s in split.SPLITS:
+        pages=list(read_jsonl(tmp_path/f'7000/css/pages-{s}.jsonl'))
+        rows=list(read_jsonl(tmp_path/f'7000/css/policy-{s}.jsonl'));all_rows+=rows
+        assert len(pages)==2*result['sizes']['7000'][s]
+        assert {r['page_id'] for r in pages}=={r['page_id'] for r in rows}
+        assert all(r['split']==s and r['group']=='webui-page:'+r['page_id'] for r in rows)
+        assert all(r['source_group']=='domain:shared.example' for r in rows)
+        assert all(r['clean_target_only']==(s=='train') for r in rows)
+        if s!='train':assert all(Path(r['initial_html']).is_file() for r in pages)
+        detector=list(read_jsonl(tmp_path/f'7000/rendered/detector-{s}.jsonl'))
+        assert {r['page_id'] for r in detector}=={r['page_id'] for r in pages}
+    validate_splits(all_rows)
+    assert failed_page not in {r['page_id'] for r in all_rows}
+    assert all(Path(p).read_bytes()==content for p,content in original.items())
+    previous_calls=list(calls)
+    assert split.publish(tmp_path,workers=2)==result
+    assert calls==previous_calls  # Both success and failure checkpoints reused.
+
+
+def test_old_heldout_corruptions_reused_and_old_manifests_backed_up(tmp_path,monkeypatch):
+    from framediff.tree_online import ONLINE_CONTRACT,asset_signatures
+    import hashlib
+    master=corpus(tmp_path)
+    assignment,_=split.allocate([f'p{i}' for i in range(20)],42)
+    calls=fake_sampler(monkeypatch)
+    write_json(master/'css/config.json',dict(corruption_contract=ONLINE_CONTRACT,
+        seed=90210,max_noise=4,samples=1,observation_size=384))
+    for row in read_jsonl(master/'labels/policy-train.jsonl'):
+        if assignment[row['page_id']]=='train':continue
+        target=dict(row,id=row['id'].rsplit('/',1)[0])
+        folder=master/'css/test'/hashlib.sha256(target['id'].encode()).hexdigest()
+        folder.mkdir(parents=True);html=folder/'0.html';html.write_text('OLD');png=folder/'0.png';png.write_bytes(b'old')
+        saved=dict(row,id=target['id']+'/online-0',current_html=str(html),current_image=str(png),clean_target_only=False)
+        write_json(folder/'record.json',dict(signature=asset_signatures([target]),rows=[saved]))
+    write_jsonl(tmp_path/'7000/css/pages-test.jsonl',[{'old':True}])
+    split.publish(tmp_path)
+    assert calls==[]
+    assert list((tmp_path/'split-history').glob('*/7000/css/pages-test.jsonl'))
+    assert all(Path(r['current_html']).read_text()=='OLD'
+               for s in ('val','test') for r in read_jsonl(tmp_path/f'7000/css/policy-{s}.jsonl'))
+
+
+def test_allocation_deterministic_and_small_pool_rejected():
+    pages=[str(i) for i in range(100)]
+    assert split.allocate(pages,42)==split.allocate(reversed(pages),42)
+    assert split.allocate(pages,42)[1]==dict(train=80,val=10,test=10)
+    with pytest.raises(ValueError,match='At least 10'):split.allocate(pages[:9],42)

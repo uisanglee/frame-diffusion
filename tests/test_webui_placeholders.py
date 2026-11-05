@@ -125,24 +125,30 @@ def test_color_script_prepares_train_before_training(tmp_path,monkeypatch):
     from framediff.ir import write_jsonl,read_jsonl
     from framediff.tree_online import target_pool
     source=[]
-    for split in ('train','val','test'):
-        html=tmp_path/f'{split}.html'
+    for index in range(10):
+        split='train' if index<8 else ('val' if index==8 else 'test')
+        page=f'page-{index}'
+        html=tmp_path/f'{page}.html'
         html.write_text(f'''<html><body style="margin:0"><img src="{uri(100,50)}">
-          <h1>{split}</h1><div style="width:150px;height:60px;background:red">One</div>
+          <h1>{page}</h1><div style="width:150px;height:60px;background:red">One</div>
           <div style="width:180px;height:60px;background:blue">Two</div></body></html>''')
-        source.append(dict(id=split,page_id=split,group=split,split=split,html=str(html),viewport=[400,300]))
+        source.append(dict(id=page,page_id=page,group=page,split=split,html=str(html),viewport=[400,300]))
     manifest=tmp_path/'source.jsonl';write_jsonl(manifest,source)
     output=tmp_path/'prepared'
     env={**os.environ,'SOURCE_MANIFEST':str(manifest),'COLOR_DATA':str(output),
-         'DATA_SIZE':'3','PREPARE_WORKERS':'1'}
+         'DATA_SIZE':'10','PREPARE_WORKERS':'1'}
     root=Path(__file__).resolve().parents[1]
+    previous_assets=None
     for _ in range(2):
         result=subprocess.run(['bash','scripts/prepare_webui_color_images.sh'],cwd=root,env=env,
-                              capture_output=True,text=True,timeout=120)
+                              capture_output=True,text=True,timeout=180)
         assert result.returncode==0,result.stdout+result.stderr
-    detector=list(read_jsonl(output/'3/rendered/detector-train.jsonl'))
-    train=list(read_jsonl(output/'3/css/policy-train.jsonl'))
-    assert len(detector)==len(train)==1
+        assets={str(p):p.stat().st_mtime_ns for p in (output/'master').rglob('*') if p.suffix in ('.png','.html')}
+        if previous_assets is not None:assert assets==previous_assets
+        previous_assets=assets
+    detector=list(read_jsonl(output/'10/rendered/detector-train.jsonl'))
+    train=list(read_jsonl(output/'10/css/policy-train.jsonl'))
+    assert len(detector)==len(train)==8
     assert detector[0]['elements'] and Path(detector[0]['image']).is_file()
     assert not detector[0].get('lazy_contract') and not train[0].get('lazy_contract')
     assert train[0]['clean_target_only'] and train[0]['visible_candidates']
@@ -152,9 +158,9 @@ def test_color_script_prepares_train_before_training(tmp_path,monkeypatch):
     def unexpected(*a,**kw):raise AssertionError('Repeated candidate inspection')
     monkeypatch.setattr('framediff.tree_online.inspect_candidates',unexpected)
     diagnostics=[]
-    pool=target_pool(train,output/'3/css/pages-train.jsonl',cache_dir=tmp_path/'new-run-cache',
+    pool=target_pool(train,output/'10/css/pages-train.jsonl',cache_dir=tmp_path/'new-run-cache',
                      diagnostics=diagnostics)
     assert pool and diagnostics[0]['cache_hit']
     for split in ('val','test'):
-        row=list(read_jsonl(output/f'3/css/policy-{split}.jsonl'))[0]
+        row=list(read_jsonl(output/f'10/css/policy-{split}.jsonl'))[0]
         assert row['replacement_edit'] is not None and Path(row['current_image']).is_file()
