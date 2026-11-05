@@ -5,6 +5,8 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 root=$(cd "$here/../.." && pwd)
 cd "$root"
 [[ $# == 2 ]] || { echo 'Usage: run_4090.sh INPUT.jsonl OUTPUT_DIR' >&2; exit 2; }
+source "$root/scripts/experiment_log.sh"
+experiment_log_init "$2"
 python_bin="$here/.venv/bin/python"
 [[ -x "$python_bin" ]] || { echo 'Run setup_4090.sh first.' >&2; exit 2; }
 export CUDA_VISIBLE_DEVICES="${GPU:-${CUDA_VISIBLE_DEVICES:-0}}"
@@ -23,8 +25,8 @@ if output <= 0 or context < 0 or (context and output >= context):
     raise SystemExit('UI2CodeN requires positive MAX_NEW_TOKENS; MAX_CONTEXT=0 uses model limit, otherwise must exceed output budget.')
 PY
 # No GPU workers/prefetch. The model process exits before metric models are loaded.
-"$python_bin" "$here/runner.py" "${options[@]}"
+run_logged "UI2CodeN polishing (rounds=${ROUNDS:-3}, cached rounds reused)" "$python_bin" "$here/runner.py" "${options[@]}"
 evaluation=(--data "$2/results.jsonl" --out "$2/evaluation" --resume
   --max-nodes "${MAX_NODES:-2048}")
 if [[ -n ${OFFICIAL_REPO:-} ]]; then evaluation+=(--official-repo "$OFFICIAL_REPO"); fi
-"${EVALUATION_PYTHON:-$python_bin}" -m framediff web-evaluate "${evaluation[@]}"
+run_logged "UI2CodeN quality evaluation" "${EVALUATION_PYTHON:-$python_bin}" -m framediff web-evaluate "${evaluation[@]}"

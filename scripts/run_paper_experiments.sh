@@ -6,6 +6,9 @@ if [[ $# -ne 3 ]]; then
   exit 2
 fi
 root=$1;output=$2;train=$3
+source "$(dirname "${BASH_SOURCE[0]}")/experiment_log.sh"
+experiment_log_init "$output"
+experiment_banner START "Dataset experiment"
 # Dataset protocol takes precedence over old shell exports. The Hard dataset
 # also uses WEB_DATASET=design2code and is distinguished by its input/output root.
 case "${WEB_DATASET:-design2code}" in
@@ -53,7 +56,7 @@ export RUN_TUIDE="$run_tuide"
 : "${OFFICIAL_REPO:?Set OFFICIAL_REPO to the official Design2Code repository}"
 source_check=(--root "$root")
 [[ -n "${PAGE_MANIFEST:-}" ]] && source_check=(--manifest "$PAGE_MANIFEST")
-python -m framediff.paper_matrix check "${source_check[@]}" --dataset "${WEB_DATASET:-design2code}" \
+run_logged "Input and metric checks" python -m framediff.paper_matrix check "${source_check[@]}" --dataset "${WEB_DATASET:-design2code}" \
   --webui-view "${WEBUI_VIEW:-default_1280-720}" --limit "${PAGE_LIMIT:-0}" --official-repo "$OFFICIAL_REPO"
 evaluation_python=$(command -v python)
 ui_revision=${MODEL_REVISION:-main}
@@ -133,6 +136,9 @@ PYREV
     seed_output="$output/$alias/seeds/$seed"
     abstract=0
     [[ "$run_ablation" == 1 && "$alias" == "$representative" && "$seed" == "${seed_entries[0]}" ]] && abstract=1
+    export EXPERIMENT_MODEL_LABEL="$alias" EXPERIMENT_SEED_LABEL="$seed"
+    EXPERIMENT_ACTIVE_STAGE="Model experiment: $alias"
+    experiment_banner START "Model experiment"
     echo "Running $alias initial seed=$seed temperature=$initial_temperature ($backend, $model, $precision), max_new_tokens=$MAX_NEW_TOKENS, abstract ablation=$abstract"
     CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} WEB_DATASET="${WEB_DATASET:-design2code}" SELF_REVISION_PROTOCOL="$self_revision_protocol" REVISION_ROUNDS="$rounds" VLM_RETRIES="${VLM_RETRIES:-0}" \
       TARGET_IMAGE_SOURCE="${TARGET_IMAGE_SOURCE:-reference-render}" REFERENCE_MANIFEST="$shared_target_manifest" \
@@ -147,6 +153,7 @@ PYREV
       GPU=${CUDA_VISIBLE_DEVICES:-0} ROUNDS="$revision_rounds" LIMIT=0 MODEL_REVISION="$ui_revision" EVALUATION_PYTHON="$evaluation_python" \
         bash baselines/ui2coden/run_4090.sh "$seed_output/prepare/prepared.jsonl" "$seed_output/ui2coden"
     fi
+    experiment_banner END "Model experiment"
   done
 done
 aliases_csv=$(IFS=,; echo "${aliases[*]}")
@@ -154,12 +161,14 @@ suite_options=(--root "$output" --aliases "$aliases_csv" --representative "$repr
 [[ "$run_ablation" == 0 ]] && suite_options+=(--skip-ablation)
 [[ "$run_ui2coden" == 1 ]] && suite_options+=(--include-ui2coden --ui2coden-rounds "$revision_rounds")
 [[ "$run_tuide" == 0 ]] && suite_options+=(--skip-tuide)
-python -m framediff.paper_suite "${suite_options[@]}"
+run_logged "Dataset tables" python -m framediff.paper_suite "${suite_options[@]}"
 echo "Completed ${#entries[@]} VLM(s). Paper tables: $output/paper/README.md"
 
 # Read-only failure analysis after metric evaluation; excluded from repair timing.
 if [[ "$run_tuide" == 1 && "${PAPER_DIAGNOSTICS:-1}" == 1 ]]; then
-  python -m framediff.repair_diagnostics --root "$output" --dataset "$(basename "$output")" \
+  run_logged "Repair diagnostics" python -m framediff.repair_diagnostics --root "$output" --dataset "$(basename "$output")" \
     --detector-checkpoint "${DETECTOR_CHECKPOINT:-$train/detector/best.pt}" \
     --device "${DEVICE:-cuda}" --out "$output/diagnostics"
 fi
+
+experiment_banner END "Dataset experiment"

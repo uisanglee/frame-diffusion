@@ -4,6 +4,8 @@ if [[ $# -ne 3 ]]; then echo 'Usage: bash scripts/run_visual_web.sh DATASET_ROOT
 dataset_root=$1
 output_root=$2
 train_root=$3
+source "$(dirname "${BASH_SOURCE[0]}")/experiment_log.sh"
+experiment_log_init "$output_root"
 if [[ -n "${PAGE_MANIFEST:-}" ]]; then
   [[ -f "$PAGE_MANIFEST" ]] || { echo "Missing PAGE_MANIFEST: $PAGE_MANIFEST" >&2; exit 2; }
   source_options=(--manifest "$PAGE_MANIFEST" --dataset "${WEB_DATASET:-design2code}")
@@ -42,7 +44,7 @@ initial_options=()
 [[ "${GENERATE_INITIAL:-0}" == 1 ]] && initial_options=(--generate-initial)
 [[ -n "${REFERENCE_MANIFEST:-}" ]] && reference_options=(--reference-manifest "$REFERENCE_MANIFEST")
 [[ -n "${PAPER_REFERENCE_CACHE:-}" ]] && reference_options+=(--reference-cache "$PAPER_REFERENCE_CACHE")
-python -m framediff web-prepare "${source_options[@]}" "${vlm_options[@]}" "${reference_options[@]}" "${initial_options[@]}" \
+run_logged "Initial generation + Self Revision (cached pages reused)" python -m framediff web-prepare "${source_options[@]}" "${vlm_options[@]}" "${reference_options[@]}" "${initial_options[@]}" \
   --out "$output_root/prepare" --repair-conditioning visual "${revision_options[@]}" \
   --target-image-source "${TARGET_IMAGE_SOURCE:-provided}" \
   --initial-temperature "${INITIAL_TEMPERATURE:-0}" \
@@ -52,16 +54,16 @@ prepared="$output_root/prepare/prepared.jsonl"
 if [[ "${RUN_TUIDE:-1}" == 0 ]]; then
   metrics=()
   [[ -n "${OFFICIAL_REPO:-}" ]] && metrics+=(--official-repo "$OFFICIAL_REPO")
-  python -m framediff web-evaluate --data "$prepared" \
+  run_logged "Quality evaluation" python -m framediff web-evaluate --data "$prepared" \
     --out "$output_root/evaluation" "${metrics[@]}" --resume
   exit 0
 fi
 if [[ "${ABSTRACT_VLM_REVISION:-0}" == 1 ]]; then
   [[ "${SELF_REVISION_PROTOCOL:-none}" == design2code ]] || { echo 'ABSTRACT_VLM_REVISION=1 requires SELF_REVISION_PROTOCOL=design2code' >&2; exit 2; }
   detector_checkpoint=${DETECTOR_CHECKPOINT:-$train_root/detector/best.pt}
-  python -m framediff web-cache-abstractions --data "$prepared" --detector-checkpoint "$detector_checkpoint" \
+  run_logged "Detector abstractions" python -m framediff web-cache-abstractions --data "$prepared" --detector-checkpoint "$detector_checkpoint" \
     --out "$output_root/abstract-cache" --device "${DEVICE:-cuda}" --resume
-  python -m framediff web-abstract-self-revision --data "$output_root/abstract-cache/data.jsonl" \
+  run_logged "Abstract Self Revision" python -m framediff web-abstract-self-revision --data "$output_root/abstract-cache/data.jsonl" \
     --out "$output_root/abstract-vlm" "${vlm_options[@]}" --seed "$seed" --vlm-retries "$vlm_retries" \
     --max-new-tokens "$max_new_tokens" --max-pixels "${MAX_PIXELS:-1048576}" --resume
   prepared="$output_root/abstract-vlm/prepared.jsonl"
@@ -96,7 +98,7 @@ abstract_checkpoint=$(pick_checkpoint "${ABSTRACT_CHECKPOINT:-}" \
 detector_checkpoint=$(pick_checkpoint "${DETECTOR_CHECKPOINT:-}" "$train_root/detector/best.pt")
 extra=()
 if [[ "${ORACLE_ABLATION:-0}" == 1 ]]; then extra+=(--oracle-ablation); fi
-python -m framediff visual-evaluate --data "$prepared" \
+run_logged "TUIDE repair" python -m framediff visual-evaluate --data "$prepared" \
   "${policy_options[@]}" --abstract-checkpoint "$abstract_checkpoint" \
   --detector-checkpoint "$detector_checkpoint" --out "$output_root/repair" \
   --device "${DEVICE:-cuda}" --steps "${REPAIR_STEPS:-20}" --repeats "${REPEATS:-3}" \
@@ -107,5 +109,5 @@ python -m framediff visual-evaluate --data "$prepared" \
   --limit "${PAGE_LIMIT:-0}" "${extra[@]}" --resume
 metrics=()
 if [[ -n "${OFFICIAL_REPO:-}" ]]; then metrics+=(--official-repo "$OFFICIAL_REPO"); fi
-python -m framediff web-evaluate --data "$output_root/repair/results.jsonl" \
+run_logged "Quality evaluation" python -m framediff web-evaluate --data "$output_root/repair/results.jsonl" \
   --out "$output_root/evaluation" "${metrics[@]}" --resume
