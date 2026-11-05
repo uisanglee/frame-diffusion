@@ -157,3 +157,19 @@ def test_generation_retains_existing_timeout(monkeypatch, tmp_path):
     monkeypatch.setattr(backend.time, 'monotonic', lambda: next(ticks))
     with pytest.raises(TimeoutError, match='generation.*1800'):
         runtime._wait(tmp_path/'response.json')
+
+
+def test_two_gpu_map_keeps_fusion_and_decoder_blocks_intact():
+    from framediff.websight_backend import model_device_map
+    config = SimpleNamespace(num_hidden_layers=32, use_resampler=True)
+    mapping = model_device_map(config, 2)
+    assert set(mapping.values()) == {0,1}
+    for name in ('embed_tokens','vision_model','modality_projection','perceiver_resampler'):
+        assert mapping['model.'+name] == 0
+    assert mapping['lm_head'] == 0
+    assert mapping['model.norm'] == 1
+    assert [mapping[f'model.layers.{i}'] for i in range(32)] == [0]*14+[1]*18
+    assert model_device_map(config,1) == {'':0}
+    with pytest.raises(ValueError): model_device_map(config,0)
+    config.use_resampler = False
+    assert 'model.perceiver_resampler' not in model_device_map(config,2)

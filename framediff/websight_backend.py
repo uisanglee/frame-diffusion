@@ -84,6 +84,25 @@ def validate_request(args, images):
         raise ValueError('WebSight official protocol supports single-image Initial generation only; self-revision is unavailable')
 
 
+def model_device_map(config, cuda_count):
+    """Keep image/token fusion together and split complete decoder layers."""
+    if cuda_count < 1:
+        raise ValueError('WebSight requires a CUDA GPU')
+    if cuda_count == 1:
+        return {'': 0}
+    layers = int(config.num_hidden_layers)
+    if layers < 2:
+        raise ValueError('Two-GPU WebSight requires at least two decoder layers')
+    # Reserve GPU 0 space for the vision encoder, image activations and logits.
+    boundary = max(1, layers // 2 - 2)
+    mapping = {'model.embed_tokens': 0, 'model.vision_model': 0,
+               'model.modality_projection': 0, 'model.norm': 1, 'lm_head': 0}
+    if config.use_resampler:
+        mapping['model.perceiver_resampler'] = 0
+    mapping.update({f'model.layers.{i}': 0 if i < boundary else 1 for i in range(layers)})
+    return mapping
+
+
 class WebSightRuntime:
     """One long-lived model process; WEBSIGHT_PYTHON may select a legacy venv."""
     def __init__(self, args):
@@ -219,9 +238,20 @@ def worker(root):
     processor = load_processor(settings['model'], settings['revision'])
     config, attention_info = load_model_config(settings['model'], settings['revision'])
     print(json.dumps({'websight_attention': attention_info}), flush=True)
+    placement = model_device_map(config, torch.cuda.device_count())
+    devices = sorted(set(placement.values()))
     with allow_optional_flash_imports(attention_info):
         model = AutoModelForCausalLM.from_pretrained(settings['model'], revision=settings['revision'],
-            config=config, trust_remote_code=True, torch_dtype=torch.bfloat16).to(device).eval()
+            config=config, trust_remote_code=True, torch_dtype=torch.bfloat16,
+            device_map=placement, low_cpu_mem_usage=True).eval()
+    actual_map = {k: str(v) for k, v in model.hf_device_map.items()}
+    if any(p.device.type != 'cuda' for p in model.parameters()):
+        raise RuntimeError('WebSight placement must remain on CUDA; CPU/disk offload is not allowed')
+    if {p.device.index for p in model.parameters()} != set(devices):
+        raise RuntimeError('WebSight model did not occupy the requested GPUs')
+    placement_contract = 'websight-two-cuda-layer-split-v1' if len(devices)==2 else 'websight-single-cuda-no-offload-v1'
+    print(json.dumps({'websight_placement': placement_contract, 'device_map': actual_map,
+                      'visible_devices': os.environ.get('CUDA_VISIBLE_DEVICES')}), flush=True)
     if not hasattr(model, 'generate'):
         raise RuntimeError('Custom VMistral generation is incompatible with this Transformers version; '
                            'use WEBSIGHT_PYTHON with a dedicated legacy environment (e.g. transformers==4.37.2)')
@@ -243,13 +273,15 @@ def worker(root):
             options = generation_options(model, prompt_tokens, request['max_new_tokens'])
             html_stop = HTMLCompletionStop(processor, prompt_tokens)
             torch.manual_seed(request['seed'])
-            torch.cuda.synchronize(device)
-            torch.cuda.reset_peak_memory_stats(device)
+            for gpu in devices:
+                torch.cuda.synchronize(gpu)
+                torch.cuda.reset_peak_memory_stats(gpu)
             start = time.perf_counter()
             with torch.inference_mode():
                 outputs = model.generate(**inputs, bad_words_ids=bad_words, **options,
                                          stopping_criteria=StoppingCriteriaList([html_stop]))
-            torch.cuda.synchronize(device)
+            for gpu in devices:
+                torch.cuda.synchronize(gpu)
             duration = time.perf_counter() - start
             text = processor.batch_decode(outputs[:, prompt_tokens:], skip_special_tokens=True)[0]
             generation = model.generation_config.to_dict()
@@ -262,8 +294,9 @@ def worker(root):
                 weight_precision='bf16', device=str(device), gpu_name=torch.cuda.get_device_name(device),
                 resolved_revision=getattr(model.config, '_commit_hash', None) or settings['revision'],
                 transformers_version=transformers.__version__, torch_version=torch.__version__,
-                peak_cuda_bytes=torch.cuda.max_memory_allocated(device),
-                placement_contract='websight-single-cuda-no-offload-v1',
+                peak_cuda_bytes=sum(torch.cuda.max_memory_allocated(gpu) for gpu in devices),
+                peak_cuda_bytes_by_device={str(gpu):torch.cuda.max_memory_allocated(gpu) for gpu in devices},
+                device_map=actual_map, placement_contract=placement_contract,
                 official_example_max_length=OFFICIAL_EXAMPLE_MAX_LENGTH,
                 max_new_tokens=request['max_new_tokens'],
                 context_limit=getattr(model.config, 'max_position_embeddings', None),

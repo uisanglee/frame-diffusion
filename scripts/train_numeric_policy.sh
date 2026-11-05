@@ -42,12 +42,17 @@ prepare=${PREPARE_DATA:-1}
 if [[ "$prepare" != 0 && "$prepare" != 1 ]]; then
   echo 'PREPARE_DATA must be 0 or 1' >&2;exit 2
 fi
+policy_stages=${POLICY_STAGES:-all}
+case "$policy_stages" in all|1|2) ;; *) echo 'POLICY_STAGES must be all, 1, or 2' >&2; exit 2;; esac
 needs_predicted_targets=0
 for requested_mode in ${POLICY_MODES:-screenshot abstract}; do
   [[ "$requested_mode" == screenshot || "$requested_mode" == abstract ]] || {
     echo "Invalid POLICY_MODES item: $requested_mode" >&2; exit 2;
   }
-  [[ "$requested_mode" == abstract ]] && needs_predicted_targets=1
+  if [[ "$requested_mode" == abstract && "$policy_stages" != 1 ]]; then needs_predicted_targets=1; fi
+  if [[ "$requested_mode" == screenshot && "$policy_stages" == 2 ]]; then
+    echo "Screenshot mode has no Stage2" >&2; exit 2
+  fi
 done
 if [[ "$needs_predicted_targets" == 1 ]]; then
   [[ -f "$detector" ]] || { echo "Missing detector: $detector" >&2; exit 2; }
@@ -73,6 +78,7 @@ for head in ${POLICY_HEADS:-replacement}; do
     [[ "$mode" == abstract ]] && label=abstract
     stages=(1)
     [[ "$mode" == abstract ]] && stages+=(2)
+    [[ "$policy_stages" != all ]] && stages=("$policy_stages")
     for stage in "${stages[@]}"; do
       output="$policy_run/$head/$label-stage$stage"
       train="$rendered/policy-train.jsonl"

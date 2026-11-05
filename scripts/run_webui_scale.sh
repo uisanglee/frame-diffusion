@@ -75,6 +75,8 @@ detector="${DETECTOR_CHECKPOINT:-$output/detector/best.pt}"
 if [[ -n "${DETECTOR_CHECKPOINT:-}" && ( "$stage" == all || "$stage" == detector ) ]]; then
   echo 'Use STAGE=policy or evaluate with DETECTOR_CHECKPOINT' >&2; exit 2
 fi
+export POLICY_STAGES=${POLICY_STAGES:-all}
+case "$POLICY_STAGES" in all|1|2) ;; *) echo 'POLICY_STAGES must be all, 1, or 2' >&2; exit 2;; esac
 needs_detector=0
 for mode in $POLICY_MODES; do
   case "$mode" in abstract) needs_detector=1;; screenshot) ;; *) echo 'Invalid POLICY_MODES' >&2; exit 2;; esac
@@ -107,7 +109,7 @@ if [[ "$stage" == detector || ( "$stage" == all && "$needs_detector" == 1 ) ]]; 
   done
 fi
 if [[ "$stage" == all || "$stage" == policy ]]; then
-  if [[ "$needs_detector" == 1 ]]; then
+  if [[ "$needs_detector" == 1 && "$POLICY_STAGES" != 1 ]]; then
   for split in train val; do
     python -m framediff visual-cache-targets --data "$base/css/policy-$split.jsonl" \
       --checkpoint "$detector" --out "$output/shared/predicted-$split" \
