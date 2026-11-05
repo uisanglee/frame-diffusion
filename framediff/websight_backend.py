@@ -21,6 +21,15 @@ DEFAULT_MAX_NEW_TOKENS = 16384
 OFFICIAL_EXAMPLE_MAX_LENGTH = 4096
 
 
+def load_processor(model_id, revision):
+    from transformers import AutoProcessor
+    # The published preprocessor_config.json names built-in Idefics classes in
+    # auto_map ("IdeficsProcessor", not "module.Class"). Remote-code loading
+    # incorrectly parses that entry as a dynamic module and raises ValueError.
+    # Only the VMistral MODEL needs trust_remote_code=True.
+    return AutoProcessor.from_pretrained(model_id, revision=revision, trust_remote_code=False)
+
+
 def output_budget(args):
     budget = int(getattr(args, 'max_new_tokens', DEFAULT_MAX_NEW_TOKENS))
     if budget <= 0:
@@ -190,18 +199,22 @@ def worker(root):
     import torch
     import transformers
     from PIL import Image
-    from transformers import AutoModelForCausalLM, AutoProcessor
+    from transformers import AutoModelForCausalLM
     # Only this dependency-free helper is shared with the modern environment.
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from framediff.html_generation import HTMLCompletionStop
+    from framediff.websight_attention import load_model_config, allow_optional_flash_imports
     from transformers import StoppingCriteriaList
     if not torch.cuda.is_available():
         raise RuntimeError('WebSight requires a CUDA GPU')
     device = torch.device('cuda:0')
     torch.manual_seed(settings['seed'])
-    processor = AutoProcessor.from_pretrained(settings['model'], revision=settings['revision'], trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(settings['model'], revision=settings['revision'],
-        trust_remote_code=True, torch_dtype=torch.bfloat16).to(device).eval()
+    processor = load_processor(settings['model'], settings['revision'])
+    config, attention_info = load_model_config(settings['model'], settings['revision'])
+    print(json.dumps({'websight_attention': attention_info}), flush=True)
+    with allow_optional_flash_imports(attention_info):
+        model = AutoModelForCausalLM.from_pretrained(settings['model'], revision=settings['revision'],
+            config=config, trust_remote_code=True, torch_dtype=torch.bfloat16).to(device).eval()
     if not hasattr(model, 'generate'):
         raise RuntimeError('Custom VMistral generation is incompatible with this Transformers version; '
                            'use WEBSIGHT_PYTHON with a dedicated legacy environment (e.g. transformers==4.37.2)')
@@ -234,7 +247,7 @@ def worker(root):
             text = processor.batch_decode(outputs[:, prompt_tokens:], skip_special_tokens=True)[0]
             generation = model.generation_config.to_dict()
             generation.update(**options, max_length=prompt_tokens + request['max_new_tokens'], bad_words_ids=bad_words)
-            metadata = dict(generation_contract=CONTRACT, official_source=SOURCE,
+            metadata = dict(generation_contract=CONTRACT, official_source=SOURCE, **attention_info,
                 effective_prompt=official_prefix(processor, model), prompt_protocol='image-only',
                 image_preprocessing={'size':[960,960], 'interpolation':'bilinear', 'alpha_background':'white'},
                 generation_settings=generation, generation_seconds=duration,

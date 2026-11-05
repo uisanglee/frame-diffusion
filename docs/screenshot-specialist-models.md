@@ -59,6 +59,23 @@ bash baselines/websight/setup.sh
 bash baselines/design2code/setup.sh
 ```
 
+WebSight setup now loads its actual processor/tokenizer, checks the official
+960-pixel image transform and imports the custom model class without downloading
+weights. Repeat this lightweight check with:
+
+```bash
+baselines/websight/.venv/bin/python baselines/websight/check_setup.py
+```
+
+The processor uses built-in `IdeficsProcessor` (`trust_remote_code=False`); only
+VMistral model/config loading enables remote code. The published preprocessor
+`auto_map` contains bare class names, so forcing remote processor loading fails
+in Transformers 4.37.2. `protobuf` is required by the published tokenizer's
+`legacy=False` setting and is installed by setup. If FlashAttention2 is absent,
+the loader explicitly selects the remote model's own eager text/vision attention
+paths and logs that fallback; sampling settings, weights and image transforms
+are unchanged. This setup check does not verify full GPU inference.
+
 If needed, choose available Python interpreters with `WEBSIGHT_SETUP_PYTHON`
 and `DESIGN2CODE_BOOTSTRAP_PYTHON`; see each setup script. The standard runtime paths
 are `baselines/websight/.venv/bin/python` and
