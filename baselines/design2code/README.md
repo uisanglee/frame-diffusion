@@ -19,6 +19,11 @@ can select its executable). It builds a separate environment without changing th
 experimental hyperparameters. Dependency installation and two-GPU generation must
 still be smoke-tested on the server; they were not GPU-tested on the development Mac.
 
+The setup also installs and verifies `en_core_web_sm==3.7.1`, compatible with
+spaCy 3.7.5. CogVLM eagerly imports its grounding parser, which loads this English
+pipeline even for HTML generation. If an older setup stopped with spaCy E050,
+rerun the updated setup; it reuses the existing environment.
+
 Use exactly two visible CUDA GPUs, e.g. `CUDA_VISIBLE_DEVICES=0,1`. A persistent
 `torchrun` worker loads weights once for the preparation process. Initial download is
 29.1 GB ZIP plus space for unpacked weights. Checkpoint unpacking is cached under

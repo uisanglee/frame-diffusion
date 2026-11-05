@@ -17,6 +17,19 @@ python="$venv/bin/python"
 DS_BUILD_OPS=0 "$python" -m pip install \
   -c "$root/baselines/design2code/constraints.txt" \
   -r "$repo/requirements.txt" 'SwissArmyTransformer==0.4.10' sentencepiece
+# CogVLM imports grounding_parser eagerly, even for screenshot-to-HTML.
+# Its spacy.load() requires the pipeline package in addition to spaCy itself.
+if ! "$python" - <<'PY'
+from importlib.metadata import version
+import spacy
+assert version('en-core-web-sm') == '3.7.1'
+spacy.load('en_core_web_sm')
+PY
+then
+  "$python" -m pip install -c "$root/baselines/design2code/constraints.txt" \
+    'https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl'
+fi
+"$python" -c 'import spacy; spacy.load("en_core_web_sm"); print("spaCy English pipeline load OK")'
 "$python" -m pip check
 PYTHONPATH="$repo${PYTHONPATH:+:$PYTHONPATH}" "$python" - <<'PY'
 from importlib.metadata import version
