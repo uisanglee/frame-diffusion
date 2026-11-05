@@ -1,0 +1,23 @@
+# Direct dependencies of CogVLM/utils/{models,utils}, inference entry point,
+# and our SAT worker. Versions are bounded by constraints.txt.
+SwissArmyTransformer==0.4.10
+transformers
+xformers
+torch
+torchvision
+deepspeed
+timm
+accelerate
+numpy
+Pillow
+spacy
+seaborn
+matplotlib
+requests
+einops
+jsonlines
+datasets
+sentencepiece
+protobuf
+huggingface-hub
+tqdm

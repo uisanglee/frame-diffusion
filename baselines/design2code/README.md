@@ -60,3 +60,32 @@ Sources:
 - https://github.com/zai-org/CogVLM/blob/main/basic_demo/cli_demo_sat.py
 - Published SwissArmyTransformer 0.4.10: `sat/model/base_model.py`,
   `sat/mpu/operation.py`, `sat/model/finetune/lora2.py`.
+
+## Dependency audit
+
+Audited the official repository at commit
+`7a575e4c33f417c4be5c64072b8f5798de0d0f99`: all Python imports in CogVLM,
+then the inference import closure in `utils/models`, `utils/utils`, and
+`finetune_demo/inference_design2code.py`. The vendored requirements omit
+`jsonlines` and `datasets` even though importing `utils.utils` eagerly imports
+the dataset module. `requirements.txt` here explicitly supplies these and the
+other direct inference dependencies instead of relying on transitive installs.
+`datasets==2.18.0` and `pyarrow==15.0.2` keep the legacy dataset/Arrow APIs compatible.
+Root Design2Code requirements are not installed wholesale into SAT: they also
+contain evaluation/API dependencies and a different torch version.
+
+The final setup audit scans imports in the actual server checkout, flags new
+unmapped modules, imports all required packages, loads the spaCy pipeline, and
+checks the exact worker symbols. Errors are collected together. This does not
+load the checkpoint or certify CUDA kernel execution. Apex has an explicit
+LayerNorm fallback in official `eva_clip_L_hf.py`; bitsandbytes is not used by
+our BF16, non-quantized path. Neither warning is suppressed or confused with a
+missing required import. Demo-only dependencies remain covered by the vendored
+requirements; interactive Gradio demos are not an evaluation entry point.
+
+To rerun only the audit without installing or generating anything:
+
+```bash
+baselines/design2code/.venv/bin/python baselines/design2code/check_dependencies.py \
+  --repo external/design2code-official/CogVLM
+```

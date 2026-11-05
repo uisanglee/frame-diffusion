@@ -16,7 +16,7 @@ python="$venv/bin/python"
 "$python" -m pip install torch==2.1.2 torchvision==0.16.2 --index-url https://download.pytorch.org/whl/cu121
 DS_BUILD_OPS=0 "$python" -m pip install \
   -c "$root/baselines/design2code/constraints.txt" \
-  -r "$repo/requirements.txt" 'SwissArmyTransformer==0.4.10' sentencepiece
+  -r "$repo/requirements.txt" -r "$root/baselines/design2code/requirements.txt"
 # CogVLM imports grounding_parser eagerly, even for screenshot-to-HTML.
 # Its spacy.load() requires the pipeline package in addition to spaCy itself.
 if ! "$python" - <<'PY'
@@ -31,12 +31,5 @@ then
 fi
 "$python" -c 'import spacy; spacy.load("en_core_web_sm"); print("spaCy English pipeline load OK")'
 "$python" -m pip check
-PYTHONPATH="$repo${PYTHONPATH:+:$PYTHONPATH}" "$python" - <<'PY'
-from importlib.metadata import version
-import torch
-from utils.models import FineTuneTestCogAgentModel
-from utils.utils import chat, llama2_tokenizer, llama2_text_processor_inference, get_image_processor
-print('SAT:', version('SwissArmyTransformer'), 'torch:', torch.__version__)
-print('Official Design2Code model imports OK. Model weights are downloaded at first inference.')
-PY
+"$python" "$root/baselines/design2code/check_dependencies.py" --repo "$repo"
 printf 'DESIGN2CODE_PYTHON=%s\n' "$python"
