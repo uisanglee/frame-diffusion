@@ -184,6 +184,10 @@ def prepare(args):
         settings['qwen_memory_contract'] = vlm.QWEN_BF16_MEMORY_CONTRACT
     from .html_generation import CONTRACT
     settings['html_generation_contract'] = CONTRACT
+    application_mode = args.model == 'zai-org/UI2Code_N'
+    if application_mode:
+        from .app_browser import CONTRACT as APP_CONTRACT
+        settings['application_render_contract'] = APP_CONTRACT
     if args.backend in ('qwen', 'hf'):
         settings['vlm_deployment'] = vlm.deployment_settings()
     if not settings.get('generate_initial'):
@@ -208,6 +212,25 @@ def prepare(args):
     runtime = None
     rows = []
 
+    def capture_application(source, work, label):
+        from .app_browser import freeze_application
+        capture = {}
+        try:
+            capture = freeze_application(embed_placeholder(source,placeholder),viewport,
+                work/f'{label}-application',max_nodes=2048,browser_host=browser)
+        except Exception as error:
+            capture = getattr(error,'application_capture',{})
+            raise
+        finally:
+            record.setdefault('application_attempts',{}).setdefault(label,[]).append(capture)
+        record.setdefault('application_captures',{})[label] = capture
+        return Path(capture['static_html']).read_text()
+
+    def extra_application_renders(label):
+        # The static verifier runs in the parent browser and is counted there.
+        return sum(c.get('browser_executions',0)-c.get('host_browser_executions',0)
+                   for c in record.get('application_attempts',{}).get(label,[]))
+
     def call(task, images, current, work, label, extra='', validator=html_answer,
              literal_prompt=False, image_labels=None, prompt_first=False):
         nonlocal runtime
@@ -220,7 +243,10 @@ def prepare(args):
         base_prompt = extra if literal_prompt or task=='repair-plan' else extra + vlm.prompt_for(c)
         if task.endswith('html'):
             from .html_generation import PROMPT, viewport_instruction
-            base_prompt = PROMPT + viewport_instruction(viewport) + base_prompt
+            if application_mode:
+                base_prompt = 'Return a complete, runnable HTML document.\n' + viewport_instruction(viewport) + base_prompt
+            else:
+                base_prompt = PROMPT + viewport_instruction(viewport) + base_prompt
             from .webui_placeholders import CONTRACT as IMAGE_CONTRACT, PROMPT as IMAGE_PROMPT
             if item.get('html') and IMAGE_CONTRACT in Path(item['html']).read_text():
                 base_prompt += '\n' + IMAGE_PROMPT
@@ -257,8 +283,11 @@ def prepare(args):
                 soup.html['data-tuide-image-contract']='webui-five-color-images-v1'
                 answer=str(soup)
             if task.endswith('html'):
-                browser.snapshot(embed_placeholder(answer,placeholder),viewport,
-                                 max_nodes=args.max_nodes-1,require_content=True)
+                if application_mode:
+                    answer = capture_application(answer,work,label)
+                else:
+                    browser.snapshot(embed_placeholder(answer,placeholder),viewport,
+                                     max_nodes=args.max_nodes-1,require_content=True)
             return answer
         return validated_generation(generate,validate_answer,retries)
 
@@ -342,12 +371,15 @@ def prepare(args):
             try:
                 if item.get('initial_html'):
                     initial = html_answer(Path(item['initial_html']).read_text())
-                    browser.snapshot(embed_placeholder(initial,placeholder),viewport,
-                                     max_nodes=args.max_nodes-1,require_content=True)
+                    if application_mode:
+                        initial=capture_application(initial,work,'initial')
+                    else:
+                        browser.snapshot(embed_placeholder(initial,placeholder),viewport,
+                                         max_nodes=args.max_nodes-1,require_content=True)
                 elif revision_protocol == 'design2code':
                     from .design2code_self_revision import text_augmented_prompt
                     raw,_ = call('generate-html',[target_screenshot],None,work,'initial',
-                        text_augmented_prompt(paper_texts,use_placeholder=use_placeholder),literal_prompt=True,prompt_first=True)
+                        text_augmented_prompt(paper_texts,use_placeholder=use_placeholder,application=application_mode),literal_prompt=True,prompt_first=True)
                     initial = raw
                 else:
                     extra = 'The image is the TARGET webpage. '
@@ -367,30 +399,36 @@ def prepare(args):
             initial_calls = record['vlm_attempts'].get('initial',0)
             initial_usage=record['vlm_usage'].get('initial',{'input_tokens':0,'output_tokens':0})
             initial_seconds = time.perf_counter()-start
-            initial_renders = browser.executions-initial_before
+            initial_renders = browser.executions-initial_before+extra_application_renders('initial')
             record['methods']['initial'] = {'html':str(initial_path),'seconds':initial_seconds,
                 'browser_executions':initial_renders,'vlm_calls':initial_calls,'failed':'initial' in record['errors'],
                 'error':record['errors'].get('initial'),'revision_protocol':revision_protocol,
                 'uses_reference_text':revision_protocol=='design2code','repair_seconds':0.,
                 'repair_vlm_calls':0,'repair_input_tokens':0,'repair_output_tokens':0,
                 'input_tokens':initial_usage['input_tokens'],'output_tokens':initial_usage['output_tokens']}
+            initial_capture=record.get('application_captures',{}).get('initial')
+            if initial_capture and 'initial' not in record['errors']:
+                record['methods']['initial'].update(application_html=initial_capture['source_html'],
+                    application_capture=initial_capture)
 
             # Self-revision runs on the SAME initial HTML without target geometry/CSS.
             current = initial; elapsed = initial_seconds; calls = 0; renders = 0
             failure = record['errors'].get('initial')
+            current_capture = initial_capture
             for round_index in range(1,args.rounds+1):
                 label = ((f'design2code-self-revision-{round_index}' if args.rounds > 1 else 'design2code-self-revision') if revision_protocol=='design2code'
                          else f'self-revision-{round_index}')
                 start = time.perf_counter(); before = browser.executions
                 if failure is None:
                     try:
-                        current_path = work/f'{label}-input.html'; current_path.write_text(current)
+                        prompt_html=Path(current_capture['source_html']).read_text() if current_capture else current
+                        current_path = work/f'{label}-input.html'; current_path.write_text(prompt_html)
                         screenshot = work/f'{label}-input.png'
                         browser.snapshot(embed_placeholder(current,placeholder),viewport,screenshot,args.max_nodes-1)
                         if revision_protocol == 'design2code':
                             from .design2code_self_revision import revision_prompt
                             raw,_ = call('revise-html',[target_screenshot,screenshot],current_path,work,label,
-                                revision_prompt(current,paper_texts,use_placeholder=use_placeholder),literal_prompt=True,
+                                revision_prompt(prompt_html,paper_texts,use_placeholder=use_placeholder,application=application_mode),literal_prompt=True,
                                 image_labels=['Reference Webpage:','Current Webpage:'],prompt_first=True)
                         else:
                             raw,_ = call('revise-html',[target_screenshot,screenshot],current_path,work,label,
@@ -398,10 +436,13 @@ def prepare(args):
                                 'the HTML/CSS to better match the target, preserving correct content. ')
                         candidate = raw
                         current = candidate
+                        if application_mode:
+                            current_capture=record.get('application_captures',{}).get(label)
                     except Exception as error:
                         raise_if_fatal(error)
                         failure = str(error)
                 elapsed += time.perf_counter()-start; renders += browser.executions-before
+                renders+=extra_application_renders(label)
                 revision_prefix = 'design2code-self-revision' if revision_protocol=='design2code' else 'self-revision-'
                 calls = sum(v for k,v in record['vlm_attempts'].items() if k.startswith(revision_prefix))
                 revision_usage=[v for k,v in record['vlm_usage'].items() if k.startswith(revision_prefix)]
@@ -414,6 +455,9 @@ def prepare(args):
                     'repair_output_tokens':sum(v['output_tokens'] for v in revision_usage),
                     'input_tokens':initial_usage['input_tokens']+sum(v['input_tokens'] for v in revision_usage),
                     'output_tokens':initial_usage['output_tokens']+sum(v['output_tokens'] for v in revision_usage)}
+                if current_capture and not record['methods']['initial']['failed']:
+                    record['methods'][label].update(application_html=current_capture['source_html'],
+                        application_capture=current_capture)
 
             # Independent branch: initial DOM -> fitted IR -> predicted target boxes.
             start = time.perf_counter(); before = browser.executions

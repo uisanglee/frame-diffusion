@@ -14,8 +14,8 @@ import time
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-from framediff.html_bridge import HtmlBrowser, html_answer
-from framediff.html_generation import STATIC_HTML_PROMPT, CONTRACT as HTML_CONTRACT
+from framediff.html_bridge import HtmlBrowser, html_answer, embed_placeholder
+from framediff.app_browser import freeze_application, CONTRACT as APPLICATION_CONTRACT
 from framediff.vlm_devices import (deployment_settings, input_device,
     start_cuda_measurement, finish_cuda_measurement)
 from framediff.vlm import generation_metadata
@@ -25,7 +25,7 @@ GENERATION_CONTRACT = 'ui2coden-official-generation-config-v1'
 PROMPT = '''The first image is the target UI design. The second image is the current
 rendering of the HTML below. Update the HTML to match the target UI.
 Return a complete, runnable HTML document.
-''' + STATIC_HTML_PROMPT
+'''
 
 
 def polishing_prompt(html):
@@ -86,6 +86,12 @@ def load_records(path, path_root, limit):
             record.setdefault('viewport', size)
             if record['viewport'] != size: raise ValueError('Target image and viewport sizes differ')
             initial = dict(initial)
+            if initial.get('application_html'):
+                app = Path(initial['application_html'])
+                app = (path_root / app).resolve() if not app.is_absolute() else app.resolve()
+                if not app.is_file(): raise FileNotFoundError(app)
+                initial['application_html'] = str(app)
+                record['initial_application_html'] = str(app)
             if raw.get('errors', {}).get('initial'):
                 initial.update(failed=True, error=raw['errors']['initial'])
             record['initial_metadata'] = initial
@@ -190,7 +196,7 @@ def run_page(record, folder, rounds, runtime, browser, precision='4bit-nf4'):
     initial.update(html=record['initial_html'])
     for k, v in dict(failed=False, seconds=0., browser_executions=0, vlm_calls=0).items():
         initial.setdefault(k, v)
-    result = {k: v for k, v in record.items() if k not in ('initial_metadata', 'initial_html')}
+    result = {k: v for k, v in record.items() if k not in ('initial_metadata', 'initial_html', 'initial_application_html')}
     result.update(vlm_model=MODEL, vlm_backend='huggingface', vlm_weight_precision=precision)
     result['methods'] = {'initial': initial}
     if initial.get('failed'):
@@ -216,22 +222,30 @@ def run_page(record, folder, rounds, runtime, browser, precision='4bit-nf4'):
                               repair_vlm_calls=0, repair_seconds=0.)), flush=True)
         return result
     current = Path(record['initial_html'])
+    current_app = initial.get('application_html')
+    current_capture = initial.get('application_capture')
     seconds = 0.; calls = tokens_in = tokens_out = renders = captures = failures = 0
     for step in range(1, rounds + 1):
         checkpoint = folder / f'round-{step}.json'
         if checkpoint.exists():
             method = json.loads(checkpoint.read_text())
             if sha(method['html']) != method['html_sha256']: raise ValueError('Cached output changed: ' + method['html'])
+            if method.get('application_html') and sha(method['application_html']) != method['application_sha256']:
+                raise ValueError('Cached application source changed: ' + method['application_html'])
         else:
             started = time.perf_counter(); before = browser.executions
             before_captures = browser.screenshots
             error = None; stats = {}; answer = None
             output = current
+            output_app, output_capture = current_app, current_capture
+            capture_stats = {}
+            borrowed_renders = borrowed_captures = 0
             try:
                 browser.reset_context()
                 png = folder / f'input-{step}.png'
-                html = current.read_text()
-                browser.snapshot(html, record['viewport'], png, 2048)
+                static_html = current.read_text()
+                html = Path(current_app).read_text() if current_app else static_html
+                browser.snapshot(static_html, record['viewport'], png, 2048)
                 calls += 1
                 answer, stats = runtime.generate(record['screenshot'], png, html)
                 (folder / f'answer-{step}.txt').write_text(answer)
@@ -242,19 +256,37 @@ def run_page(record, folder, rounds, runtime, browser, precision='4bit-nf4'):
                     marked=BeautifulSoup(repaired,'html.parser')
                     marked.html['data-tuide-image-contract']=IMAGE_CONTRACT
                     repaired=str(marked)
-                # Validate renderability before adopting. No target scoring/rollback.
-                browser.snapshot(repaired, record['viewport'], folder / f'output-{step}.png', 2048,
-                                 require_content=True)
+                # The benchmark placeholder must also be available to the
+                # isolated executable application renderer.
+                placeholder = Path(record['html']).parent/'rick.jpg' if record.get('html') else None
+                if placeholder is not None and placeholder.is_file():
+                    repaired = embed_placeholder(repaired, placeholder)
+                # Execute the original application, then verify its static capture
+                # before adopting. Never feed the captured DOM back as React source.
+                capture_before = browser.executions, browser.screenshots
+                try:
+                    capture_stats = freeze_application(repaired, record['viewport'],
+                        folder / f'application-{step}', max_nodes=2048, browser_host=browser)
+                finally:
+                    borrowed_renders = browser.executions-capture_before[0]
+                    borrowed_captures = browser.screenshots-capture_before[1]
+                import shutil
+                shutil.copyfile(capture_stats['screenshot'], folder / f'output-{step}.png')
                 output = folder / f'output-{step}.html'
-                output.write_text(repaired)
+                output.write_text(Path(capture_stats['static_html']).read_text())
+                output_app = capture_stats['source_html']
+                output_capture = capture_stats
             except Exception as exc:
                 # CUDA failures are not safe to continue through in the same process.
                 if 'cuda' in str(exc).lower() or 'out of memory' in str(exc).lower(): raise
                 error = f'{type(exc).__name__}: {exc}'
+                capture_stats = getattr(exc, 'application_capture', capture_stats)
                 failures += 1
             seconds += time.perf_counter() - started
-            renders += browser.executions - before
-            captures += browser.screenshots - before_captures
+            # The freeze verifier borrows this host for its static render; that
+            # work is already in the host delta and must not be counted twice.
+            renders += browser.executions - before + max(0,capture_stats.get('browser_executions', 0)-borrowed_renders)
+            captures += browser.screenshots - before_captures + max(0,capture_stats.get('browser_screenshots', 0)-borrowed_captures)
             tokens_in += stats.get('input_tokens', 0); tokens_out += stats.get('output_tokens', 0)
             method = dict(html=str(output), html_sha256=sha(output), failed=bool(error), error=error,
                 seconds=initial['seconds'] + seconds, repair_seconds=seconds,
@@ -265,9 +297,14 @@ def run_page(record, folder, rounds, runtime, browser, precision='4bit-nf4'):
                 uses_reference_text=False, revision_protocol='ui2coden-local-polishing-v1',
                 visual_timing=dict(seconds=seconds, browser_executions=renders,
                                    browser_screenshots=captures, actions=step-failures),
-                generation=stats)
+                generation=stats, application_render_contract=APPLICATION_CONTRACT,
+                application_attempt=capture_stats)
+            if output_app:
+                method.update(application_html=str(output_app), application_sha256=sha(output_app),
+                              application_capture=output_capture)
             save(checkpoint, method)
         current = Path(method['html'])
+        current_app, current_capture = method.get('application_html'), method.get('application_capture')
         seconds, calls = method['repair_seconds'], method['repair_vlm_calls']
         tokens_in, tokens_out = method['repair_input_tokens'], method['repair_output_tokens']
         renders = method['browser_executions'] - initial['browser_executions']
@@ -307,11 +344,11 @@ def main():
     with open(out / '.lock', 'w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         config = dict(protocol='ui2coden-local-polishing-v1', generation_contract=GENERATION_CONTRACT,
-            html_generation_contract=HTML_CONTRACT,
+            application_render_contract=APPLICATION_CONTRACT,
             settings={k: v for k, v in vars(args).items()
             if k not in ('resume', 'check_inputs', 'out', 'path_root')}, prompt=PROMPT,
             runner_sha=sha(__file__), deployment=deployment_settings(), records=records,
-            files={r[k]: sha(r[k]) for r in records for k in ('screenshot', 'initial_html', 'html', 'reference_observation') if k in r})
+            files={r[k]: sha(r[k]) for r in records for k in ('screenshot', 'initial_html', 'initial_application_html', 'html', 'reference_observation') if k in r})
         cfg = out / 'config.json'
         if cfg.exists():
             if not args.resume or json.loads(cfg.read_text()) != config:

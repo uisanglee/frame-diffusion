@@ -294,6 +294,33 @@ python -m framediff vlm --backend qwen --four-bit \
 
 `generate-html` / `revise-html`도 지원하지만, 임의 HTML의 자동 CSS 역변환은 제공하지 않습니다. `extract-html`은 self-contained static HTML의 실제 frame을 추출할 뿐입니다. 네트워크와 페이지 JavaScript를 차단하므로 외부 CSS/폰트/React hydration이 필요한 페이지는 동일하게 재현되지 않습니다.
 
+UI2CodeN의 평가 경로는 예외적으로 별도의 애플리케이션 렌더러를 사용합니다.
+`web-prepare --model zai-org/UI2Code_N`과 UI2CodeN polishing은 React/JSX/Babel/Tailwind
+금지 프롬프트를 넣지 않고, 허용된 CDN 라이브러리를 캐시하여 JavaScript를 실행합니다.
+실행 후 DOM과 CSSOM을 정적 HTML로 저장하고, 같은 viewport에서 원래 실행 화면과
+비교합니다(평균 픽셀 차이 ≤ 0.001, 모든 대응 요소 박스 차이 ≤ 1 CSS px).
+검증된 정적 HTML만 TUIDE의 기존 학습 표현과 평가 렌더러에 전달합니다.
+
+TUIDE의 `visual-evaluate`는 이 정적 HTML의 크기·margin 편집을 원본 애플리케이션에
+별도 CSS 적용 스크립트로 반영합니다. React/JSX 원본을 다시 생성하거나 정적 페이지로
+대체하지 않습니다. DOM 재생성 시에도 대응 요소의 CSS를 다시 적용하며, 수정된 앱의
+실행 화면이 TUIDE의 결과와 일치해야 채택합니다. 요소 대응·화면 보존 검증 실패는
+실패로 기록하고 초기 애플리케이션을 유지합니다. 이후 VLM polishing에는 정적 캡처가
+아닌 원본 애플리케이션 코드를 전달합니다.
+
+결과의 `application_html`은 실행 가능한 원본 앱 + CSS 편집 스크립트,
+`html`은 평가용 정적 캡처입니다. `application_capture`,
+`application_patch_verification` 및 각 폴더의 `freeze.json`, `verification.json`,
+`edits.json`으로 검증 결과와 비용을 확인합니다. 라이브러리 캐시 위치는
+`TUIDE_APP_ASSET_CACHE`(기본 `.cache/app-dependencies`)입니다. 이전 정적 실행 결과와
+설정이 다르므로 UI2CodeN 실험은 새 출력 폴더에서 시작합니다.
+
+이 경로는 초기 viewport의 레이아웃 복원을 위한 것입니다. JSX 소스 자체를 수정하거나
+모든 상호작용 상태의 동작·화면을 검증하지 않습니다. 요소의 위치·ID·직접 텍스트가
+달라져 대응할 수 없으면 편집을 건너뛰고 런타임 오류 기록에 남깁니다.
+Shadow DOM, canvas, iframe, 임의 외부 API 등 지원하지 않는 앱은 명시적으로 거부합니다.
+학습 데이터용 렌더러와 다른 VLM의 정적 생성 경로는 변경하지 않습니다.
+
 로컬 또는 원격의 호환 API 서버:
 
 ```bash

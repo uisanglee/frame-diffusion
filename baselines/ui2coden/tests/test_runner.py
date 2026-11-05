@@ -19,7 +19,18 @@ def test_polishing_prompt_requests_complete_html_without_layout_constraints():
 
 
 @pytest.fixture
-def record(tmp_path):
+def record(tmp_path, monkeypatch):
+    # Unit tests exercise handoff/adoption without networks or model inference.
+    # Real JS/static capture equivalence is covered in test_app_browser.py.
+    def freeze(html, viewport, folder, **kwargs):
+        folder.mkdir(parents=True, exist_ok=True)
+        source=folder/'source.html'; source.write_text(html)
+        static=folder/'static.html'; static.write_text(html)
+        png=folder/'render.png'; Image.new('RGB', viewport, 'white').save(png)
+        return dict(source_html=str(source),static_html=str(static),screenshot=str(png),
+                    pixel_mae=0.,max_box_error_px=0.,seconds=.01,
+                    browser_executions=2,browser_screenshots=2,contract=runner.APPLICATION_CONTRACT)
+    monkeypatch.setattr(runner, 'freeze_application', freeze)
     (tmp_path/'initial.html').write_text(HTML)
     (tmp_path/'reference.html').write_text(HTML.replace('hello', 'SECRET_REFERENCE'))
     Image.new('RGB', (320, 240), 'white').save(tmp_path/'target.png')
@@ -39,20 +50,24 @@ class Browser:
         self.screenshots += 1
 
 
-def test_static_rendering_instructions_are_shared():
-    from framediff.html_generation import STATIC_HTML_PROMPT, PROMPT
-    assert STATIC_HTML_PROMPT in runner.PROMPT
-    assert STATIC_HTML_PROMPT in PROMPT
-    assert 'disables JavaScript and external network requests' in STATIC_HTML_PROMPT
+def test_application_polishing_does_not_prohibit_react():
+    from framediff.html_generation import STATIC_HTML_PROMPT
+    assert STATIC_HTML_PROMPT not in runner.PROMPT
+    assert 'Do not use React' not in runner.PROMPT
+    assert 'disables JavaScript' not in runner.PROMPT
 
 
-def test_empty_react_candidate_keeps_previous_html(record, tmp_path):
+def test_failed_application_capture_keeps_previous_html(record, tmp_path, monkeypatch):
     react = '<html><body><div id="root"></div><script type="text/babel">ReactDOM.render(jsx, root)</script></body></html>'
     runtime = Runtime([react, HTML])
-    with runner.HtmlBrowser() as browser:
-        result = runner.run_page(record, tmp_path/'page', 2, runtime, browser)
+    freeze=runner.freeze_application
+    def verify(html,*args,**kwargs):
+        if 'text/babel' in html:raise ValueError('application failed to mount')
+        return freeze(html,*args,**kwargs)
+    monkeypatch.setattr(runner,'freeze_application',verify)
+    result = runner.run_page(record, tmp_path/'page', 2, runtime, Browser())
     first = result['methods']['ui2coden-round-1']
-    assert first['failed'] and 'no visible content' in first['error']
+    assert first['failed'] and 'failed to mount' in first['error']
     assert first['html'] == record['initial_html']
     assert runtime.calls[1] == HTML
     assert not result['methods']['ui2coden-round-2']['failed']
@@ -76,7 +91,7 @@ def test_rounds_resume_and_metrics_schema(record, tmp_path):
     last = result['methods']['ui2coden-round-2']
     assert last['repair_vlm_calls'] == 2
     assert last['repair_input_tokens'] == 200
-    assert last['browser_executions'] == 4
+    assert last['browser_executions'] == 6
     assert last['repair_seconds'] >= result['methods']['ui2coden-round-1']['repair_seconds']
     assert runner.run_page(record, folder, 2, None, Browser()) == result
     Path(last['html']).write_text('tampered')
@@ -141,6 +156,25 @@ def test_common_evaluator_with_real_browser(record, tmp_path):
     assert (out/'paper-report.md').is_file()
 
 
+def test_application_capture_inside_active_browser(record,tmp_path,monkeypatch):
+    """Real JS capture must coexist with the parent's active Playwright context."""
+    from framediff.app_browser import freeze_application
+    monkeypatch.setattr(runner,'freeze_application',freeze_application)
+    app='''<html><body><div id="root"></div><script>
+      document.getElementById('root').innerHTML='<button style="width:100px">Hello</button>';
+    </script></body></html>'''
+    with runner.HtmlBrowser() as browser:
+        result=runner.run_page(record,tmp_path/'page',1,Runtime([app]),browser)
+        # Capture cleanup must not close the parent browser/context.
+        browser.snapshot(HTML,record['viewport'],tmp_path/'after.png',2048)
+    method=result['methods']['ui2coden-round-1']
+    assert not method['failed'], method['error']
+    assert method['application_capture']['pixel_mae']==0
+    assert method['browser_executions']==3  # input + application + static verification
+    assert '<button' in Path(method['html']).read_text()
+    assert 'innerHTML' in Path(method['application_html']).read_text()
+
+
 def test_later_failures_keep_last_success_and_resume(record, tmp_path):
     repaired = HTML.replace('100px', '150px')
     runtime = Runtime([repaired, '<html>truncated', ValueError('render failure')])
@@ -152,6 +186,56 @@ def test_later_failures_keep_last_success_and_resume(record, tmp_path):
         assert method['failed'] and method['html'] == first
         assert '150px' in Path(method['html']).read_text()
     assert runner.run_page(record, tmp_path/'page', 3, None, Browser()) == result
+
+
+def test_rounds_keep_application_source_separate_from_static_capture(record, tmp_path, monkeypatch):
+    source='<html><body><div id="root"></div><script>mountApp()</script></body></html>'
+    original_freeze=runner.freeze_application
+    def freeze(html,*args,**kwargs):
+        capture=original_freeze(html,*args,**kwargs)
+        Path(capture['static_html']).write_text(HTML)
+        return capture
+    monkeypatch.setattr(runner,'freeze_application',freeze)
+    class StaticBrowser(Browser):
+        def snapshot(self,html,*args,**kwargs):
+            assert 'mountApp' not in html
+            return super().snapshot(html,*args,**kwargs)
+    runtime=Runtime([source,'<html>truncated',source])
+    result=runner.run_page(record,tmp_path/'page',3,runtime,StaticBrowser())
+    assert runtime.calls==[HTML,source,source]
+    first=result['methods']['ui2coden-round-1']
+    failed=result['methods']['ui2coden-round-2']
+    assert Path(first['html']).read_text()==HTML
+    assert Path(first['application_html']).read_text()==source
+    assert failed['failed']
+    assert failed['application_html']==first['application_html']
+    assert failed['application_capture']==first['application_capture']
+    assert result['methods']['ui2coden-round-3']['application_attempt']['pixel_mae']==0
+    Path(first['application_html']).write_text('tampered app')
+    with pytest.raises(ValueError,match='application source changed'):
+        runner.run_page(record,tmp_path/'page',3,None,StaticBrowser())
+
+
+def test_adapter_preserves_and_resolves_initial_application(record,tmp_path):
+    (tmp_path/'application.html').write_text('<html><body><script>mount()</script></body></html>')
+    path=tmp_path/'app-input.jsonl'
+    path.write_text(json.dumps(dict(id='app',screenshot=record['screenshot'],
+        methods={'initial':dict(html='initial.html',application_html='application.html',
+            application_capture={'verified':True})}))+'\n')
+    loaded=runner.load_records(path,tmp_path,0)[0]
+    assert loaded['initial_metadata']['application_html']==str(tmp_path/'application.html')
+    assert loaded['initial_application_html']==str(tmp_path/'application.html')
+    assert loaded['initial_metadata']['application_capture']=={'verified':True}
+
+
+def test_application_renderer_receives_benchmark_placeholder(record,tmp_path):
+    Image.new('RGB',(10,10),'blue').save(tmp_path/'rick.jpg')
+    generated='<html><body><img src="rick.jpg"></body></html>'
+    result=runner.run_page(record,tmp_path/'page',1,Runtime([generated]),Browser())
+    method=result['methods']['ui2coden-round-1']
+    assert not method['failed']
+    assert 'data:image/jpeg;base64,' in Path(method['application_html']).read_text()
+    assert (tmp_path/'page/answer-1.txt').read_text()==generated
 
 
 def test_webui_view_ids_do_not_collapse(record, tmp_path):

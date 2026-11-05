@@ -317,9 +317,13 @@ def evaluate(args):
             if row['group'] in groups or (row.get('html') and digest(row['html']) in hashes) or row.get('source_sha') in hashes:
                 raise ValueError('Evaluation overlaps policy/parser training corpus')
     out=Path(args.out).resolve()
-    guard_run(out,{'kind':'visual-comparison-v3-dom-boundary','data':digest(args.data),
+    application_input=any(r.get('methods',{}).get('initial',{}).get('application_html') for r in rows)
+    guard_run(out,{'kind':('visual-comparison-v4-application-patch' if application_input else
+                           'visual-comparison-v3-dom-boundary'),'data':digest(args.data),
         'checkpoints':[digest(p) for p in (args.raw_checkpoint if not abstract_only else None,args.abstract_checkpoint,args.detector_checkpoint) if p],
-        'assets':[{k:digest(r[k]) for k in ('screenshot','tagged_html') if r.get(k)} for r in rows],
+        'assets':[{**{k:digest(r[k]) for k in ('screenshot','tagged_html') if r.get(k)},
+                   **({'application_html':digest(r['methods']['initial']['application_html'])}
+                      if r.get('methods',{}).get('initial',{}).get('application_html') else {})} for r in rows],
         'settings':{k:v for k,v in vars(args).items() if k not in ('out','resume')}},args.resume)
     # Startup and warmup are excluded equally. No real target is parsed in warmup.
     if args.warmup:
@@ -347,6 +351,7 @@ def evaluate(args):
                 order=list(methods);rng.shuffle(order)
                 for method in order:
                     initial=record['methods']['initial'];html=Path(initial['html']).read_text();error=None;stats={};target=None
+                    application={k:initial[k] for k in ('application_html','application_capture') if k in initial}
                     started=time.perf_counter()
                     try:
                         if initial['failed']:raise ValueError(initial.get('error') or 'Initial HTML generation failed')
@@ -364,6 +369,23 @@ def evaluate(args):
                             getattr(args,'abstract_goal_threshold',-1) if methods[method].cfg.semantic else args.goal_threshold,
                             getattr(args,'pixel_goal_fraction',.99),getattr(args,'pixel_goal_tolerance',.005))
                         if stats.get('failed'):error=stats.get('error') or 'Rollout failed'
+                        if initial.get('application_html'):
+                            from .application_repair import restore_application
+                            patch_start=time.perf_counter()
+                            try:
+                                restored=restore_application(initial,html,record['viewport'],
+                                    work/f'{method}-r{repeat+1}-app',browser_host=browser)
+                                html=restored.pop('html');application=restored
+                                stats['browser_executions']=stats.get('browser_executions',0)+restored['application_patch_browser_executions']
+                                stats['browser_screenshots']=stats.get('browser_screenshots',0)+restored['application_patch_browser_screenshots']
+                            except Exception as exc:
+                                # Never deliver static-only edits as a repaired live app.
+                                html=Path(initial['html']).read_text()
+                                stats.update(failed=True,error=str(exc),stop_reason='application_transfer_failed')
+                                raise
+                            finally:
+                                stats['application_patch_seconds']=time.perf_counter()-patch_start
+                                stats['seconds']=stats.get('seconds',0)+stats['application_patch_seconds']
                     except Exception as exc:
                         raise_if_fatal(exc)
                         error=str(exc)
@@ -372,7 +394,7 @@ def evaluate(args):
                     if target is not None and method!='screenshot-policy':target.save(work/f'{method}-r{repeat+1}-target.png')
                     write_json(work/f'{method}-r{repeat+1}-trace.json',stats)
                     row={'id':source['id'],'method':method,'repeat':repeat+1,'failed':error is not None,
-                         'error':error,'html':str(path),**{k:v for k,v in stats.items() if k!='history'}}
+                         'error':error,'html':str(path),**{k:v for k,v in stats.items() if k!='history'},**application}
                     local.append(row);by_method[method].append(row)
             # Preserve every trial's HTML and exact timing for paired accuracy under
             # time budgets; never combine first-trial accuracy with averaged timing.
@@ -391,6 +413,8 @@ def evaluate(args):
                         'input_tokens':initial.get('input_tokens',0),'output_tokens':initial.get('output_tokens',0),
                         'feedback_browser_screenshots':trial.get('browser_screenshots',0),
                         'feedback_mode':method,'target_source':'image','visual_timing':numeric}
+                    for key in ('application_html','application_capture','application_patch_verification'):
+                        if key in trial:trial_record['methods'][method][key]=trial[key]
                 page_results.append(trial_record)
             results+=page_results;timings+=local;write_json(cache,{'records':page_results,'timings':local})
             write_jsonl(out/'results.jsonl',results);write_jsonl(out/'timings.jsonl',timings)

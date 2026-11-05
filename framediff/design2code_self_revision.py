@@ -29,7 +29,7 @@ def extract_text_elements(html):
     ]
 
 
-def text_augmented_prompt(texts, *, use_placeholder=True):
+def text_augmented_prompt(texts, *, use_placeholder=True, application=False):
     texts = '\n'.join(texts)
     return (
         'You are an expert web developer who specializes in HTML and CSS.\n'
@@ -37,17 +37,18 @@ def text_augmented_prompt(texts, *, use_placeholder=True):
         'The text elements are:\n' + texts + '\n'
         'You should generate the correct layout structure for the webpage, and put the texts in the correct places so that the resultant webpage will look the same as the given one.\n'
         'You need to return a single html file that uses HTML and CSS to reproduce the given website.\n'
-        'Include all CSS code in the HTML file itself.\n'
+        + ('The HTML may include JavaScript and library dependencies needed to render the application.\n' if application else 'Include all CSS code in the HTML file itself.\n')
         + ('If it involves any images, use "rick.jpg" as the placeholder.\n'
            'Some images on the webpage are replaced with a blue rectangle as the placeholder, use "rick.jpg" for those as well.\n' if use_placeholder else '')
         +
-        'Do not hallucinate any dependencies to external files. You do not need to include JavaScript scripts for dynamic interactions.\n'
-        'Represent the webpage as a structured hierarchy of HTML elements, and define their layout and styling with CSS rules in a <style> block. Use CSS selectors that correspond to the HTML structure.\n'
+        ('Preserve the application structure and include the code needed to render it.\n' if application else
+         'Do not hallucinate any dependencies to external files. You do not need to include JavaScript scripts for dynamic interactions.\n'
+         'Represent the webpage as a structured hierarchy of HTML elements, and define their layout and styling with CSS rules in a <style> block. Use CSS selectors that correspond to the HTML structure.\n') +
         'Respond with the content of the HTML+CSS file (directly start with the code, do not add any additional explanation):\n'
     )
 
 
-def revision_prompt(current_html, texts, *, use_placeholder=True):
+def revision_prompt(current_html, texts, *, use_placeholder=True, application=False):
     texts = '\n'.join(texts)
     return (
         'You are an expert web developer who specializes in HTML and CSS.\n'
@@ -59,6 +60,7 @@ def revision_prompt(current_html, texts, *, use_placeholder=True):
         'Please compare the two webpages and refer to the provided text elements to be included, and revise the original HTML implementation to make it look exactly like the reference webpage. Make sure the code is syntactically correct and can render into a well-formed webpage.'
         + (' You can use "rick.jpg" as the placeholder image file.\n' if use_placeholder else '\n')
         +
-        'Represent the webpage as a structured hierarchy of HTML elements, and define their layout and styling with CSS rules in a <style> block. Use CSS selectors that correspond to the HTML structure.\n'
+        ('Preserve application behavior and source structure while improving the rendered layout.\n' if application else
+         'Represent the webpage as a structured hierarchy of HTML elements, and define their layout and styling with CSS rules in a <style> block. Use CSS selectors that correspond to the HTML structure.\n') +
         'Respond directly with the content of the new revised and improved HTML file without any extra explanations:\n'
     )

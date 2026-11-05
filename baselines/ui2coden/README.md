@@ -18,20 +18,29 @@
 
 기본 3회 수정이며 초기 상태와 round 1/2/3을 모두 평가한다. `ROUNDS`로 변경한다.
 목표 HTML·정답 박스는 모델에 전달하지 않고 최종 평가에서만 사용한다.
-점수로 후보를 선택하거나 악화 시 rollback하지 않는다. 잘린 HTML, 렌더링 오류, 정적 viewport에 표시할 내용이 없는 후보를
+점수로 후보를 선택하거나 악화 시 rollback하지 않는다. 잘린 HTML, 실행/렌더링 오류, 화면 보존 검증에 실패한 후보를
 실패로 기록하고 이전 HTML을 유지한다. 실패 페이지도 평가에 포함한다.
 
 `PROTOCOL=simple`은 목표 이미지와 현재 렌더링을 비교해 HTML을 수정하고,
-완전하고 실행 가능한 HTML 문서를 반환하도록 요청한다. 모든 VLM에 공통으로
-JavaScript·외부 요청이 차단된 렌더러임을 명시하며, 본문 HTML과 내장 CSS 및 제공된
-로컬 이미지/data URI만 사용하도록 요청한다. React/JSX/Babel 및 Tailwind CDN은 사용할 수 없다.
+완전하고 실행 가능한 HTML 문서를 반환하도록 요청한다. UI2CodeN에는 React/JSX/Babel 및
+Tailwind CDN 금지 지시를 넣지 않는다. 별도 애플리케이션 렌더러에서 JavaScript를 실행하고,
+허용된 라이브러리 의존성을 캐시해 로딩한다. 학습용 정적 렌더러 설정은 변경하지 않는다.
 compact·viewport·DOM 보존·레이아웃 한정 지시는 추가하지 않는다. 이전 layout/general 옵션은
 제거했다. 프롬프트 변경 전 결과와 섞이지 않도록 새 출력 디렉터리를 사용한다.
 프롬프트는 `runner.py`와 출력 `config.json`에 기록된다.
 
+각 후보의 원본 애플리케이션은 `application-N/application.html`, 실행된 DOM/CSS는 capture
+메타데이터가 가리키는 정적 파일로 보존한다. 실행 화면과 정적 캡처 화면의 픽셀·박스가
+허용 오차 안에서 일치해야 후보를 채택한다. 평가용 `output-N.html`에는 검증된 정적 캡처를
+저장하지만, 다음 polishing 프롬프트에는 `application_html`의 원본 JavaScript/JSX를 전달한다.
+후보 실패 시 마지막 정상 정적 HTML과 원본 애플리케이션 쌍을 모두 유지한다.
+실행·캡처·검증 시간은 해당 회차 비용에 포함되며, `application_capture`와
+`application_attempt`에 결과 및 비용을 기록한다. 이전 정적-only 실행 결과와 혼합하지 않는다.
+
 이 구현은 공식 논문 Table 1의 정확한 재현을 주장하지 않는다. 공개 데모를 이용해
 반복 루프를 구성했고, 반복 횟수·간소화 프롬프트·양자화·입력 축소는 이 실험의 설정이다.
-논문에는 `UI2CodeN (9B, 4-bit NF4, N=3, layout instruction)`처럼 명시한다.
+논문에는 실제 적용한 정밀도(BF16/NF4), 반복 횟수, 프롬프트 및 애플리케이션 실행·캡처
+프로토콜을 명시한다.
 
 ## 4090 설치 — 한 번만
 
@@ -116,12 +125,12 @@ SDPA, KV 캐시, 지원되는 모델의 마지막 토큰 logits 계산을 사용
 HTML이 없으면 pixel MAE는 측정하지만 정답 DOM 기하 지표는 계산할 수 없다.
 `reference_kind=webui_recorded_boxes`와 `reference_boxes`도 기존 평가기에 전달한다.
 
-렌더러는 기존 평가와 동일하게 **외부 네트워크 및 페이지 JavaScript를 차단**한다.
-입력은 self-contained HTML/인라인 CSS/data URI 자산을 사용해야 한다.
-React 프로젝트나 외부 이미지·CSS를 그대로 실행하는 도구가 아니다.
-로컬/외부 리소스를 자동으로 복사하거나 다운로드하지 않는다. 다른 방법에도 같은
-자산·브라우저 조건을 적용해야 한다. 특히 `rick.jpg` placeholder를 쓰는 벤치마크는
-초기/참조 HTML을 동일한 data URI로 준비한 뒤 넣는다.
+참조 이미지와 점수 계산에는 기존의 **JavaScript·네트워크 차단 정적 렌더러**를 사용한다.
+UI2CodeN 후보만 별도 렌더러에서 실행한 후 화면 보존을 검증한 DOM/CSS 캡처로 평가한다.
+React/ReactDOM/Babel/Tailwind 등 허용된 CDN 의존성은 다운로드·캐시하지만,
+임의 외부 API와 이미지 다운로드, 별도 npm 프로젝트 빌드는 지원하지 않는다.
+`rick.jpg` 및 WebUI 색상 이미지 같은 제공된 자산은 data URI로 포함한다.
+React 원본은 `application_html`로 보존하고 정적 캡처는 `html`로 구분한다.
 
 ## 먼저 2페이지 검증
 
