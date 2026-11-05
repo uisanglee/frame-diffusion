@@ -470,7 +470,10 @@ def test_evaluation_skips_failed_initial_and_reuses_identical_html(tmp_path):
     rows = evaluate_pages(args)
     initial, repair, *skipped = rows
     assert initial['evaluation_browser_executions'] > 0
+    assert initial['evaluation_timing']['stage_calls']['render_dom_snapshot'] == 1
+    assert initial['evaluation_timing']['stage_calls']['dom_box_matching'] == 1
     assert repair['evaluation_browser_executions'] == 0 and repair['evaluation_cache_hit']
+    assert 'render_dom_snapshot' not in repair['evaluation_timing']['stage_calls']
     assert repair['failed'] and repair['dom_box_iou'] == initial['dom_box_iou']
     assert repair['pixel_mae'] == initial['pixel_mae']
     assert all(r['evaluation_skipped'] == 'initial_generation_failed' for r in skipped)
@@ -482,3 +485,33 @@ def test_evaluation_skips_failed_initial_and_reuses_identical_html(tmp_path):
     args.resume = True
     resumed = evaluate_pages(args)
     assert all('dom_box_iou' not in r for r in resumed if r['id'] == 'failed')
+
+
+@pytest.mark.browser
+@pytest.mark.skipif(not os.environ.get('FRAMEDIFF_OFFICIAL_REPO'),reason='Optional upstream metrics + CLIP weights')
+def test_official_optimizations_preserve_all_five_scores(tmp_path):
+    from framediff.official_metrics import OfficialMetrics
+    scorer = OfficialMetrics(os.environ['FRAMEDIFF_OFFICIAL_REPO'])
+    fast_pixels = scorer._pixel_ops
+    fast_similarity = scorer.module.calculate_similarity
+    variants = [HTML, HTML.replace('left:10px','left:70px'),
+                '<html><body style="background:white">different text</body></html>']
+    with HtmlBrowser() as browser:
+        # Disable all memoization and use original upstream pixel/text functions.
+        scorer._cache_browser = browser
+        scorer._pixel_ops = scorer.ocr
+        scorer.module.calculate_similarity = getattr(fast_similarity, '__wrapped__', fast_similarity)
+        for cache in (scorer._render_cache, scorer._mask_cache, scorer._feature_cache):
+            cache.max_entries = 0
+        expected = []
+        for i, html in enumerate(variants):
+            scorer._block_cache.clear()
+            expected.append(scorer.score(browser, html, HTML, [320,240], tmp_path/f'original-{i}'))
+        scorer._init_caches()
+        scorer._block_cache.clear()
+        scorer._pixel_ops = fast_pixels
+        scorer.module.calculate_similarity = fast_similarity
+        for repeat in range(2):
+            for i, html in enumerate(variants):
+                actual = scorer.score(browser, html, HTML, [320,240], tmp_path/f'fast-{repeat}-{i}')
+                assert actual == expected[i]  # exact equality, not approximate tolerance

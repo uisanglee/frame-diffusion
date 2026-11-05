@@ -642,6 +642,7 @@ def repair_pages(args):
 
 
 def evaluate_pages(args):
+    from .evaluation_timing import EvaluationTiming
     import numpy as np
     records = list(read_jsonl(args.data))
     if not records: raise ValueError('Empty evaluation data')
@@ -657,7 +658,8 @@ def evaluate_pages(args):
         if any(r.get('reference_kind')=='webui_recorded_boxes' for r in records):
             raise ValueError('WebUI uses recorded screenshot/AX boxes, not Design2Code reference rerendering. Omit --official-repo.')
         from .official_metrics import OfficialMetrics
-        official = OfficialMetrics(args.official_repo)
+        with EvaluationTiming().stage("official_initialization_including_clip_load"):
+            official = OfficialMetrics(args.official_repo)
         config['official_source_sha'] = official.source_sha
     guard_run(out,config,args.resume)
     rows = []
@@ -671,6 +673,7 @@ def evaluate_pages(args):
                 saved = read_json(cache)
                 # Upgrade old failed-Initial evaluations without recomputing scores.
                 if not initial_failed or all(r.get('evaluation_skipped') == 'initial_generation_failed' for r in saved):
+                    EvaluationTiming(id=record['id']).event('page', 'cache_hit')
                     rows.extend(saved); write_jsonl(out/'metrics.jsonl',rows); continue
             viewport = record['viewport']
             placeholder = Path(record['html']).parent/'rick.jpg' if record.get('html') else None
@@ -680,22 +683,23 @@ def evaluate_pages(args):
             # Reference HTML is opened only here, outside all repair/selection paths.
             reference_error = None
             reference = None
-            if initial_failed:
-                pass
-            elif is_webui:
-                reference_error = record.get('reference_box_error')
-            else:
-                try:
-                    ref_html = embed_placeholder(Path(record['html']).read_text(),placeholder)
-                    if record.get('target_image_source')=='reference-render':
-                        reference = read_json(record['reference_observation'])
-                        if reference['viewport'] != viewport:
-                            raise ValueError('Saved target DOM viewport differs from target PNG viewport')
-                        if reference['max_nodes'] != args.max_nodes:
-                            raise ValueError('Evaluation --max-nodes must match saved target DOM max_nodes')
-                    else:
-                        reference = browser.snapshot(ref_html,viewport,work/'reference.png',args.max_nodes)
-                except Exception as error: reference_error = str(error)
+            with EvaluationTiming(id=record['id'], method='reference').stage('reference_prepare'):
+                if initial_failed:
+                    pass
+                elif is_webui:
+                    reference_error = record.get('reference_box_error')
+                else:
+                    try:
+                        ref_html = embed_placeholder(Path(record['html']).read_text(),placeholder)
+                        if record.get('target_image_source')=='reference-render':
+                            reference = read_json(record['reference_observation'])
+                            if reference['viewport'] != viewport:
+                                raise ValueError('Saved target DOM viewport differs from target PNG viewport')
+                            if reference['max_nodes'] != args.max_nodes:
+                                raise ValueError('Evaluation --max-nodes must match saved target DOM max_nodes')
+                        else:
+                            reference = browser.snapshot(ref_html,viewport,work/'reference.png',args.max_nodes)
+                    except Exception as error: reference_error = str(error)
             page_rows = []
             score_cache = {}  # One fixed target/viewport/settings; bounded by method count.
             for method in methods:
@@ -738,8 +742,10 @@ def evaluate_pages(args):
                                evaluation_browser_executions=0)
                     page_rows.append(row)
                     continue
+                timing = EvaluationTiming(id=record['id'], method=method)
                 try:
-                    html = embed_placeholder(Path(data['html']).read_text(),placeholder)
+                    with timing.stage('html_prepare'):
+                        html = embed_placeholder(Path(data['html']).read_text(),placeholder)
                     score_key = signature(html)
                     if score_key in score_cache:
                         import shutil
@@ -747,40 +753,50 @@ def evaluate_pages(args):
                         row.update(copy.deepcopy(scores))
                         shutil.copyfile(cached_png, work/f'{method}.png')
                         if cached_official is not None:
+                            cached_official = copy.deepcopy(cached_official)
+                            cached_official.pop('evaluation_timing', None)
+                            cached_official['evaluation_cache_hit'] = True
                             write_json(work/method/'official.json', cached_official)
+                        timing.event('method', 'cache_hit')
+                        row['evaluation_timing'] = timing.report()
                         row.update(evaluation_cache_hit=True, evaluation_seconds=time.perf_counter()-started,
                                    evaluation_browser_executions=0)
                         page_rows.append(row)
                         continue
                     metadata_keys = set(row)
                     png = work/f'{method}.png'
-                    observed = browser.snapshot(html,viewport,png,args.max_nodes)
-                    with Image.open(record['screenshot']) as a, Image.open(png) as b:
-                        if a.size != b.size: raise ValueError('Screenshot dimensions differ')
-                        row['pixel_mae'] = float(np.abs(np.asarray(a.convert('RGB'),dtype=float)-np.asarray(b.convert('RGB'),dtype=float)).mean()/255)
-                    if is_webui and record.get('reference_boxes') and not reference_error:
-                        from .webui_pages import clipped_boxes
-                        boxes = clipped_boxes({n['id']:n['box'] for n in observed['nodes']},viewport,
-                            tuple(n['id'] for n in observed['nodes'] if n['role']=='body'))
-                        geometry = hungarian_box_metrics(boxes,record['reference_boxes'],viewport)
-                        row.update({'webui_'+k:v for k,v in geometry.items()})
-                    if reference is not None:
-                        try:
-                            geometry = hungarian_box_metrics({n['id']:n['box'] for n in observed['nodes']},
-                                {n['id']:n['box'] for n in reference['nodes']},viewport,
-                                tuple(n['id'] for n in observed['nodes'] if n['role']=='body'),
-                                tuple(n['id'] for n in reference['nodes'] if n['role']=='body'))
-                            row.update({'dom_'+k:v for k,v in geometry.items()})
-                        except Exception as error:
-                            row['geometry_error'] = str(error)
+                    with timing.stage('render_dom_snapshot'):
+                        observed = browser.snapshot(html,viewport,png,args.max_nodes)
+                    with timing.stage('pixel_comparison'):
+                        with Image.open(record['screenshot']) as a, Image.open(png) as b:
+                            if a.size != b.size: raise ValueError('Screenshot dimensions differ')
+                            row['pixel_mae'] = float(np.abs(np.asarray(a.convert('RGB'),dtype=float)-np.asarray(b.convert('RGB'),dtype=float)).mean()/255)
+                    with timing.stage('dom_box_matching'):
+                        if is_webui and record.get('reference_boxes') and not reference_error:
+                            from .webui_pages import clipped_boxes
+                            boxes = clipped_boxes({n['id']:n['box'] for n in observed['nodes']},viewport,
+                                tuple(n['id'] for n in observed['nodes'] if n['role']=='body'))
+                            geometry = hungarian_box_metrics(boxes,record['reference_boxes'],viewport)
+                            row.update({'webui_'+k:v for k,v in geometry.items()})
+                        if reference is not None:
+                            try:
+                                geometry = hungarian_box_metrics({n['id']:n['box'] for n in observed['nodes']},
+                                    {n['id']:n['box'] for n in reference['nodes']},viewport,
+                                    tuple(n['id'] for n in observed['nodes'] if n['role']=='body'),
+                                    tuple(n['id'] for n in reference['nodes'] if n['role']=='body'))
+                                row.update({'dom_'+k:v for k,v in geometry.items()})
+                            except Exception as error:
+                                row['geometry_error'] = str(error)
                     if official:
-                        row.update(official.score(browser,html,ref_html,viewport,work/method))
+                        row.update(official.score(browser,html,ref_html,viewport,work/method,timing=timing))
                     if not row.get('geometry_error') and not reference_error:
                         score_cache[score_key] = ({k:v for k,v in row.items() if k not in metadata_keys}, png,
                             read_json(work/method/'official.json') if official else None)
                     row['evaluation_cache_hit'] = False
                 except Exception as error:
                     row['evaluation_error'] = str(error)
+                row['evaluation_timing'] = timing.report()
+                timing.event('method', 'failed' if row['evaluation_error'] else 'completed', **timing.report())
                 row['evaluation_seconds'] = time.perf_counter()-started
                 row['evaluation_browser_executions'] = browser.executions-before
                 page_rows.append(row)
