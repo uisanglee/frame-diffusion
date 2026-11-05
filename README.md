@@ -592,3 +592,27 @@ Unknown upstream pixel/text implementations fall back to their original code.
 caches and their signatures remain valid; no dataset preparation or VLM
 regeneration is needed. These optimizations do not reduce resolution, truncate
 blocks, change CLIP precision, or cap the official merging search.
+
+To aggregate actual work from a resumed evaluation log (also while it runs):
+
+```bash
+python -m framediff.evaluation_report \
+  --log log/d2c-pilot10-seed42-n2-static-v5-gpu01.log \
+  --out runs/d2c-pilot10-seed42-n2-static-v5/timing-report
+```
+
+The command prints a report and writes `evaluation-timing.json` and
+`evaluation-timing.md`. It ranks exclusive stage time and reports percentages,
+call counts, mean/max duration, failures, and CLIP's combined share. Group totals
+and detailed stage totals describe the same work, not additive totals. Initial
+CLIP/model loading is separate from per-page CLIP scoring. It reads stage events
+only: method-summary totals and historical timings in cached score files are
+never added again. Page-score, identical-HTML method-score, and internal-operation
+cache hits are reported separately as access counts (not unique page counts).
+
+Multiple distinct process logs may follow `--log`; do not supply mirrored copies
+of the same execution. Appended restarts count actual repeated work. Old logs
+without timing events cannot provide past timings. Pending/interrupted calls and
+malformed partial lines are reported; their missing durations cannot be inferred.
+The denominator is measured stage work, not full experiment elapsed time or GPU
+busy time. Report generation does not modify experiment results or caches.
