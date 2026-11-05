@@ -10,11 +10,13 @@ spec.loader.exec_module(runner)
 HTML = '<html><body><div style="width:100px;height:40px">hello</div></body></html>'
 
 
-def test_polishing_prompt_requests_complete_html_without_layout_constraints():
+def test_polishing_prompt_preserves_apps_and_uses_supplied_image_assets():
     prompt = runner.polishing_prompt(HTML)
     assert 'complete, runnable HTML document' in prompt
     assert 'viewport' not in prompt and 'compact' not in prompt
-    assert 'preserve' not in prompt and 'Adjust only' not in prompt
+    assert 'preserve the existing text, supplied assets, and application behavior' in prompt
+    assert 'React, JSX, Babel, and Tailwind are allowed' in prompt
+    assert 'rick.jpg' in prompt and 'Do not generate new images' in prompt
     assert prompt.endswith('\nCurrent HTML:\n' + HTML)
 
 

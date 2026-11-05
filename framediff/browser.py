@@ -81,7 +81,11 @@ class Browser:
             self._start_runtime()
         self.context=self.browser.new_context(java_script_enabled=False)
         self._runtime.contexts += 1
-        self.context.route('**/*',lambda route:route.abort())
+        def offline_route(route):
+            from .local_assets import fulfill_local_asset
+            if not fulfill_local_asset(route, getattr(self, '_local_asset_errors', None)):
+                route.abort()
+        self.context.route('**/*', offline_route)
         self.page=self.context.new_page()
     def reset_context(self):
         """Isolate untrusted pages and recover after a renderer/page crash."""

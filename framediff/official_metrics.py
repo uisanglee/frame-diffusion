@@ -190,5 +190,5 @@ class OfficialMetrics:
                     'bounded_render_and_clip_caches': True,
                 },
                 'compatibility_patch':self.compatibility_patch,
-                'protocol':'Upstream metric functions; shared fixed viewport; JS/network disabled; embedded assets; temporary preprocessing copies'})
+                'protocol':'Upstream metric functions; shared fixed viewport; JS/external network disabled; offline assets; temporary preprocessing copies'})
             return scores

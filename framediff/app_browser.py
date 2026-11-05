@@ -5,7 +5,6 @@ renderer. It supports a bounded set of browser libraries, not arbitrary apps.
 Original application source remains the deployable artifact; snapshots are an
 intermediate representation for CSS repair, never a replacement for that source.
 """
-import base64
 import hashlib
 import json
 import os
@@ -15,8 +14,10 @@ from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
 from .html_bridge import HtmlBrowser
+from .local_assets import (externalize_data_uris, store_asset, is_local_asset, read_asset,
+                          asset_root, CONTRACT as ASSET_CONTRACT)
 
-CONTRACT = 'generated-app-static-bridge-v1'
+CONTRACT = 'generated-app-static-bridge-v2-file-assets'
 
 
 def embed_application_assets(source):
@@ -112,6 +113,8 @@ class AppBrowser(HtmlBrowser):
         self.page.on('popup', lambda page: page.close())
 
     def _resource(self, url, headers=None):
+        if is_local_asset(url):
+            return read_asset(url)
         if not allowed_dependency(url):
             raise ValueError('Resource not allowlisted: '+url)
         if url in self.resources:return self.resources[url]
@@ -154,7 +157,7 @@ class AppBrowser(HtmlBrowser):
     def _route(self, route):
         request=route.request
         url=request.url
-        if request.method!='GET' or request.is_navigation_request() or not allowed_dependency(url):
+        if request.method!='GET' or request.is_navigation_request() or not (allowed_dependency(url) or is_local_asset(url)):
             self.resource_errors.append({'url':url,'error':'resource_not_allowlisted'})
             route.abort();return
         try:
@@ -167,7 +170,7 @@ class AppBrowser(HtmlBrowser):
 
     def load(self, html, viewport):
         from .explicit_html import reject_flat_html
-        html=embed_application_assets(html)
+        html=externalize_data_uris(embed_application_assets(html))
         reject_flat_html(html)
         # Each source runs in a new document/context: timers/listeners from the
         # preceding app cannot leak into another page's generated result.
@@ -277,22 +280,27 @@ class AppBrowser(HtmlBrowser):
                 if value.startswith(('data:','#')):return match.group(0)
                 url=urljoin(sheet['href'] or '',value)
                 resource=self._resource(url)
-                uri='data:'+resource['content_type'].split(';')[0]+';base64,'+base64.b64encode(resource['body']).decode()
+                uri=store_asset(resource['body'],resource['content_type'])
+                if urlsplit(url).fragment:
+                    uri += '#'+urlsplit(url).fragment
                 return 'url("'+uri+'")'
             css=re.sub(r'url\(([^)]+)\)',replace,css)
             if re.search(r'@import\b',css,re.I):raise ValueError('Static bridge does not support nested CSS @import')
             tag=soup.new_tag('style');tag.string=css
             if sheet['media']:tag['media']=sheet['media']
             soup.head.append(tag)
-        # Source images are normally already embedded benchmark assets. Never
+        # Source images are resolved benchmark assets. Never
         # write a snapshot that silently depends on the live network or blob URL.
         for image in soup.find_all('img'):
             src=image.get('src','')
             if src and not src.startswith('data:'):
+                if is_local_asset(src):
+                    read_asset(src)
+                    continue
                 resource=self.resources.get(src)
                 if not resource:raise ValueError('Cannot preserve image resource: '+src)
-                image['src']='data:'+resource['content_type'].split(';')[0]+';base64,'+base64.b64encode(resource['body']).decode()
-        return str(soup)
+                image['src']=store_asset(resource['body'],resource['content_type'])
+        return externalize_data_uris(str(soup))
 
     def snapshot(self, html, viewport, screenshot=None, max_nodes=127, visual_geometry=True,
                  require_content=False):
@@ -313,7 +321,8 @@ def freeze_application(source,viewport,out_dir,cache_dir=None,max_nodes=2048,bro
     before=out/'application.png';after=out/'static.png'
     report=dict(source_html=str(original),static_html=str(static),screenshot=str(before),
                 accepted=False,pixel_mae=None,max_box_error_px=None,
-                contract=CONTRACT,resources=[],viewport=list(viewport))
+                contract=CONTRACT,resources=[],viewport=list(viewport),
+                local_asset_contract=ASSET_CONTRACT,local_asset_cache=str(asset_root()))
     app=verification=None
     verification_start=(0,0)
     host_start=(browser_host.executions,browser_host.screenshots) if browser_host is not None else (0,0)
@@ -333,12 +342,15 @@ def freeze_application(source,viewport,out_dir,cache_dir=None,max_nodes=2048,bro
         (out/'freeze.json').write_text(json.dumps(report,indent=2))
 
     try:
-        source=embed_application_assets(source)
+        report['input_html_chars']=len(source)
+        source=externalize_data_uris(embed_application_assets(source))
         original.write_text(source)
+        report['source_html_chars']=len(source)
         app=AppBrowser(cache_dir,browser_host=browser_host)
         with app as browser:
             observed=browser.snapshot(source,viewport,before,max_nodes,require_content=True)
             static.write_text(observed['html'])
+            report['static_html_chars']=len(observed['html'])
             first=browser.page.locator('[data-tuide-app-node]').evaluate_all('els=>Object.fromEntries(els.map(e=>{const r=e.getBoundingClientRect();return [e.getAttribute("data-tuide-app-node"),[r.x,r.y,r.width,r.height]]}))')
         verification=browser_host if browser_host is not None else HtmlBrowser()
         verification_start=(verification.executions,verification.screenshots)

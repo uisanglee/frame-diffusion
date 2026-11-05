@@ -187,7 +187,9 @@ def prepare(args):
     application_mode = args.model == 'zai-org/UI2Code_N'
     if application_mode:
         from .app_browser import CONTRACT as APP_CONTRACT
+        from .ui2code_asset_prompt import CONTRACT as ASSET_PROMPT_CONTRACT
         settings['application_render_contract'] = APP_CONTRACT
+        settings['application_asset_prompt_contract'] = ASSET_PROMPT_CONTRACT
     if args.backend in ('qwen', 'hf'):
         settings['vlm_deployment'] = vlm.deployment_settings()
     if not settings.get('generate_initial'):
@@ -244,7 +246,11 @@ def prepare(args):
         if task.endswith('html'):
             from .html_generation import PROMPT, viewport_instruction
             if application_mode:
-                base_prompt = 'Return a complete, runnable HTML document.\n' + viewport_instruction(viewport) + base_prompt
+                from .ui2code_asset_prompt import image_asset_instruction
+                from .local_assets import externalize_data_uris
+                base_prompt = ('Return a complete, runnable HTML document.\n' + viewport_instruction(viewport)
+                               + image_asset_instruction(image_contract=settings.get('prompt_asset_contract', 'design2code-rick-v1'))
+                               + externalize_data_uris(base_prompt))
             else:
                 base_prompt = PROMPT + viewport_instruction(viewport) + base_prompt
             from .webui_placeholders import CONTRACT as IMAGE_CONTRACT, PROMPT as IMAGE_PROMPT

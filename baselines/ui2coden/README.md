@@ -25,9 +25,14 @@
 완전하고 실행 가능한 HTML 문서를 반환하도록 요청한다. UI2CodeN에는 React/JSX/Babel 및
 Tailwind CDN 금지 지시를 넣지 않는다. 별도 애플리케이션 렌더러에서 JavaScript를 실행하고,
 허용된 라이브러리 의존성을 캐시해 로딩한다. 학습용 정적 렌더러 설정은 변경하지 않는다.
-compact·viewport·DOM 보존·레이아웃 한정 지시는 추가하지 않는다. 이전 layout/general 옵션은
-제거했다. 프롬프트 변경 전 결과와 섞이지 않도록 새 출력 디렉터리를 사용한다.
-프롬프트는 `runner.py`와 출력 `config.json`에 기록된다.
+데이터셋별 이미지 규칙을 추가한다. Design2Code/Hard는 `rick.jpg`, 색상 치환 WebUI는
+빨강/초록/노랑/파랑/검정에 각각 `rick1.jpg`~`rick5.jpg`를 사용하도록 안내한다.
+기존 콘텐츠·자원·앱 동작을 유지하며 레이아웃/크기/간격 개선에 집중하고,
+새 이미지·SVG 그림·canvas·base64 이미지와 추가 이미지/아이콘/폰트 팩은 만들지 않도록 요청한다.
+이 지시는 프롬프트이며 모델 출력의 완전한 준수를 보장하지 않는다. React/Tailwind 실행은 유지한다.
+프롬프트 변경 전 결과와 섞이지 않도록 새 출력 디렉터리를 사용한다.
+공통 문구는 `framediff/ui2code_asset_prompt.py`, 실행기 문구와 contract는 `runner.py` 및
+출력 `config.json`에 기록된다.
 
 각 후보의 원본 애플리케이션은 `application-N/application.html`, 실행된 DOM/CSS는 capture
 메타데이터가 가리키는 정적 파일로 보존한다. 실행 화면과 정적 캡처 화면의 픽셀·박스가
@@ -36,6 +41,16 @@ compact·viewport·DOM 보존·레이아웃 한정 지시는 추가하지 않는
 후보 실패 시 마지막 정상 정적 HTML과 원본 애플리케이션 쌍을 모두 유지한다.
 실행·캡처·검증 시간은 해당 회차 비용에 포함되며, `application_capture`와
 `application_attempt`에 결과 및 비용을 기록한다. 이전 정적-only 실행 결과와 혼합하지 않는다.
+
+이미지·폰트 등의 바이너리는 `TUIDE_LOCAL_ASSET_CACHE`(기본 `.cache/application-assets`)의
+해시 기반 파일로 중복 없이 저장한다. HTML/CSS와 다음 round의 프롬프트에는 base64 대신 짧은
+`https://framediff-assets.invalid/...` 주소만 남긴다. 이 주소는 인터넷으로 요청하지 않고
+프로젝트 렌더러가 로컬 파일을 검증하여 제공한다. HTML을 평가용 임시 디렉터리로 복사해도
+그대로 로딩되며, 누락·변조 자원은 실패 처리한다. 외부 CSS의 기존 자원도 원본 바이트를 보존한다.
+`freeze.json`의 `local_asset_cache`, `input_html_chars`, `source_html_chars`, `static_html_chars`,
+`pixel_mae`, `max_box_error_px`로 용량과 화면 보존을 확인할 수 있다.
+서버를 옮기면 이 캐시와 `TUIDE_APP_ASSET_CACHE`(기본 `.cache/app-dependencies`)도 함께 복사한다.
+일반 브라우저로 HTML만 열면 전용 자원 주소를 로딩할 수 없으므로 프로젝트 렌더러를 사용한다.
 
 이 구현은 공식 논문 Table 1의 정확한 재현을 주장하지 않는다. 공개 데모를 이용해
 반복 루프를 구성했고, 반복 횟수·간소화 프롬프트·양자화·입력 축소는 이 실험의 설정이다.

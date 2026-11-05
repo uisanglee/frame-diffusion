@@ -97,8 +97,20 @@ class HtmlBrowser(Browser):
         # running. Dataset HTML is an untrusted static snapshot, so disable it.
         html=re.sub(r'<meta\b[^>]*http-equiv\s*=\s*["\']?\s*refresh\s*["\']?[^>]*>',
                     '',html,flags=re.I)
+        self._local_asset_errors = []
         self.page.set_viewport_size({'width': int(viewport[0]), 'height': int(viewport[1])})
         self.page.set_content(html, wait_until='load', timeout=30000)
+        from .local_assets import ORIGIN
+        if ORIGIN in html:
+            # A frozen app's local webfonts must settle before measuring boxes;
+            # a missing font must not silently fall back to a different face.
+            ready = self.page.evaluate('''()=>Promise.race([
+              document.fonts.ready.then(()=>true),
+              new Promise(resolve=>setTimeout(()=>resolve(false),30000))])''')
+            if not ready:
+                raise ValueError('Local asset fonts did not settle within 30 seconds')
+        if self._local_asset_errors:
+            raise ValueError('Local asset loading failed: '+str(self._local_asset_errors[:3]))
         self.executions += 1
         self.page.evaluate("""()=>{const s=document.querySelector('style[data-framediff-static]')||document.createElement('style');
           s.setAttribute('data-framediff-static','');

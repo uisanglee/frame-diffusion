@@ -103,7 +103,9 @@ def test_picture_source_is_materialized_without_identity_mismatch(tmp_path):
 
 
 @pytest.mark.browser
-def test_javascript_image_uses_embedded_reserved_asset_and_saved_source(tmp_path):
+def test_javascript_image_uses_local_reserved_asset_and_saved_source(tmp_path,monkeypatch):
+    from framediff.local_assets import ORIGIN
+    monkeypatch.setenv('TUIDE_LOCAL_ASSET_CACHE',str(tmp_path/'file-assets'))
     source='''<html><body><div id="root"></div><script>
 const image=new Image();image.src='rick1.jpg';image.style.cssText='width:80px;height:60px';
 document.getElementById('root').appendChild(image);
@@ -116,9 +118,114 @@ document.getElementById('root').appendChild(image);
     assert result['accepted'] is True
     assert result['pixel_mae']==0
     saved=(tmp_path/'snapshot/application.html').read_text()
-    assert "image.src='data:image/svg+xml;base64," in saved
+    assert f"image.src='{ORIGIN}/" in saved
+    assert 'data:image/' not in saved
     assert 'rick1.jpg' not in saved
     assert '<script>' in saved
+
+
+@pytest.mark.browser
+def test_localized_images_and_css_background_preserve_pixels_after_copy(tmp_path,monkeypatch):
+    import base64
+    import shutil
+    from PIL import Image
+    from framediff.html_bridge import HtmlBrowser
+    from framediff.local_assets import ORIGIN
+    monkeypatch.setenv('TUIDE_LOCAL_ASSET_CACHE',str(tmp_path/'file-assets'))
+    def image_uri(color):
+        svg=f'<svg xmlns="http://www.w3.org/2000/svg" width="40" height="30"><rect width="40" height="30" fill="{color}"/></svg>'
+        return 'data:image/svg+xml;base64,'+base64.b64encode(svg.encode()).decode()
+    source=f'''<!DOCTYPE html><html><head><style>
+body{{margin:0}}#background{{width:80px;height:60px;background-image:url("{image_uri('blue')}")}}
+</style></head><body><img width="80" height="60" src="{image_uri('red')}"><div id="background"></div></body></html>'''
+    baseline=tmp_path/'baseline.png'
+    with HtmlBrowser() as browser:
+        browser.snapshot(source,[320,240],baseline)
+    result=freeze_application(source,[320,240],tmp_path/'snapshot',tmp_path/'dependencies')
+    assert result['accepted'] is True
+    assert result['pixel_mae']==0
+    assert result['max_box_error_px']==0
+    for filename in ('application.html','static.html'):
+        saved=(tmp_path/'snapshot'/filename).read_text()
+        assert ORIGIN+'/' in saved
+        assert 'data:image/' not in saved
+    copied=tmp_path/'other-directory'/'copied.html'
+    copied.parent.mkdir()
+    shutil.copyfile(result['static_html'],copied)
+    rendered=tmp_path/'copied.png'
+    with HtmlBrowser() as browser:
+        browser.snapshot(copied.read_text(),[320,240],rendered)
+        assert browser.page.locator('img').evaluate('e=>e.naturalWidth')==40
+        assert ORIGIN in browser.page.locator('#background').evaluate('e=>getComputedStyle(e).backgroundImage')
+    with Image.open(baseline) as original, Image.open(rendered) as actual:
+        assert original.size==actual.size
+        assert original.convert('RGB').tobytes()==actual.convert('RGB').tobytes()
+
+
+@pytest.mark.browser
+def test_cached_stylesheet_and_font_freeze_to_offline_files(tmp_path,monkeypatch):
+    import base64
+    import hashlib
+    from pathlib import Path
+    from PIL import Image
+    from playwright.sync_api import APIRequestContext
+    from framediff.html_bridge import HtmlBrowser
+    from framediff.local_assets import ORIGIN
+    monkeypatch.setenv('TUIDE_LOCAL_ASSET_CACHE',str(tmp_path/'file-assets'))
+    dependencies=tmp_path/'dependencies'
+    dependencies.mkdir()
+    stylesheet='https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/fixture.css'
+    font_url='https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/webfonts/fixture.ttf'
+    font=(Path(__file__).resolve().parents[1]/'figures/assets/InterVariable.ttf').read_bytes()
+    svg=b'<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="blue"/></svg>'
+    image='data:image/svg+xml;base64,'+base64.b64encode(svg).decode()
+    css=('@font-face{font-family:FixtureFont;src:url("../webfonts/fixture.ttf") format("truetype");}'
+         'body{margin:0}p{font-family:FixtureFont;font-size:30px;line-height:40px;}'
+         f'.image{{width:40px;height:40px;background-image:url("{image}");}}').encode()
+    for url,body,mime in ((stylesheet,css,'text/css'),(font_url,font,'font/ttf')):
+        digest=hashlib.sha256(body).hexdigest()
+        (dependencies/digest).write_bytes(body)
+        (dependencies/(hashlib.sha256(url.encode()).hexdigest()+'.json')).write_text(json.dumps(
+            dict(url=url,resolved_url=url,sha256=digest,content_type=mime)))
+    def no_network(*args,**kwargs):
+        pytest.fail('Seeded dependency fixture unexpectedly attempted a network download')
+    monkeypatch.setattr(APIRequestContext,'get',no_network)
+    source=f'<html><head><link rel="stylesheet" href="{stylesheet}"></head><body><p>Offline font</p><div class="image"></div></body></html>'
+    with AppBrowser(dependencies) as browser:
+        browser.snapshot(source,[320,240])
+        assert browser.page.evaluate("[...document.fonts].some(f=>f.family==='FixtureFont'&&f.status==='loaded')")
+    result=freeze_application(source,[320,240],tmp_path/'snapshot',dependencies)
+    assert result['accepted'] and result['pixel_mae']==0 and result['max_box_error_px']==0
+    static=Path(result['static_html']).read_text()
+    assert ORIGIN+'/' in static and '.ttf' in static
+    assert 'data:' not in static
+    assert font_url not in static
+    rendered=tmp_path/'offline-font.png'
+    with HtmlBrowser() as browser:
+        browser.load(static,[320,240])
+        browser.stable_capture()
+        assert browser.page.evaluate("[...document.fonts].some(f=>f.family==='FixtureFont'&&f.status==='loaded')")
+        browser.page.screenshot(path=str(rendered),animations='disabled')
+    with Image.open(result['screenshot']) as expected, Image.open(rendered) as actual:
+        assert expected.size==actual.size
+        assert expected.convert('RGB').tobytes()==actual.convert('RGB').tobytes()
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize('application',[False,True])
+def test_missing_local_asset_is_a_render_failure(tmp_path,monkeypatch,application):
+    from urllib.parse import urlsplit
+    from framediff.html_bridge import HtmlBrowser
+    from framediff.local_assets import store_asset
+    cache=tmp_path/'file-assets'
+    monkeypatch.setenv('TUIDE_LOCAL_ASSET_CACHE',str(cache))
+    asset=store_asset(b'<svg xmlns="http://www.w3.org/2000/svg" width="40" height="30"/>','image/svg+xml')
+    (cache/urlsplit(asset).path.lstrip('/')).unlink()
+    source=f'<html><body><p>Visible text must not hide missing assets</p><img src="{asset}"></body></html>'
+    browser=AppBrowser(tmp_path/'dependencies') if application else HtmlBrowser()
+    with browser:
+        with pytest.raises(ValueError,match='asset loading failed|resource loading failed'):
+            browser.snapshot(source,[320,240])
 
 
 @pytest.mark.browser

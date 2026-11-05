@@ -19,6 +19,7 @@ from framediff.app_browser import freeze_application, CONTRACT as APPLICATION_CO
 from framediff.vlm_devices import (deployment_settings, input_device,
     start_cuda_measurement, finish_cuda_measurement)
 from framediff.vlm import generation_metadata
+from framediff.ui2code_asset_prompt import CONTRACT as ASSET_PROMPT_CONTRACT, image_asset_instruction
 
 MODEL = 'zai-org/UI2Code_N'
 GENERATION_CONTRACT = 'ui2coden-official-generation-config-v1'
@@ -29,7 +30,12 @@ Return a complete, runnable HTML document.
 
 
 def polishing_prompt(html):
-    return PROMPT + '\nCurrent HTML:\n' + html
+    from framediff.local_assets import externalize_data_uris
+    rules = image_asset_instruction(html)
+    # Historical inputs can contain large embedded resources. Keep their exact
+    # bytes available locally, but never spend model tokens on binary payloads.
+    html = externalize_data_uris(html)
+    return PROMPT + rules + '\nCurrent HTML:\n' + html
 
 
 def sha(path):
@@ -344,6 +350,7 @@ def main():
     with open(out / '.lock', 'w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         config = dict(protocol='ui2coden-local-polishing-v1', generation_contract=GENERATION_CONTRACT,
+            asset_prompt_contract=ASSET_PROMPT_CONTRACT,
             application_render_contract=APPLICATION_CONTRACT,
             settings={k: v for k, v in vars(args).items()
             if k not in ('resume', 'check_inputs', 'out', 'path_root')}, prompt=PROMPT,
