@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from framediff import webui_final_split as split
-from framediff.ir import read_jsonl,write_json,write_jsonl
+from framediff.ir import read_json,read_jsonl,write_json,write_jsonl
 from framediff.visual_data import validate_splits
 
 
@@ -136,3 +136,7 @@ def test_completion_order_does_not_change_final_manifests(tmp_path,monkeypatch):
     monkeypatch.setattr(split,'timed_page_map',reversed_map)
     assert split.publish(tmp_path)==first
     assert all(p.read_bytes()==data for p,data in content.items())
+    progress=read_json(tmp_path/'master/final-split-progress.json')
+    assert progress['stage']=='heldout-round-1'
+    assert progress['processed']==progress['total']==progress['kept']==8
+    assert progress['percent']==100 and progress['failures']==progress['timeouts']==0

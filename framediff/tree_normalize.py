@@ -16,6 +16,7 @@ from .visual import annotate, elements, VISUAL_GEOMETRY_CONTRACT, DETECTOR_LABEL
 from .visual_data import validate_splits
 from .web_experiment import digest, guard_run
 from .preparation_workers import page_map, write_json, write_jsonl
+from .preparation_progress import PreparationProgress
 
 
 def _guard_normalization_run(out,config,resume,inputs=None):
@@ -301,6 +302,8 @@ def prepare(args):
             rejection_path=out/f'rejections-{split}.jsonl'
             write_jsonl(rejection_path,errors)
             reasons=Counter(e['error'] for e in errors)
+            progress=PreparationProgress(f'normalize-{split}',len(clean),out/f'progress-{split}.json')
+            progress.update(0,kept=0,failures=len(errors),top_errors=reasons.most_common(10),workers=workers)
             tasks=((args,out,split,index,page_id,row,{page_id:pages.get(page_id,{})})
                    for index,(page_id,row) in enumerate(clean.items()))
             for index,(new,page,failure) in enumerate(page_map(_prepare_page,tasks,workers)):
@@ -312,11 +315,8 @@ def prepare(args):
                     print({'normalization_failure':failure},flush=True)
                 else:
                     kept.append(new);selected.append(page)
-                if index%50==0 or index==len(clean)-1:
-                    print(f'{split} normalized [{index+1}/{len(clean)}], kept={len(kept)}, failures={len(errors)}',flush=True)
-                    print({'normalization_top_errors':reasons.most_common(5)},flush=True)
-                write_json(out/f'progress-{split}.json',{'processed':index+1,'total':len(clean),
-                    'kept':len(kept),'failures':len(errors),'top_errors':reasons.most_common(10)})
+                progress.update(index+1,kept=len(kept),failures=len(errors),
+                                top_errors=reasons.most_common(10),workers=workers)
             write_jsonl(out/f'policy-{split}.jsonl',kept)
             write_jsonl(out/f'pages-{split}.jsonl',selected)
             write_jsonl(out/f'rejections-{split}.jsonl',errors)

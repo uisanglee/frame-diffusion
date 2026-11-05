@@ -22,13 +22,52 @@ nohup env PYTHONUNBUFFERED=1 PREPARE_WORKERS=4 \
 
 Defaults: source `data/webui-full-dom-screened-7k-v1/7000/source/manifest.jsonl`,
 output `data/new`. Override `SOURCE_MANIFEST`, `COLOR_DATA`,
-`DATA_SIZE` (the output scale name) if needed. Source splits are inherited.
+`DATA_SIZE` (the output scale name) if needed. Source splits are provisional;
+the final successful unique pages are split 8:1:1, with all views of a page together.
 Failed downloads of required active images, unknown intrinsic sizes and >1px changes to any measured DOM
 box are rejected and recorded in `master/source/rejections.jsonl`. Actual counts
 may be below 7000; there is no silent resampling. Source images and downloads
 are cached. Missing-image failures are not replaced by invented dimensions.
-The conversion step is sequential and resumes per view; subsequent render,
-normalization and corruption preparation use PREPARE_WORKERS. No GPU is needed.
+Conversion, rendering, normalization and corruption preparation use
+`PREPARE_WORKERS` and reuse completed per-view caches. No GPU is needed.
+
+When image conversion has already finished, resume downstream preparation with
+`--resume-after-images`. To intentionally rebuild downstream labels and fixed
+corruptions while preserving converted images, run:
+
+```bash
+nohup env PYTHONUNBUFFERED=1 PREPARE_WORKERS=4 COLOR_DATA=data/new \
+  bash scripts/prepare_webui_color_images.sh --rebuild-after-images \
+  > log/prepare-webui-color-images-rebuild.log 2>&1 < /dev/null &
+echo $! > log/prepare-webui-color-images-rebuild.pid
+
+tail -n 50 -f log/prepare-webui-color-images-rebuild.log
+```
+
+Every `--rebuild-after-images` invocation moves existing downstream caches to
+`preparation-history/` before rebuilding. After an interruption use
+`--resume-after-images` to keep the newly completed work.
+
+The log marks stages `[1/4]` through `[4/4]`. Each stage reports completed/total
+**page/viewport views**, percentage, accepted/failed counts, elapsed time and an
+estimated remaining time. Image conversion and rendering also report cache hits.
+Initial, final and periodic snapshots are written after 50 more completed views
+or 30 elapsed seconds, checked when a result arrives; a long-running individual
+view does not produce heartbeat messages. ETA uses the observed average and can
+change substantially when cached and uncached work are mixed. Normalization is
+reported per provisional split. Final held-out generation is reported per
+rebalancing round, since failures can require additional held-out candidates.
+These are stage/round percentages, not a single end-to-end percentage.
+
+The latest snapshots are saved under `COLOR_DATA`:
+
+- `master/source/progress.json` (image conversion; skipped when reusing images)
+- `master/rendered/progress.json`
+- `master/labels/progress-train.json`, `progress-val.json`, `progress-test.json`
+- `master/final-split-progress.json` (held-out generation round)
+
+Only counters and timers are added; progress reporting does not rerender pages
+or rescan image/cache directories.
 
 CSS backgrounds declared in inline styles or style blocks also get solid colours
 with intrinsic size preservation, after the img-element sequence. External CSS,

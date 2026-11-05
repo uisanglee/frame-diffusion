@@ -22,13 +22,15 @@ source_manifest=${SOURCE_MANIFEST:-data/webui-full-dom-screened-7k-v1/7000/sourc
 data=${COLOR_DATA:-data/new}
 size=${DATA_SIZE:-7000}
 workers=${PREPARE_WORKERS:-4}
+echo "WebUI preparation: output=$data, workers=$workers (progress counts page/viewport views)"
 if [[ "$resume_after_images" == 1 ]]; then
   if [[ ! -s "$data/master/source/manifest.jsonl" ]]; then
     echo "Cannot resume: missing or empty $data/master/source/manifest.jsonl" >&2
     exit 1
   fi
-  echo "Reusing converted image manifest: $data/master/source/manifest.jsonl"
+  echo "[1/4] Image conversion skipped; reusing $data/master/source/manifest.jsonl"
 else
+  echo '[1/4] Image download and colour replacement'
   python -m framediff.webui_placeholders --manifest "$source_manifest" --out "$data/master/source" --workers "$workers"
 fi
 if [[ "$rebuild_after_images" == 1 ]]; then
@@ -42,12 +44,15 @@ if [[ "$rebuild_after_images" == 1 ]]; then
   done
   echo 'Rebuilding downstream data from converted images; image downloads/conversion are skipped.'
 fi
+echo '[2/4] Detector rendering and label generation'
 python -m framediff visual-build-data --manifest "$data/master/source/manifest.jsonl" \
   --out "$data/master/rendered" --workers "$workers" --clean-only \
   --abstract-size 384 --seed 42 --min-elements 3 --max-source-mae 1 --resume
+echo '[3/4] HTML normalization and editable CSS inspection (per source split)'
 python -m framediff visual-tree-normalize --rendered "$data/master/rendered" \
   --out "$data/master/labels" --workers "$workers" --latest-visual-labels --clean-targets-only --final-repartition \
   --max-css-owners 512 --observation-size 384 --seed 42 --resume
+echo '[4/4] Fixed validation/test corruption and final 8:1:1 page split'
 python -m framediff.webui_final_split --data "$data" --size "$size" \
   --seed "${SPLIT_SEED:-42}" --workers "$workers" --timeout "${PREPARE_TIMEOUT:-180}"
 echo "Preparation complete. Final 8:1:1 page split: $data/$size/coverage.json"

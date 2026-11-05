@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 from .ir import read_json, read_jsonl
 from .preparation_workers import timed_page_map, write_json, write_jsonl
+from .preparation_progress import PreparationProgress
 from .visual_data import validate_splits
 from .web_experiment import digest
 
@@ -107,12 +108,18 @@ def publish(root, size=7000, seed=42, workers=4, timeout=180):
     normalized_count = len(set(page_ids.values()))
     frozen = {}; rejected = {}
     settings = dict(seed=90210,max_noise=4,samples_per_page=1,observation_size=384)
+    round_number = 0
     while True:
         assignment, counts = allocate((page_ids[v] for v in available), seed)
         validate_splits([{**source[v], 'group':'webui-page:'+page_ids[v],
                           'page_id':page_ids[v], 'split':assignment[page_ids[v]]} for v in available])
         pending = sorted(v for v in available if assignment[page_ids[v]]!='train' and v not in frozen)
         if not pending: break
+        round_number += 1
+        progress = PreparationProgress(f'heldout-round-{round_number}',len(pending),
+                                       master/'final-split-progress.json')
+        processed = 0; timeouts = 0
+        progress.update(0,kept=0,failures=0,timeouts=0,workers=workers,round=round_number)
         print(json.dumps(dict(final_split='prepare_missing_heldout',views=len(pending),pages=counts)),flush=True)
         failures = set()
         for index, result, error in timed_page_map(_heldout,
@@ -124,6 +131,10 @@ def publish(root, size=7000, seed=42, workers=4, timeout=180):
                 write_json(_heldout_cache(clean[view],master,settings)/'result.json',result)
             if result['rows']: frozen[view] = result['rows']
             else: rejected[view] = result['error']; failures.add(view)
+            processed += 1
+            timeouts += int(bool(error) or (result.get('error') or {}).get('error_type')=='TimeoutError')
+            progress.update(processed,kept=processed-len(failures),failures=len(failures),
+                            timeouts=timeouts,workers=workers,round=round_number)
         available -= failures
         # Failures can remove the last usable view of a page. Recompute quotas
         # and fill the held-out sets with other successful pages until stable.

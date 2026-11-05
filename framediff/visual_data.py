@@ -9,6 +9,7 @@ from PIL import Image
 
 from .ir import read_json,read_jsonl
 from .preparation_workers import page_map,write_json,write_jsonl
+from .preparation_progress import PreparationProgress
 from .html_bridge import HtmlBrowser,embed_placeholder
 from .html_feedback import refresh_geometry
 from .plans import dom_tree
@@ -235,6 +236,8 @@ def build(args):
     _guard_render_run(out,config,args.resume)
     policy=[];detection=[];pages=[];errors=[]
     cache_hits=0
+    progress=PreparationProgress('render',len(sources),out/'progress.json')
+    progress.update(0,pages=0,kept=0,failures=0,cache_hits=0,workers=workers)
     tasks=((args,out,index,source) for index,source in enumerate(sources))
     for index,(saved,error,reused) in enumerate(page_map(_render_page,tasks,workers)):
         if error:
@@ -242,9 +245,8 @@ def build(args):
         else:
             policy+=saved['policy'];detection+=saved['detection'];pages.append(saved['page'])
             cache_hits+=int(reused)
-        print(f'[{index+1}/{len(sources)}] visual examples={len(policy)}, failures={len(errors)}, cache_hits={cache_hits}',flush=True)
-        write_json(out/'progress.json',dict(processed=index+1,total=len(sources),
-            pages=len(pages),failures=len(errors),cache_hits=cache_hits,workers=workers))
+        progress.update(index+1,pages=len(pages),kept=len(pages),examples=len(policy),
+                        failures=len(errors),cache_hits=cache_hits,workers=workers)
     for split in ('train','val','test'):
         write_jsonl(out/f'policy-{split}.jsonl',[r for r in policy if r['split']==split])
         write_jsonl(out/f'detector-{split}.jsonl',[r for r in detection if r['split']==split])

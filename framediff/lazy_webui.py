@@ -83,9 +83,9 @@ def preparation_fingerprint():
     # retain their paths/bytes; new clean records share identical assets. Never
     # alias an unknown future implementation.
     compatible={
-        'tree_normalize.py':('a2655613d5455d11ea3a83c2eca5ba9e8f410cb8fb3c552132494604caf55d54',
+        'tree_normalize.py':('90aa5af933f1ad496eb287d1aa85c268d082392304f571500092db8636fc5854',
                              'ee391e20486af27009ea4675d82c24562b7762c2bd9fa7ed224db7467d01e3ce'),
-        'visual_data.py':('440aca3baefb0cb3198873d3a1e29ff8c7b6575075f38b26a0fe199af58d75c7',
+        'visual_data.py':('2da5c1237318f527b2c8c0f1925846d018377e5156488860029284a1521eaeb6',
                           '47f188efeb3944e610a8a315afd07539f8f3b76b7fc485587c717e1d5d63d4ff'),
     }
     for name,(new,old) in compatible.items():

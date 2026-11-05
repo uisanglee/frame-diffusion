@@ -10,6 +10,7 @@ from urllib.parse import unquote_to_bytes
 from bs4 import BeautifulSoup
 from .ir import read_jsonl
 from .preparation_workers import page_map, write_json, write_jsonl
+from .preparation_progress import PreparationProgress
 
 CONTRACT='webui-five-color-images-v1'
 COLORS=('red','green','yellow','blue','black')
@@ -190,15 +191,21 @@ def prepare(args):
     for i,color in enumerate(COLORS):
         path=out/f'rick{i+1}.jpg'
         if not path.exists():Image.new('RGB',(1,1),color).save(path,quality=100,subsampling=0)
-    rows=[];errors=[]
+    rows=[];errors=[];cache_hits=0
+    # Count records without retaining a second copy of the source manifest.
+    with source.open() as stream:total=sum(bool(line.strip()) for line in stream)
+    progress=PreparationProgress('images',total,out/'progress.json')
+    progress.update(0,kept=0,failures=0,cache_hits=0,workers=workers)
     tasks=((row,out) for row in read_jsonl(source))
-    for saved,error,count in page_map(_prepare_view,tasks,workers):
+    for index,(saved,error,count) in enumerate(page_map(_prepare_view,tasks,workers)):
         if error:
             errors.append(error);print(json.dumps(error),flush=True)
         else:
             rows.append(saved)
+            cache_hits+=int(count is None)
             if count is not None:
                 print(json.dumps({'id':saved['id'],'status':'prepared','images':count}),flush=True)
+        progress.update(index+1,kept=len(rows),failures=len(errors),cache_hits=cache_hits,workers=workers)
     write_jsonl(out/'manifest.jsonl',rows);write_jsonl(out/'rejections.jsonl',errors)
     for split in ('train','val','test'):write_jsonl(out/f'manifest-{split}.jsonl',[r for r in rows if r['split']==split])
     write_json(out/'report.json',dict(kept=len(rows),failed=len(errors),contract=CONTRACT))
