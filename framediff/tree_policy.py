@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import torch
+import numpy as np
 from torch import nn
 from torch.nn import functional as F
 
@@ -24,6 +25,23 @@ from .web_experiment import digest, guard_run
 from .training_shutdown import cleanup_on_termination
 
 KIND = 'visual-policy-css-tree-v1'
+
+
+class InvalidPrediction(ValueError):
+    """Expected failure to complete an action under the decoding grammar."""
+
+
+def declaration_tensor(states, nodes, fields, device):
+    """Encode on CPU once; avoid one CUDA allocation/copy per CSS field."""
+    values=np.zeros((len(states),nodes,len(fields),64),dtype=np.int64)
+    for i,state in enumerate(states):
+        if len(state)>nodes:raise ValueError('Too many DOM nodes')
+        for j,props in enumerate(state):
+            if len(props)!=len(fields):raise ValueError('Action field schema does not match checkpoint')
+            for k,(value,priority) in enumerate(props):
+                encoded=(value+'!'+priority).encode()[:64]
+                values[i,j,k,:len(encoded)]=np.frombuffer(encoded,dtype=np.uint8).astype(np.int64)+1
+    return torch.from_numpy(values).to(device)
 
 POLICY_SCALES = {
     's': {'hidden': 128, 'layers': 3, 'heads': 4},
@@ -116,16 +134,8 @@ class TreePolicy(nn.Module):
         from torchvision.ops import roi_align
         spatial,feature=self.encode_pair(target,current) if encoded_pair is None else encoded_pair
         b,n=batch['mask'].shape;device=target.device
-        declarations=torch.zeros(b,n,len(self.cfg.fields),64,dtype=torch.long,device=device)
-        for i,state in enumerate(states):
-            if len(state)>self.cfg.max_nodes: raise ValueError('Too many DOM nodes')
-            for j,props in enumerate(state):
-                if len(props)!=len(self.cfg.fields):raise ValueError('Action field schema does not match checkpoint')
-                for k,(value,priority) in enumerate(props):
-                    # Current CSS is context, not target CSS. Unsupported unchanged
-                    # values remain visible as bytes; only replacements use grammar.
-                    encoded=(value+'!'+priority).encode()[:64]
-                    declarations[i,j,k,:len(encoded)]=torch.tensor([v+1 for v in encoded],device=device)
+        declarations=batch.get('declarations')
+        if declarations is None:declarations=declaration_tensor(states,n,self.cfg.fields,device)
         # Preserve character order (12px != 21px) and field identity (width != height).
         flat=declarations.flatten(0,2);lengths=(flat!=0).sum(-1).clamp_min(1)
         encoded,_=self.css_encoder(self.byte(flat))
@@ -182,12 +192,12 @@ class TreePolicy(nn.Module):
                 if not prefixes[i] and restrictions[i] is not None:
                     permitted={self.tokenizer.ids[f'N{n}'] for n in restrictions[i]}
                     allowed=[v for v in allowed if v in permitted]
-                if not allowed:raise ValueError('No grammar-valid continuation')
+                if not allowed:raise InvalidPrediction('No grammar-valid continuation')
                 token=allowed[int(scores[i,allowed].argmax())];prefixes[i].append(token)
                 if token==self.tokenizer.ids['EOS']:
                     results[i]=self.tokenizer.decode(prefixes[i],len(state));finished[i]=True
             if all(finished):return results
-        raise ValueError('Replacement exceeded grammar token limit')
+        raise InvalidPrediction('Replacement exceeded grammar token limit')
 
     @torch.no_grad()
     def predict(self,batch,target,current,states,encoded_pair=None,allowed_owners=None):
@@ -201,12 +211,12 @@ class TreePolicy(nn.Module):
             if not prefix and allowed_owners is not None:
                 permitted={self.tokenizer.ids[f'N{i}'] for i in allowed_owners}
                 allowed=[v for v in allowed if v in permitted]
-            if not allowed: raise ValueError('No grammar-valid continuation')
+            if not allowed: raise InvalidPrediction('No grammar-valid continuation')
             tokens=torch.tensor([[self.tokenizer.ids['BOS'],*prefix]],device=target.device)
             scores=self.logits(memory,padding,tokens)[0,-1]
             next_id=allowed[int(scores[allowed].argmax())];prefix.append(next_id)
             if next_id==self.tokenizer.ids['EOS']: return self.tokenizer.decode(prefix,len(states[0]))
-        raise ValueError('Replacement exceeded grammar token limit')
+        raise InvalidPrediction('Replacement exceeded grammar token limit')
 
 
 def tree_batch(rows,device,max_nodes):
@@ -216,11 +226,11 @@ def tree_batch(rows,device,max_nodes):
               else (r['current'],r['current_boxes']) for r in rows]
     b=len(rows);n=max(len(t['nodes']) for t,_ in contexts)
     if n>max_nodes:raise ValueError(f'{n} CSS/DOM owners exceeds max_nodes={max_nodes}; increase --max-nodes')
-    batch={'mask':torch.zeros(b,n,dtype=torch.bool,device=device),
-           'relation':torch.zeros(b,n,n,dtype=torch.long,device=device),
-           'owner_type':torch.zeros(b,n,dtype=torch.long,device=device),
-           'owner_text':torch.zeros(b,n,256,dtype=torch.long,device=device)}
-    rois=torch.zeros(b,n,4,device=device)
+    batch={'mask':np.zeros((b,n),dtype=bool),
+           'relation':np.zeros((b,n,n),dtype=np.int64),
+           'owner_type':np.zeros((b,n),dtype=np.int64),
+           'owner_text':np.zeros((b,n,256),dtype=np.int64)}
+    rois=np.zeros((b,n,4),dtype=np.float32)
     for i,(row,(tree,boxes)) in enumerate(zip(rows,contexts)):
         values=[];scale=max(row['viewport'])
         nodes=tree['nodes'];ids={a['id']:j for j,a in enumerate(nodes)}
@@ -231,15 +241,16 @@ def tree_batch(rows,device,max_nodes):
         for j,owner in enumerate(row.get('css_owners',[])):
             batch['owner_type'][i,j]={'root':0,'inline':1,'rule':2}[owner['kind']]
             text=json.dumps({k:v for k,v in owner.items() if k!='matches'},sort_keys=True).encode()[:256]
-            batch['owner_text'][i,j,:len(text)]=torch.tensor([v+1 for v in text],device=device)
+            batch['owner_text'][i,j,:len(text)]=np.frombuffer(text,dtype=np.uint8).astype(np.int64)+1
             if owner['kind']=='rule':
                 for member in owner['matches']:
                     if member in ids:relation[j][ids[member]]=2;relation[ids[member]][j]=3
-        batch['relation'][i,:m,:m]=torch.tensor(relation,device=device)
+        batch['relation'][i,:m,:m]=relation
         for node in nodes:
             x,y,w,h=boxes[node['id']];values.append([x/scale,y/scale,(x+w)/scale,(y+h)/scale])
-        rois[i,:len(values)]=torch.tensor(values,device=device).clamp(0,1)
+        rois[i,:len(values)]=np.clip(np.asarray(values,dtype=np.float32),0,1)
     batch['roi']=rois
+    batch={key:torch.from_numpy(value).to(device) for key,value in batch.items()}
     from .explicit_html import owner_size_limits
     batch['explicit_owner_limits']=[owner_size_limits(r) for r in rows]
     return batch
@@ -265,6 +276,30 @@ def batch_inputs(net,rows,device,predicted=False):
             targets.append(image_tensor(row['target_image'],cfg.size));currents.append(image_tensor(row['current_image'],cfg.size))
     batch=tree_batch(rows,device,cfg.max_nodes)
     return batch,torch.stack(targets).to(device),torch.stack(currents).to(device),[r['declaration_state'] for r in rows]
+
+
+class ValidationInputs:
+    """Bounded, run-local cache of immutable validation inputs, never model features.
+
+    Admit batches until full instead of cycling through a larger validation set
+    and evicting every previously cached batch. Online training never uses it.
+    """
+    def __init__(self,max_bytes=128*1024*1024):
+        self.max_bytes=max_bytes;self.bytes=0;self.entries={}
+
+    def get(self,net,rows,device,predicted=False):
+        key=(tuple(id(row) for row in rows),predicted)
+        value=self.entries.get(key)
+        if value is None:
+            value=batch_inputs(net,rows,'cpu',predicted)
+            batch,target,current,states=value
+            batch['declarations']=declaration_tensor(states,batch['mask'].shape[1],net.cfg.fields,'cpu')
+            size=sum(t.numel()*t.element_size() for t in (*batch.values(),target,current) if isinstance(t,torch.Tensor))
+            if self.bytes+size<=self.max_bytes:
+                self.entries[key]=value;self.bytes+=size
+        batch,target,current,states=value
+        return ({k:v.to(device) if isinstance(v,torch.Tensor) else v for k,v in batch.items()},
+                target.to(device),current.to(device),states)
 
 
 def validation_target_states(rows,out,data_signature,stylesheets):
@@ -325,15 +360,24 @@ def symbolic_policy_metrics(net,rows,target_states,device,predicted,amp):
         current=row['declaration_state'];faults=differing_sites(current,target,fields);before=len(faults)
         if before<1:continue
         totals['n']+=1;totals['distance']+=before;totals['positive_actions']+=before
+        # Model/data/device failures must not masquerade as invalid CSS actions.
+        inputs=batch_inputs(net,[row],device,predicted)
         try:
-            inputs=batch_inputs(net,[row],device,predicted)
             with amp():action=net.predict(*inputs)
+        except InvalidPrediction:
+            totals['invalid']+=1
+            continue
+        try:
             owner,field,value,priority=validate_edit(action,len(current),fields)
+            from .explicit_html import check_record_edit
+            check_record_edit(row,action)
+        except ValueError:
+            totals['invalid']+=1
+            continue
+        else:
             selected_fault=(owner,field) in faults
             totals['target_correct']+=int(selected_fault)
             entry=per_property[field];entry['n']+=1;entry['target_correct']+=int(selected_fault)
-            from .explicit_html import check_record_edit
-            check_record_edit(row,action)
             remains_faulty=not declaration_equal([value,priority],target[owner][fields.index(field)])
             # One action replaces one declaration. No full-state copy or browser
             # call is needed to count its effect.
@@ -342,8 +386,6 @@ def symbolic_policy_metrics(net,rows,target_states,device,predicted,amp):
             if gain>0:totals['improving']+=1;entry['improving']+=1
             elif gain<0:totals['worsening']+=1
             else:totals['no_change']+=1
-        except Exception:
-            totals['invalid']+=1
     n=totals['n']
     if not n:return {'symbolic_metric_n':0,'action_metric_contract':METRIC_CONTRACT,
                      'action_target_accuracy':None,'exact_repair_action_rate':None}
@@ -540,6 +582,10 @@ def train(args):
                                  'online_target_pages':len(targets) if targets else 0})
     def amp(): return torch.autocast('cuda',dtype=torch.bfloat16) if device.startswith('cuda') and args.bf16 else contextlib.nullcontext()
     def loss(rows): return net.loss(*batch_inputs(net,rows,device,args.predicted_targets),[r['replacement_edit'] for r in rows])
+    validation_inputs=ValidationInputs()
+    def validation_loss(rows):
+        return net.loss(*validation_inputs.get(net,rows,device,args.predicted_targets),
+                        [r['replacement_edit'] for r in rows])
     def log(name,row):
         with (out/name).open('a') as stream: stream.write(json.dumps(row)+'\n')
         print(row,flush=True)
@@ -595,7 +641,7 @@ def train(args):
                     for key,cohort in cohorts.items():
                         subtotal=0.;tokens=0
                         for offset in range(0,len(cohort),args.batch_size):
-                            with amp(): value,n=loss(cohort[offset:offset+args.batch_size])
+                            with amp(): value,n=validation_loss(cohort[offset:offset+args.batch_size])
                             subtotal+=float(value)*n;tokens+=n
                         weighted+=subtotal;count+=tokens
                         breakdown[key]={'n':len(cohort),'tokens':tokens,'token_ce':subtotal/tokens}

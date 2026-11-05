@@ -12,7 +12,7 @@ import torch
 
 from framediff.ir import node,write_jsonl,read_jsonl
 from framediff.visual import (CONTRACT,ACTION_CONTRACT,VisualConfig,VisualPolicy,abstract_image,elements,current_features,
-    visual_batch,action_index,ACTIONS,load_policy,validate_action,action_size,action_is_legal)
+    visual_batch,action_index,ACTIONS,load_policy,validate_action,action_is_legal)
 
 
 def test_webui_visual_import_domain_split_and_native_labels(tmp_path):
@@ -358,8 +358,6 @@ def test_new_modalities_rollout_capture_counts(tmp_path,monkeypatch):
 def test_structured_action_contract_is_single_and_normalized():
     assert validate_action((1,'margin-left',.05))==(1,'margin-left',.05)
     assert validate_action((1,'justify-content','space-between'))==(1,'justify-content','space-between')
-    assert action_size((1,'margin-left',.05))=={'declarations':1,'normalized_magnitude':.05}
-    assert action_size((1,'align-items','center'))=={'declarations':1,'normalized_magnitude':None}
     assert ACTIONS==81
     with pytest.raises(ValueError,match='grammar'):validate_action((1,'padding-left',.05))
     with pytest.raises(ValueError,match='grammar'):validate_action((1,'column-gap',.05))

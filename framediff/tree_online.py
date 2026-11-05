@@ -70,8 +70,9 @@ def inspection_fingerprint():
             **{name: digest(root/name) for name in
                ('tree_edits.py','css_owners.py','html_bridge.py','browser.py','visual.py','explicit_html.py')},
             'playwright': version('playwright')}
-    from .browser_fingerprint import compatible_browser_digest
+    from .browser_fingerprint import compatible_browser_digest, compatible_visual_digest
     fingerprint['browser.py']=compatible_browser_digest(fingerprint['browser.py'])
+    fingerprint['visual.py']=compatible_visual_digest(fingerprint['visual.py'])
     from .cache_lock import observation_revision
     revision=observation_revision()
     if revision is not None:fingerprint['online_observation.py']=revision
@@ -208,8 +209,11 @@ def target_pool(rows, manifest=None, cache_dir=None, observation_size=384, diagn
     no_editable=0;no_visible=0
     records=[]
     def record(detail):
-        records.append(detail)
-        if diagnostics is not None:diagnostics.append(detail)
+        # Successful per-site probe traces are audit data, not training inputs.
+        if diagnostics is not None:
+            records.append(detail);diagnostics.append(detail)
+        elif detail['status']=='excluded':
+            records.append({k:v for k,v in detail.items() if k!='sites'})
     for row in rows:
         if row.get('hierarchy'):raise ValueError('Flat targets are retired; use original parent-preserving HTML')
         if row['split'] != 'train': raise ValueError('Online corruption only accepts training pages')
@@ -256,14 +260,17 @@ def target_pool(rows, manifest=None, cache_dir=None, observation_size=384, diagn
                 state = None; error = None; cached = False;metadata={}
                 if entry is not None and entry.exists():
                     try:
-                        saved = json.loads(entry.read_text())
+                        from .inspection_storage import read_inspection
+                        saved = read_inspection(entry, detailed=diagnostics is not None)
                         state, error = saved.get('state'), saved.get('error')
                         if error is not None:
                             if not isinstance(error,str) or state is not None: raise ValueError('Invalid cached error')
                         else:
                             if not isinstance(state,list): raise ValueError('Invalid cached state')
                             mutation_sites(state)
-                            metadata={k:saved[k] for k in ('visible_candidates','target_elements','visual_classes','inspection_diagnostics')}
+                            metadata={k:saved[k] for k in ('visible_candidates','target_elements','visual_classes')}
+                            if diagnostics is not None:
+                                metadata['inspection_diagnostics']=saved.get('inspection_diagnostics',{})
                             if not isinstance(metadata['visible_candidates'],list):raise ValueError('Invalid candidate cache')
                         cached = True
                     except (ValueError, KeyError, TypeError): state = None
@@ -367,7 +374,7 @@ def sample_mutation(state, viewport, rng, explicit=False, sites=None):
 
 
 class OnlineSampler:
-    def __init__(self, targets, mode, seed=42, max_noise=4, attempts=8, stop=None, parent_first=False):
+    def __init__(self, targets, mode, seed=42, max_noise=4, attempts=8, stop=None, parent_first=False, export_html=True):
         if mode not in ('abstract','screenshot') or min(max_noise,attempts)<1: raise ValueError('Invalid online configuration')
         self.targets=targets;self.mode=mode;self.seed=seed;self.max_noise=max_noise;self.attempts=attempts;self.stop=stop
         self.by_id={t['id']:t for t in targets}
@@ -376,6 +383,7 @@ class OnlineSampler:
         self.page_ids=sorted(self.by_page)
         self.browser=None
         self.parent_first=parent_first
+        self.export_html=export_html
         from .lazy_webui import TrainViewCache
         cache_dirs={t.get('lazy_cache_dir') for t in targets if t.get('lazy_cache_dir')}
         if len(cache_dirs)>1:raise ValueError('Mixed lazy train-view cache directories')
@@ -457,22 +465,23 @@ class OnlineSampler:
                 browser.load(html,viewport)
                 from . import css_owners
                 owner_mode='css_owners' in target
-                owners=css_owners.read(browser,tree)['owners'] if owner_mode else None
+                parsed=css_owners.read(browser,tree) if owner_mode else None
+                owners=parsed['owners'] if owner_mode else None
                 if owner_mode and owners!=target['css_owners']: raise ValueError('CSS owner identity changed')
                 def state_now():
                     return css_owners.read(browser,tree)['state'] if owner_mode else current_state(browser,tree)
                 def apply(edit):
                     return css_owners.execute(browser,owners,edit) if owner_mode else execute(browser,tree,edit)
-                def geometry():return browser.tagged_boxes([n['id'] for n in tree['nodes'][1:]])
                 size=target.get('corruption_observation_size',384)
                 clean_mask,clean_boxes,_=abstraction(browser,tree,viewport,size)
-                frame=clean_mask
-                state=state_now();noise=[];probe_rejections=0
+                frame=clean_mask;frame_boxes=clean_boxes
+                state=parsed['state'] if owner_mode else state_now()
+                noise=[];probe_rejections=0
+                eligible={(e[0],e[1]) for e in target['visible_candidates']}
                 for _ in range(rng.randint(1,self.max_noise)):
                     if self.stop is not None and self.stop.is_set(): raise RuntimeError('Online producer stopped')
+                    sites=[s for s in mutation_sites(state) if (s[0],s[1]) in eligible]
                     for trial in range(24):
-                        eligible={(e[0],e[1]) for e in target['visible_candidates']}
-                        sites=[s for s in mutation_sites(state) if (s[0],s[1]) in eligible]
                         mutation=sample_mutation(state,viewport,rng,explicit='data-tuide-explicit-id' in html,sites=sites)
                         # Witness edits ensure even a narrow responsive range
                         # gets tried; their effect is rechecked in this state.
@@ -484,15 +493,15 @@ class OnlineSampler:
                             # declaration. Do not promote a shadowed rule to winner.
                             old=state[mutation[0]][FIELDS.index(mutation[1])]
                             if mutation[2]: mutation[3]=old[1]
-                            before_values=css_owners.computed(browser,owners,mutation);before_boxes=geometry()
+                            before_values=css_owners.computed(browser,owners,mutation)
                         try:apply(mutation)
                         except ValueError as exc:
                             if 'Explicit ' not in str(exc):raise
                             probe_rejections+=1;continue
                         after_mask,after_boxes,_=abstraction(browser,tree,viewport,size)
-                        if (not changed(frame,after_mask) or (owner_mode and (before_values==css_owners.computed(browser,owners,mutation) or before_boxes==geometry()))):
+                        if (not changed(frame,after_mask) or (owner_mode and (before_values==css_owners.computed(browser,owners,mutation) or frame_boxes==after_boxes))):
                             apply([mutation[0],mutation[1],*old]);probe_rejections+=1;continue
-                        frame=after_mask;state=state_now();noise.append(mutation);break
+                        frame=after_mask;frame_boxes=after_boxes;state=state_now();noise.append(mutation);break
                 path=repair_path(state,clean,rng.getrandbits(64))
                 if not path: raise ValueError('Corruption returned to clean program')
                 # Select an intermediate reverse-path state, not only the
@@ -531,7 +540,7 @@ class OnlineSampler:
                 result.update(feedback_metadata(browser,result['current']))
                 if owner_mode:
                     result['css_owners']=owners
-                    result['current_html_text']=browser.page.content()
+                    if self.export_html:result['current_html_text']=browser.page.content()
                 if self.mode=='screenshot':
                     # Bytes travel through a bounded queue, never thousands of
                     # transient files on disk. Target images are never recaptured.
@@ -587,7 +596,7 @@ def _initialize(targets,mode,seed,max_noise,attempts,parent_first,stop):
     torch.set_num_threads(1)  # No CUDA/model/detector in workers.
     enable_worker_browser()
     Finalize(None,close_worker_browser,exitpriority=8)
-    _sampler=OnlineSampler(targets,mode,seed,max_noise,attempts,stop,parent_first)
+    _sampler=OnlineSampler(targets,mode,seed,max_noise,attempts,stop,parent_first,export_html=False)
     Finalize(None,_sampler.view_cache.close,exitpriority=9)
     Finalize(None,_sampler.close,exitpriority=10)
 

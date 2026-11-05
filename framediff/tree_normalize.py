@@ -18,13 +18,23 @@ from .web_experiment import digest, guard_run
 from .preparation_workers import page_map, write_json, write_jsonl
 
 
-def _guard_normalization_run(out,config,resume):
+def _guard_normalization_run(out,config,resume,inputs=None):
     """Allow only the audited scroll-fast-path migration to reuse records."""
     path=out/'config.json'
     if not (resume and path.exists()):
         guard_run(out,config,resume);return
     previous=read_json(path)
     if previous==config:return
+    if config.get('clean_targets_only') and inputs is not None:
+        # Fixed clean programs are independent across pages: a recovered upstream
+        # page must not invalidate already verified targets. New runs retain an
+        # identity snapshot for all inputs, including rejected pages.
+        old=previous.get('source_records')
+        current=config['source_records']
+        unchanged=(all(current.get(k)==v for k,v in old.items()) if old is not None
+                   else _legacy_normalized_inputs_match(out,inputs))
+        if unchanged:
+            previous={**previous,'sources':config['sources'],'source_records':current}
     old_sha=previous.get('safe_sizes_sha');new_sha=config.get('safe_sizes_sha')
     allowed={new_sha,*COMPATIBLE_IMPLEMENTATION_SHAS}
     def semantic(value):
@@ -40,6 +50,19 @@ def _guard_normalization_run(out,config,resume):
                'reused_safe_sizes_sha':old_sha,'current_safe_sizes_sha':new_sha},flush=True)
         return
     guard_run(out,config,resume)
+
+
+def _legacy_normalized_inputs_match(out,inputs):
+    """Migrate hash-only manifests using completed page records, never relabel them."""
+    for cache in out.glob('normalized-pages/*/*/record.json'):
+        saved=read_json(cache);row=saved['row'];page_id=saved['page']['id']
+        source=inputs.get(page_id)
+        if source is None:return False
+        for key in ('group','split','source_sha','viewport','page_id','view'):
+            if row.get(key)!=source.get(key):return False
+        html=source['current_html'] if source['id'].endswith('/clean') else source['target_html']
+        if digest(html)!=saved['source_sha']:return False
+    return True
 
 
 
@@ -215,6 +238,8 @@ def _prepare_page(task, persist_seed=True, clean_relabel_source=False):
 def prepare(args):
     workers=getattr(args,'workers',1)
     if workers<1:raise ValueError('workers must be positive')
+    if getattr(args,'final_repartition',False) and not getattr(args,'clean_targets_only',False):
+        raise ValueError('Final repartition requires clean-targets-only preparation')
     source=Path(args.rendered).resolve();out=Path(args.out).resolve()
     upstream_report=read_json(source/'report.json') if (source/'report.json').is_file() else {}
     limit=getattr(args,'limit_pages',0)
@@ -222,6 +247,7 @@ def prepare(args):
     if source==out or source in out.parents:
         raise ValueError('Use a separate normalized output directory')
     files=[source/f'{kind}-{split}.jsonl' for split in ('train','val','test') for kind in ('policy','pages')]
+    source_inputs=None
     config=dict(kind=css_owners.CONTRACT,normalization=CONTRACT,
         normalizer_sha=digest(Path(__file__).with_name('explicit_html.py')),
         safe_sizes_sha=digest(Path(__file__).with_name('safe_sizes.py')),
@@ -230,11 +256,27 @@ def prepare(args):
         max_css_owners=args.max_css_owners,observation_size=args.observation_size,
         max_pixel_mae=args.max_pixel_mae,max_box_error=args.max_box_error,
         corruption=ONLINE_CONTRACT,sampling=SAMPLING_CONTRACT)
-    if getattr(args,'clean_targets_only',False):config['clean_targets_only']=True
+    if getattr(args,'clean_targets_only',False):
+        config['clean_targets_only']=True
+        source_inputs={}
+        identities={}
+        for split in ('train','val','test'):
+            page_hashes={r['id']:hashlib.sha256(json.dumps(r,sort_keys=True).encode()).hexdigest()
+                         for r in read_jsonl(source/f'pages-{split}.jsonl')}
+            for row in read_jsonl(source/f'policy-{split}.jsonl'):
+                page_id=row['id'].rsplit('/',1)[0]
+                if not row['id'].endswith('/clean') and page_id in source_inputs:continue
+                source_inputs[page_id]={k:row[k] for k in ('id','current_html','target_html','group',
+                    'split','source_sha','viewport','page_id','view') if k in row}
+                identities[page_id]=hashlib.sha256(json.dumps(
+                    [row,page_hashes.get(page_id)],sort_keys=True).encode()).hexdigest()
+        config['source_records']=identities
     if getattr(args,'latest_visual_labels',False):
         config['visual_geometry_contract']=VISUAL_GEOMETRY_CONTRACT
-        config['visual_labels_sha']=digest(Path(__file__).with_name('visual.py'))
-    _guard_normalization_run(out,config,args.resume)
+        from .browser_fingerprint import compatible_visual_digest
+        config['visual_labels_sha']=compatible_visual_digest(digest(Path(__file__).with_name('visual.py')))
+    _guard_normalization_run(out,config,args.resume,source_inputs)
+    del source_inputs
     report={};all_rows=[]
     # Per-page normalization closes its browser before the corruption sampler
     # starts another synchronous Playwright runtime.
@@ -292,4 +334,6 @@ def prepare(args):
     prepare_splits()
     validate_splits(all_rows)
     write_json(out/'prepare-report.json',report)
-    if any(not report[s]['kept'] for s in report):raise ValueError('Empty normalized split; inspect rejections and page reports')
+    if not all_rows:raise ValueError('No normalized pages; inspect rejections and page reports')
+    if not getattr(args,'final_repartition',False) and any(not report[s]['kept'] for s in report):
+        raise ValueError('Empty normalized split; inspect rejections and page reports')

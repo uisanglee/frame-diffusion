@@ -140,13 +140,13 @@ def test_qwen_bf16_loader_does_not_quantize_weights(monkeypatch):
 
 
 def test_qwen_pixel_transfer_preserves_ids_and_grid():
-    from framediff.vlm import qwen_inputs_to_device
+    from framediff.vlm import image_inputs_to_device
     source = {'input_ids': torch.tensor([[151655, 12345]]),
               'image_grid_thw': torch.tensor([[1, 32, 64]]),
               'attention_mask': torch.ones((1, 2), dtype=torch.long),
               'pixel_values': torch.randn(2, 8),
               'pixel_values_videos': torch.randn(2, 8)}
-    result = qwen_inputs_to_device(source, torch.device('cpu'))
+    result = image_inputs_to_device(source, torch.device('cpu'))
     for key in ('input_ids', 'image_grid_thw', 'attention_mask'):
         assert result[key].dtype == torch.long
         assert torch.equal(result[key], source[key])

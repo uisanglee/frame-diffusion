@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from framediff import webui_final_split as split
-from framediff.ir import read_json,read_jsonl,write_json,write_jsonl
+from framediff.ir import read_jsonl,write_json,write_jsonl
 from framediff.visual_data import validate_splits
 
 
@@ -34,7 +34,8 @@ def corpus(root,n=20):
 def fake_sampler(monkeypatch,fail=()):
     from framediff import tree_freeze
     calls=[]
-    monkeypatch.setattr(split,'page_map',lambda fn,tasks,workers:map(fn,tasks))
+    monkeypatch.setattr(split,'timed_page_map',lambda fn,tasks,workers,timeout:
+                        ((i,fn(task),None) for i,task in enumerate(tasks)))
     monkeypatch.setattr(tree_freeze,'_inspect_page',lambda task:([
         dict(task[0],id=task[0]['id'].rsplit('/',1)[0])],None))
     class Sampler:
@@ -106,3 +107,32 @@ def test_allocation_deterministic_and_small_pool_rejected():
     assert split.allocate(pages,42)==split.allocate(reversed(pages),42)
     assert split.allocate(pages,42)[1]==dict(train=80,val=10,test=10)
     with pytest.raises(ValueError,match='At least 10'):split.allocate(pages[:9],42)
+
+
+def test_timeout_cache_retries_only_when_budget_increases(tmp_path,monkeypatch):
+    master=corpus(tmp_path)
+    calls=fake_sampler(monkeypatch)
+    row=next(read_jsonl(master/'labels/policy-train.jsonl'))
+    settings=dict(seed=90210,max_noise=4,samples_per_page=1,observation_size=384)
+    cached=split._heldout_cache(row,master,settings)/'result.json'
+    saved=dict(id='p0/v0',rows=[],timeout_s=180,error={'error_type':'TimeoutError'})
+    write_json(cached,saved)
+    assert split._heldout((row,master,settings,180))==saved
+    assert calls==[]
+    recovered=split._heldout((row,master,settings,240))
+    assert recovered['rows'] and calls==['p0/v0']
+    assert split._heldout((row,master,settings,180))==recovered
+    assert calls==['p0/v0']  # A successful cache is independent of the time budget.
+
+
+def test_completion_order_does_not_change_final_manifests(tmp_path,monkeypatch):
+    corpus(tmp_path);fake_sampler(monkeypatch)
+    first=split.publish(tmp_path)
+    paths=list((tmp_path/'7000').rglob('*.jsonl'))
+    content={p:p.read_bytes() for p in paths}
+    def reversed_map(fn,tasks,workers,timeout):
+        tasks=list(tasks)
+        return ((i,fn(tasks[i]),None) for i in reversed(range(len(tasks))))
+    monkeypatch.setattr(split,'timed_page_map',reversed_map)
+    assert split.publish(tmp_path)==first
+    assert all(p.read_bytes()==data for p,data in content.items())

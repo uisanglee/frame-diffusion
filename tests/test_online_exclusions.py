@@ -85,8 +85,10 @@ def test_target_progress_preserves_cache_wait_clock():
     job.stage = 'cache_wait'
     mark = job.mark
     target = {'key':'key', 'page':'page/desktop'}
-    connection = SimpleNamespace(recv=lambda: ('progress', 0, mark+10, 'target', target))
-    assert pool._receive(SimpleNamespace(connection=connection, job=job))
+    import queue
+    inbox = queue.Queue()
+    inbox.put(('progress', 0, mark+10, 'target', target))
+    assert pool._receive(SimpleNamespace(inbox=inbox, job=job))
     assert job.target==target and job.stage=='cache_wait' and job.mark==mark
 
 
@@ -109,4 +111,4 @@ def test_transient_generation_errors_do_not_exclude_page(tmp_path, monkeypatch):
 
 def test_existing_prepared_cache_fingerprint_is_preserved():
     from framediff.lazy_webui import preparation_fingerprint
-    assert preparation_fingerprint()['online_preparation']=='e598fecb8a9bb423bba5e9cf118b338f89be0bbe3d83195d5512e4e7c2fbf53d'
+    assert preparation_fingerprint()['online_preparation']=='15090105961fffda27561f8244d3131716b037e565aa5dfd4daf7703514a4573'

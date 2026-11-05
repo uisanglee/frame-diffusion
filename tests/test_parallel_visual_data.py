@@ -54,12 +54,13 @@ def test_missing_asset_and_truncated_record_are_rebuilt(tmp_path,clean_only):
     root=tmp_path/'rendered'
     pages={s:root/'pages'/hashlib.sha256(s.encode()).hexdigest()[:20] for s in ('train','val','test')}
     original=list(read_jsonl(root/'policy-train.jsonl'))
-    (pages['train']/'clean.png').unlink()
+    image=__import__('pathlib').Path(original[0]['current_image'])
+    image.unlink()
     (pages['val']/'records.json').write_text('{')
     untouched=(pages['test']/'records.json').stat().st_mtime_ns
     args.workers=1
     visual_data.build(args)
-    assert (pages['train']/'clean.png').is_file()
+    assert image.is_file()
     assert read_json(pages['val']/'records.json')['policy']
     assert (pages['test']/'records.json').stat().st_mtime_ns==untouched
     assert list(read_jsonl(root/'policy-train.jsonl'))==original

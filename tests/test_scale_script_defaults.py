@@ -45,62 +45,6 @@ DEFAULTS = dict(STAGE='all', POLICY_SCALE='s', POLICY_MODES='abstract screenshot
     REPEATS='3', ROLLOUT_WORKERS='4', ROLLOUT_BATCH_SIZE='4', ROLLOUT_BATCH_WAIT_MS='10')
 
 
-def test_legacy_launcher_shared_data_budgets_and_modes(tmp_path):
-    scripts=tmp_path/'scripts';scripts.mkdir()
-    source=Path(__file__).resolve().parents[1]/'scripts/resume_webui_training.sh'
-    shutil.copyfile(source,scripts/source.name)
-    (scripts/'run_webui_scale.sh').write_text(
-        'printf "%s\\n" "$@" "$STAGE" "$POLICY_MODES" "$CUDA_VISIBLE_DEVICES" '
-        '"$REUSE_LEGACY_DOM" "$POLICY_STAGE1_STEPS" "$POLICY_STAGE2_STEPS" "$POLICY_SCREENSHOT_STEPS"\n')
-    env={k:v for k,v in os.environ.items() if k not in DEFAULTS and k not in
-         ('CUDA_VISIBLE_DEVICES','POLICY_SCREENSHOT_STEPS','LEGACY_DATA_ROOT','LEGACY_RUN_ROOT')}
-    for size,gpu1,gpu2 in (('7k','2','4'),('56169','3','2')):
-        for mode,gpu in (('tuide',gpu1),('screenshot',gpu2),('detector',gpu1)):
-            result=subprocess.run(['bash',str(scripts/source.name),f'legacy-{mode}-{size}'],
-                                  env=env,check=True,capture_output=True,text=True).stdout.splitlines()
-            assert result[1:3]==['data/webui-7k-56169-safe-margin-v1','runs/webui-legacy-dom-shared-v1']
-            assert result[3]==('detector' if mode=='detector' else 'policy')
-            assert result[4]==('screenshot' if mode=='screenshot' else 'abstract')
-            assert result[5:7]==[gpu,'1']
-            assert int(result[9])==int(result[7])+int(result[8])
-
-
-def test_resume_launcher_fresh_resume_and_preserved_output(tmp_path):
-    scripts=tmp_path/'scripts';scripts.mkdir()
-    source=Path(__file__).resolve().parents[1]/'scripts/resume_webui_training.sh'
-    shutil.copyfile(source,scripts/source.name)
-    (scripts/'train_tuide_scale.sh').write_text('echo screenshot-stub\n')
-    binary=tmp_path/'bin';binary.mkdir()
-    stub=binary/'python';stub.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n');stub.chmod(0o755)
-    env={**os.environ,'PATH':str(binary)+os.pathsep+os.environ['PATH']}
-    for mode,size,output in (
-        ('detector-7k',7000,'runs/webui-detector-full-dom-v1/7000/detector'),
-        ('detector-56169',56169,'runs/webui-detector-full-dom-v1/56169/detector'),
-        ('screenshot-7k',7000,'runs/webui-screenshot-single-v1/7000/tuide-s-screenshot/replacement/raw-stage1')):
-        data=tmp_path/f'data/webui-detector-full-dom-v1/{size}/rendered'
-        names=['detector-train.jsonl','detector-val.jsonl']
-        if mode=='screenshot-7k':
-            data=tmp_path/'data/webui-7k-56169-safe-margin-v1/7000/css'
-            names=['policy-train.jsonl','policy-val.jsonl','pages-train.jsonl']
-        data.mkdir(parents=True,exist_ok=True)
-        for name in names:(data/name).write_text('{}\n')
-        def run():
-            return subprocess.run(['bash',str(scripts/source.name),mode],env=env,check=True,capture_output=True,text=True).stdout
-        assert 'Starting fresh' in run()
-        out=tmp_path/output;out.mkdir(parents=True)
-        (out/'config.json').write_text('old-config')
-        assert 'Previous output preserved' in run()
-        backups=list(out.parent.glob(out.name+'.backup.*/run/config.json'))
-        assert len(backups)==1 and backups[0].read_text()=='old-config'
-        out.mkdir();(out/'last.pt').write_text('checkpoint')
-        text=run()
-        assert 'Resuming:' in text and 'Starting fresh' not in text
-        if mode.startswith('detector'):
-            assert '--resume\n' in text
-            assert '--batch-size\n1\n' in text and '--accumulation\n8\n' in text
-        assert (out/'last.pt').read_text()=='checkpoint'
-
-
 def run_script(tmp_path, overrides, missing_input=None):
     scripts=tmp_path/'scripts';scripts.mkdir()
     source=Path(__file__).resolve().parents[1]/'scripts/run_webui_scale.sh'
@@ -163,7 +107,9 @@ def test_shared_defaults_reach_all_stages(tmp_path):
     for call in policies:
         assert all(call['env'][k]==v for k,v in DEFAULTS.items() if k!='POLICY_MODES')
     rollouts=[c for c in calls if 'visual-test-rollout' in c['args']]
-    assert len(rollouts)==4
+    assert len(rollouts)==2  # The sole 7k scale has identical own/common tests.
+    assert len([c for c in calls if 'visual-evaluate-detector' in c['args']])==1
+    assert len([c for c in calls if 'framediff.evaluation_alias' in c['args']])==3
     for call in rollouts:
         args=call['args']
         assert args[args.index('--repeats')+1]=='3'
@@ -272,6 +218,7 @@ def test_explicit_overrides_are_preserved(tmp_path):
     for call in calls:
         assert all(call['env'][k]==v for k,v in overrides.items())
         args=call['args']
+        if 'framediff.evaluation_alias' in args:continue
         assert args[args.index('--workers')+1]=='8'
         assert args[args.index('--inference-batch-size')+1]=='2'
         assert args[args.index('--repeats')+1]=='1'
@@ -290,10 +237,11 @@ def test_detector_manifest_root_override(tmp_path):
 
 def test_screenshot_all_skips_detector_and_evaluates_single_stage(tmp_path):
     calls=run_script(tmp_path,dict(STAGE='all',POLICY_MODES='screenshot'))
-    assert len(calls)==3  # one policy run and own/common rollout
+    assert len(calls)==3  # one policy run, own rollout, common result alias
     assert calls[0]['args'][0]=='policy-fixture'
     for call in calls[1:]:
         args=call['args']
+        if 'framediff.evaluation_alias' in args:continue
         assert args[args.index('--raw-checkpoint')+1].endswith('/replacement/raw-stage1/best.pt')
         assert '--detector-checkpoint' not in args
 

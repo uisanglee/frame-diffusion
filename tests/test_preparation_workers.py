@@ -60,3 +60,25 @@ def test_interrupted_checkpoint_keeps_previous_file(tmp_path):
     with pytest.raises(ValueError):
         write_json(path,{'bad':float('nan')})
     assert path.read_bytes()==original
+
+
+def timed_work(task):
+    delay,value=task
+    time.sleep(delay)
+    return value
+
+
+def test_timed_pages_refill_without_waiting_for_slow_first_page():
+    from framediff.preparation_workers import timed_page_map
+    results=list(timed_page_map(timed_work,[(2,'slow'),(.01,'fast'),(.01,'next')],2,15))
+    assert [r[0] for r in results]==[1,2,0]
+    assert all(error is None for _,_,error in results)
+    assert dict((i,value) for i,value,_ in results)=={0:'slow',1:'fast',2:'next'}
+
+
+def test_timed_page_timeout_keeps_other_results_and_restarts_worker():
+    from framediff.preparation_workers import timed_page_map
+    results=list(timed_page_map(timed_work,[(5,'timeout'),(.01,'ok'),(.01,'next')],1,2))
+    assert results[0][0:2]==(0,None)
+    assert 'exceeded' in results[0][2]
+    assert results[1:]==[(1,'ok',None),(2,'next',None)]

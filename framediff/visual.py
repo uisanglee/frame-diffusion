@@ -204,13 +204,6 @@ def validate_action(edit, viewport=None):
     return tuple(edit)
 
 
-def action_size(edit):
-    """Explicit complexity measure used by the structured-action contract."""
-    _,field,value=validate_action(edit)
-    return {'declarations':1,
-            'normalized_magnitude':abs(float(value)) if field in NUMERIC_FIELDS else None}
-
-
 def action_delta_px(field, value, viewport):
     validate_action((0,field,value),viewport)
     axis=action_axis(field)

@@ -11,7 +11,7 @@ from pathlib import Path
 from PIL import Image
 from .ir import DEFAULTS, LIMITS, read_json, validate, write_json
 from .data import differences
-from .vlm_devices import (deployment_settings, placement_kwargs, verify_cuda_placement,
+from .vlm_devices import (deployment_settings as deployment_settings, placement_kwargs, verify_cuda_placement,
     input_device, start_cuda_measurement, finish_cuda_measurement, efficient_generation_options)
 
 QWEN_BF16_MEMORY_CONTRACT = 'bf16-dynamic-kv-v1'
@@ -205,10 +205,6 @@ def image_inputs_to_device(inputs, device):
             value = value.to(**options)
         result[key] = value
     return result
-
-
-# Retain the public helper name used by the Qwen placement tests.
-qwen_inputs_to_device = image_inputs_to_device
 
 
 def qwen_generate(args,prompt,images,runtime=None):

@@ -9,12 +9,11 @@ import hashlib
 import json
 import shutil
 import time
-from collections import defaultdict
 from pathlib import Path
 from types import SimpleNamespace
 
 from .ir import read_json, read_jsonl
-from .preparation_workers import page_map, write_json, write_jsonl
+from .preparation_workers import timed_page_map, write_json, write_jsonl
 from .visual_data import validate_splits
 from .web_experiment import digest
 
@@ -34,16 +33,21 @@ def allocate(pages, seed):
     return assignment, counts
 
 
-def _heldout(task):
-    """Keep a split-independent cache so rebalancing never rerenders a success."""
-    row, master, settings = task
-    from .tree_freeze import _inspect_page, _freeze_page
+def _heldout_cache(row, master, settings):
     from .tree_online import ONLINE_CONTRACT
-    view = row['id'].rsplit('/', 1)[0]
     assets = {row[k]:digest(row[k]) for k in ('target_html','target_image')}
     key = hashlib.sha256(json.dumps(dict(row=row, assets=assets, settings=settings, contract=ONLINE_CONTRACT),
                                     sort_keys=True).encode()).hexdigest()
-    cache = master/'final-split-cache'/key
+    return master/'final-split-cache'/key
+
+
+def _heldout(task):
+    """Keep a split-independent cache so rebalancing never rerenders a success."""
+    row, master, settings, timeout = task
+    from .tree_freeze import _inspect_page, _freeze_page
+    from .tree_online import ONLINE_CONTRACT
+    view = row['id'].rsplit('/', 1)[0]
+    cache = _heldout_cache(row, master, settings)
     result = cache/'result.json'
     if result.exists():
         saved = read_json(result)
@@ -51,7 +55,10 @@ def _heldout(task):
             for field in ('current_html', 'current_image'):
                 if not Path(item[field]).is_file():
                     raise ValueError(f'Missing cached asset: {item[field]}')
-        return saved
+        # Increasing the budget retries only timed-out work, never successful
+        # assets or ordinary deterministic exclusions.
+        if not (saved.get('timeout_s') and timeout > saved['timeout_s']):
+            return saved
     pool, error = _inspect_page((row, master/'labels/.online-target-cache', settings['observation_size']))
     new = []
     if pool:
@@ -81,7 +88,10 @@ def _rows(master, stage, kind):
     return [r for s in SPLITS for r in read_jsonl(master/stage/f'{kind}-{s}.jsonl')]
 
 
-def publish(root, size=7000, seed=42, workers=4):
+def publish(root, size=7000, seed=42, workers=4, timeout=180):
+    import math
+    if workers<1 or not math.isfinite(timeout) or timeout<=0:
+        raise ValueError('workers and timeout must be positive')
     root = Path(root).resolve(); master = root/'master'; base = root/str(size)
     source = {r['id']: r for r in read_jsonl(master/'source/manifest.jsonl')}
     tables = {stage: {kind: _rows(master,stage,kind) for kind in kinds}
@@ -105,8 +115,13 @@ def publish(root, size=7000, seed=42, workers=4):
         if not pending: break
         print(json.dumps(dict(final_split='prepare_missing_heldout',views=len(pending),pages=counts)),flush=True)
         failures = set()
-        for view, result in zip(pending, page_map(_heldout,
-                ((clean[v],master,settings) for v in pending), workers)):
+        for index, result, error in timed_page_map(_heldout,
+                ((clean[v],master,settings,timeout) for v in pending), workers, timeout):
+            view=pending[index]
+            if error:
+                result=dict(id=view,rows=[],timeout_s=timeout,
+                            error=dict(id=view,error=error,error_type='TimeoutError'))
+                write_json(_heldout_cache(clean[view],master,settings)/'result.json',result)
             if result['rows']: frozen[view] = result['rows']
             else: rejected[view] = result['error']; failures.add(view)
         available -= failures
@@ -150,7 +165,7 @@ def publish(root, size=7000, seed=42, workers=4):
         renderings={s:len(outputs[f'css/pages-{s}.jsonl']) for s in SPLITS},
         protocol='Successful unique pages, page-disjoint (not domain-disjoint); all usable views stay together',
         rounding='val=test=floor(N/10); train=N-val-test',
-        heldout_rejections=list(rejected.values()),assets_root=str(master),
+        heldout_rejections=[rejected[v] for v in sorted(rejected)],assets_root=str(master),
         note='Train uses normalized clean targets; val/test additionally require fixed corruption. No automatic top-up to the directory size.')
     # Back up only published manifests/metadata, never images or HTML assets.
     previous = root/'split-report.json'
@@ -179,17 +194,22 @@ def publish(root, size=7000, seed=42, workers=4):
     return report
 
 
+from .training_shutdown import cleanup_on_termination
+
+
+@cleanup_on_termination
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--data',required=True);p.add_argument('--size',type=int,default=7000)
     p.add_argument('--seed',type=int,default=42);p.add_argument('--workers',type=int,default=4)
+    p.add_argument('--timeout',type=float,default=180,help='Active seconds per held-out view; completed caches are reused')
     args=p.parse_args()
     if args.workers<1 or args.size<1: p.error('size/workers must be positive')
     import fcntl
     root=Path(args.data);root.mkdir(parents=True,exist_ok=True)
     with (root/'.final-split.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        publish(root,args.size,args.seed,args.workers)
+        publish(root,args.size,args.seed,args.workers,args.timeout)
 
 
 if __name__=='__main__': main()

@@ -94,6 +94,11 @@ if [[ "$stage" == detector || ( "$stage" == all && "$needs_detector" == 1 ) ]]; 
     --early-stop-patience "${EARLY_STOP_PATIENCE:-10}" \
     --early-stop-min-delta "${EARLY_STOP_MIN_DELTA:-0}" ${options[@]+"${options[@]}"}
   for population in own common; do
+    if [[ "$population" == common && "$size" == "$common" ]]; then
+      python -m framediff.evaluation_alias --source "$output/detector-test-own.json" \
+        --alias "$output/detector-test-common.json"
+      continue
+    fi
     testbase="${DETECTOR_DATA_ROOT:-$data}/$size"
     [[ "$population" == common ]] && testbase="${DETECTOR_DATA_ROOT:-$data}/$common"
     python -m framediff visual-evaluate-detector --data "$testbase/rendered/detector-test.jsonl" \
@@ -123,6 +128,11 @@ if [[ "$stage" == all || "$stage" == evaluate ]]; then
     fi
     checkpoint="$output/tuide-${POLICY_SCALE:-s}-$mode/replacement/$label-stage$policy_stage/best.pt"
     for population in own common; do
+      if [[ "$population" == common && "$size" == "$common" ]]; then
+        python -m framediff.evaluation_alias --source "$output/eval-${POLICY_SCALE:-s}-$mode-own" \
+          --alias "$output/eval-${POLICY_SCALE:-s}-$mode-common"
+        continue
+      fi
       testbase=$base
       [[ "$population" == common ]] && testbase="$data/$common"
       python -m framediff visual-test-rollout --data "$testbase/css/policy-test.jsonl" \

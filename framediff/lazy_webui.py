@@ -79,8 +79,20 @@ def preparation_fingerprint():
               and getattr(node,'name',None) not in excluded
               and not (isinstance(node,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='_sampler' for t in node.targets))]
     hashes={name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in names}
-    from .browser_fingerprint import compatible_browser_digest
+    # Audited resume/storage changes and removal of unused reads: old records
+    # retain their paths/bytes; new clean records share identical assets. Never
+    # alias an unknown future implementation.
+    compatible={
+        'tree_normalize.py':('a2655613d5455d11ea3a83c2eca5ba9e8f410cb8fb3c552132494604caf55d54',
+                             'ee391e20486af27009ea4675d82c24562b7762c2bd9fa7ed224db7467d01e3ce'),
+        'visual_data.py':('440aca3baefb0cb3198873d3a1e29ff8c7b6575075f38b26a0fe199af58d75c7',
+                          '47f188efeb3944e610a8a315afd07539f8f3b76b7fc485587c717e1d5d63d4ff'),
+    }
+    for name,(new,old) in compatible.items():
+        if hashes[name]==new:hashes[name]=old
+    from .browser_fingerprint import compatible_browser_digest, compatible_visual_digest
     hashes['browser.py']=compatible_browser_digest(hashes['browser.py'])
+    hashes['visual.py']=compatible_visual_digest(hashes['visual.py'])
     # Optional seed-file retention changes storage only; preserve existing keys.
     if hashes['tree_normalize.py'] in (
         '5f2f562d97282db97fcbe96f6ab5cb2bfccfd347519eaeba3973a810bde6315c',
@@ -99,6 +111,10 @@ def preparation_fingerprint():
         '84301f9a3f7b474ddcc4e764679fb7c5ce7ca9b51a59cee64f9719e6e7b6d14b'):
         hashes['safe_sizes.py']='82670e65a792de714d8cb44f27f3514d717cce013a28d59e0d95c56cbaa4fbd2'
     online_sha=hashlib.sha256(''.join(ast.dump(n) for n in semantic).encode()).hexdigest()
+    # Same states/teachers/PNG and offline HTML; omit training-only HTML IPC,
+    # compact diagnostic reads, and reuse observations of the same DOM state.
+    if online_sha=='abb0856283d093e1abc25f7b2f93d3c673e1606f46c77799ae46f4707641b355':
+        online_sha='15090105961fffda27561f8244d3131716b037e565aa5dfd4daf7703514a4573'
     # Instance-local LRU ownership, browser release, and timing-only sampler
     # instrumentation do not change labels or prepared page contents.
     if online_sha in ('e98088a0e5027f27a10c2c038f23bb8d2a24227af7a4e294e5049ed9e7c8cfc4',

@@ -65,6 +65,52 @@ def page_map(function, tasks, workers):
         pool.shutdown(wait=True, cancel_futures=True)
 
 
+def _initialize_timed_worker(stop):
+    _initialize_browser_worker()
+
+
+def timed_page_map(function, tasks, workers, timeout):
+    """Yield (input index, result, timeout error) in completion order.
+
+    Keep at most `workers` jobs live; a stalled page cannot stop supplying the
+    other workers. Only timeouts become rejected pages. Programming, cache and
+    process failures still propagate. Supervised workers reclaim their browsers.
+    """
+    import math
+    from concurrent.futures import TimeoutError
+    from .online_workers import OnlineWorkerPool
+    if workers < 1 or not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError('workers and timeout must be positive')
+    tasks=iter(enumerate(tasks));pending={}
+    pool=OnlineWorkerPool(workers,initializer=_initialize_timed_worker,
+                          cache_wait_timeout=timeout)
+    def fill():
+        while len(pending)<workers:
+            item=next(tasks,None)
+            if item is None:break
+            index,task=item
+            pending[index]=pool.submit(function,task)
+    try:
+        fill()
+        while pending:
+            pool.poll();completed=[]
+            for index,job in list(pending.items()):
+                error=None
+                if not job.done:
+                    try:pool.check_timeout(job,timeout)
+                    except TimeoutError as exc:
+                        error=str(exc)
+                        pool.restart(job,retry=False)
+                    else:continue
+                value=None if error else job.result(timeout)
+                completed.append((index,value,error));del pending[index]
+            fill()
+            yield from completed
+            if not completed:time.sleep(.01)
+    finally:
+        pool.shutdown()
+
+
 def process_table():
     output=subprocess.check_output(['ps','-axo','pid=,ppid=,lstart=,command='],text=True)
     table={}

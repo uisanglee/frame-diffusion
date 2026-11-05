@@ -30,6 +30,27 @@ def make_rows(tmp_path):
 
 
 @pytest.mark.browser
+@pytest.mark.parametrize('mode',['abstract','screenshot'])
+def test_training_omits_html_without_changing_sample(tmp_path, monkeypatch, mode):
+    import copy
+    monkeypatch.setenv('TUIDE_SHARED_CACHE', str(tmp_path/'shared'))
+    pool=target_pool(make_rows(tmp_path),cache_dir=tmp_path/'cache',observation_size=64)
+    full=OnlineSampler(copy.deepcopy(pool),mode,seed=19,export_html=True)
+    lean=OnlineSampler(copy.deepcopy(pool),mode,seed=19,export_html=False)
+    try:
+        for index in range(3):
+            expected=full.generate(index)
+            full.close()
+            assert expected.pop('current_html_text').startswith('<html')
+            actual=lean.generate(index)
+            lean.close()
+            assert 'current_html_text' not in actual
+            assert actual == expected
+    finally:
+        full.close();lean.close()
+
+
+@pytest.mark.browser
 def test_preparsed_inert_and_unobservable_pages_excluded_and_cached(tmp_path,monkeypatch):
     rows=make_rows(tmp_path);cache=tmp_path/'cache'
     diagnostics=[]

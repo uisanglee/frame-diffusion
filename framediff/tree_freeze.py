@@ -70,10 +70,8 @@ def freeze(args):
         'seed':args.seed,'max_noise':args.max_noise,'samples':args.samples_per_page,
         'observation_size':getattr(args,'observation_size',384)},args.resume)
     # Online training needs clean targets, not fresh stored train screenshots.
-    if any(r.get('teacher_strategy') != CONTRACT for r in read_jsonl(source/'policy-train.jsonl')):
-        raise ValueError('Prepare --stylesheets labels with the current size/margin action contract first')
-    for kind in ('policy','pages'):
-        write_jsonl(out/f'{kind}-train.jsonl',list(read_jsonl(source/f'{kind}-train.jsonl')))
+    write_jsonl(out/'policy-train.jsonl',train_rows)
+    write_jsonl(out/'pages-train.jsonl',read_jsonl(source/'pages-train.jsonl'))
     report={}
     for split in ('val','test'):
         rows=list(read_jsonl(source/f'policy-{split}.jsonl'))

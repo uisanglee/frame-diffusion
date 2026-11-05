@@ -43,6 +43,16 @@ def image_references(text, base):
 
 
 def fetch_image(url, cache, timeout):
+    # Views share URL downloads across processes. Only a complete atomic JSON
+    # becomes visible, and only one worker fetches a missing URL.
+    from .cache_lock import cache_lock
+    cache=Path(cache);cache.mkdir(parents=True,exist_ok=True)
+    key=hashlib.sha256(url.encode()).hexdigest()
+    with (cache/f'{key}.lock').open('a') as lock,cache_lock(lock):
+        return _fetch_image_locked(url,cache,timeout)
+
+
+def _fetch_image_locked(url,cache,timeout):
     from PIL import Image
     key = hashlib.sha256(url.encode()).hexdigest()
     path = cache / f'{key}.json'
@@ -71,7 +81,8 @@ def fetch_image(url, cache, timeout):
                       uri=f'data:{mime};base64,'+base64.b64encode(data).decode())
     except Exception as exc:
         result['error']=str(exc)
-    write_json(path,result)
+    from .preparation_workers import write_json as atomic_json
+    atomic_json(path,result)
     return result
 
 

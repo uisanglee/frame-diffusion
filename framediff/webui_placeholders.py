@@ -8,7 +8,8 @@ from functools import lru_cache
 from pathlib import Path
 from urllib.parse import unquote_to_bytes
 from bs4 import BeautifulSoup
-from .ir import read_jsonl, write_json, write_jsonl
+from .ir import read_jsonl
+from .preparation_workers import page_map, write_json, write_jsonl
 
 CONTRACT='webui-five-color-images-v1'
 COLORS=('red','green','yellow','blue','black')
@@ -128,43 +129,76 @@ def convert_html(text,base,cache,browser,viewport):
         raise ValueError('Placeholder replacement changed DOM geometry')
     return result,mapping
 
-def prepare(args):
+def _implementation():
+    # Scheduling/storage changes do not change an accepted page. Hash only the
+    # audited transformation functions, so future geometry edits still invalidate.
+    import ast
+    names={'intrinsic_uri','image_uri','embed_placeholders','convert_html'}
+    tree=ast.parse(Path(__file__).read_text())
+    body=''.join(ast.dump(n) for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in names)
+    return hashlib.sha256((body+repr((CONTRACT,COLORS))).encode()).hexdigest()
+
+
+def _prepare_view(task):
+    row,out=task
     from .html_bridge import HtmlBrowser
+    from .web_experiment import digest
+    folder=out/'pages'/hashlib.sha256(row['id'].encode()).hexdigest();folder.mkdir(parents=True,exist_ok=True)
+    record=folder/'record.json'
+    if record.exists():
+        saved=json.loads(record.read_text())
+        if saved.get('raw_input_sha')!=digest(row['html']) or saved['source_sha']!=digest(saved['html']):
+            raise ValueError('Source/output HTML changed; use a new output directory')
+        if not Path(saved['screenshot']).is_file():raise ValueError('Missing cached placeholder screenshot')
+        return saved,None,None
+    try:
+        path=Path(row['html']);text=path.read_text()
+        if 'data-tuide-safe-sizes' in text:raise ValueError('Use raw source HTML, not already-normalized HTML')
+        url=Path(str(path).replace('-html.html','-url.txt'))
+        base=url.read_text().strip() if url!=path and url.exists() else row.get('url','')
+        with HtmlBrowser() as browser:
+            result,mapping=convert_html(text,base,out/'downloads',browser,row['viewport'])
+            target=folder/'target.html';target.write_text(result)
+            screenshot=folder/'target.png';browser.page.screenshot(path=str(screenshot),animations='disabled')
+        new={**row,'html':str(target),'screenshot':str(screenshot),'source_sha':digest(target),
+             'original_source_sha':row.get('source_sha'),'raw_input_sha':digest(path),
+             'image_asset_contract':CONTRACT,'original_html':str(path)}
+        new.pop('source_files',None)
+        write_json(folder/'images.json',mapping);write_json(record,new)
+        return new,None,len(mapping)
+    except Exception as error:
+        return None,dict(id=row['id'],error=str(error)),None
+
+
+def prepare(args):
     from .web_experiment import digest,guard_run
+    workers=getattr(args,'workers',1)
+    if workers<1:raise ValueError('workers must be positive')
     source=Path(args.manifest).resolve();out=Path(args.out).resolve();out.mkdir(parents=True,exist_ok=True)
-    guard_run(out,dict(contract=CONTRACT,source=digest(source),implementation=digest(__file__)),True)
-    cache=out/'downloads';cache.mkdir(exist_ok=True)
+    config=dict(contract=CONTRACT,source=digest(source),implementation=_implementation())
+    previous=out/'config.json'
+    if previous.exists():
+        old=json.loads(previous.read_text())
+        # Exact previous implementation, whose transformations are unchanged.
+        if (old.get('implementation')=='4c3f2bda926e498b1ad2b9262a212db7617daecd1bdfd7703a58e9d5c09f1cf9'
+            and config['implementation']=='e02954983d52cede24b6594915a0558defd5aaf9a6fa5eb5ee7d90dfa8c6a287'
+            and {**old,'implementation':config['implementation']}==config):
+            write_json(previous,config)
+    guard_run(out,config,True)
+    (out/'downloads').mkdir(exist_ok=True)
     from PIL import Image
     for i,color in enumerate(COLORS):
-        Image.new('RGB',(1,1),color).save(out/f'rick{i+1}.jpg',quality=100,subsampling=0)
+        path=out/f'rick{i+1}.jpg'
+        if not path.exists():Image.new('RGB',(1,1),color).save(path,quality=100,subsampling=0)
     rows=[];errors=[]
-    with HtmlBrowser() as browser:
-        for row in read_jsonl(source):
-            folder=out/'pages'/hashlib.sha256(row['id'].encode()).hexdigest();folder.mkdir(parents=True,exist_ok=True)
-            record=folder/'record.json'
-            if record.exists():
-                saved=json.loads(record.read_text())
-                if saved.get('raw_input_sha')!=digest(row['html']) or saved['source_sha']!=digest(saved['html']):
-                    raise ValueError('Source/output HTML changed; use a new output directory')
-                if not Path(saved['screenshot']).is_file():raise ValueError('Missing cached placeholder screenshot')
-                rows.append(saved);continue
-            try:
-                path=Path(row['html']);text=path.read_text()
-                if 'data-tuide-safe-sizes' in text:raise ValueError('Use raw source HTML, not already-normalized HTML')
-                url=Path(str(path).replace('-html.html','-url.txt'))
-                base=url.read_text().strip() if url!=path and url.exists() else row.get('url','')
-                result,mapping=convert_html(text,base,cache,browser,row['viewport'])
-                target=folder/'target.html';target.write_text(result)
-                screenshot=folder/'target.png';browser.page.screenshot(path=str(screenshot),animations='disabled')
-                new={**row,'html':str(target),'screenshot':str(screenshot),'source_sha':digest(target),
-                     'original_source_sha':row.get('source_sha'),
-                     'raw_input_sha':digest(path),
-                     'image_asset_contract':CONTRACT,'original_html':str(path)}
-                new.pop('source_files',None)
-                write_json(folder/'images.json',mapping);write_json(record,new);rows.append(new)
-                print(json.dumps({'id':row['id'],'status':'prepared','images':len(mapping)}),flush=True)
-            except Exception as error:
-                errors.append(dict(id=row['id'],error=str(error)));print(json.dumps(errors[-1]),flush=True)
+    tasks=((row,out) for row in read_jsonl(source))
+    for saved,error,count in page_map(_prepare_view,tasks,workers):
+        if error:
+            errors.append(error);print(json.dumps(error),flush=True)
+        else:
+            rows.append(saved)
+            if count is not None:
+                print(json.dumps({'id':saved['id'],'status':'prepared','images':count}),flush=True)
     write_jsonl(out/'manifest.jsonl',rows);write_jsonl(out/'rejections.jsonl',errors)
     for split in ('train','val','test'):write_jsonl(out/f'manifest-{split}.jsonl',[r for r in rows if r['split']==split])
     write_json(out/'report.json',dict(kept=len(rows),failed=len(errors),contract=CONTRACT))
@@ -172,4 +206,5 @@ def prepare(args):
 
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--manifest',required=True);p.add_argument('--out',required=True)
+    p.add_argument('--workers',type=int,default=1)
     prepare(p.parse_args())

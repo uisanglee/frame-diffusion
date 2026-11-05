@@ -45,8 +45,10 @@ def test_responsive_picture_and_css_background(tmp_path):
 
 def test_polishing_prompt_assets():
     from baselines.ui2coden.runner import polishing_prompt
-    assert PROMPT in polishing_prompt('<img src="rick2.jpg">',[800,600],'layout')
-    assert PROMPT not in polishing_prompt('<img src="rick.jpg">',[800,600],'layout')
+    # UI2CodeN uses its runnable-application prompt; preserve supplied assets
+    # verbatim rather than reintroducing the retired static-renderer prompt.
+    for html in ('<img src="rick2.jpg">','<img src="rick.jpg">'):
+        assert polishing_prompt(html).endswith('Current HTML:\n'+html)
 
 
 @pytest.mark.browser
@@ -126,7 +128,8 @@ def test_color_script_prepares_train_before_training(tmp_path,monkeypatch):
     from framediff.tree_online import target_pool
     source=[]
     for index in range(10):
-        split='train' if index<8 else ('val' if index==8 else 'test')
+        # Provisional splits may be empty; the final successful pool is split later.
+        split='train'
         page=f'page-{index}'
         html=tmp_path/f'{page}.html'
         html.write_text(f'''<html><body style="margin:0"><img src="{uri(100,50)}">
@@ -136,7 +139,7 @@ def test_color_script_prepares_train_before_training(tmp_path,monkeypatch):
     manifest=tmp_path/'source.jsonl';write_jsonl(manifest,source)
     output=tmp_path/'prepared'
     env={**os.environ,'SOURCE_MANIFEST':str(manifest),'COLOR_DATA':str(output),
-         'DATA_SIZE':'10','PREPARE_WORKERS':'1'}
+         'DATA_SIZE':'10','PREPARE_WORKERS':'2'}
     root=Path(__file__).resolve().parents[1]
     previous_assets=None
     for _ in range(2):

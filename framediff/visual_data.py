@@ -116,7 +116,9 @@ def _render_page(task):
                 max_source_mae=getattr(args,'max_source_mae',1.)
                 if source_mae>max_source_mae:
                     raise ValueError(f'Source rerender pixel MAE {source_mae:.4f} exceeds {max_source_mae}')
-            tagged=dom['html'];(work/'reference.html').write_text(tagged)
+            clean_only=getattr(args,'clean_only',False)
+            tagged=dom['html'];reference_html=work/('target.html' if clean_only else 'reference.html')
+            reference_html.write_text(tagged)
             ids=[n['id'] for n in tree['nodes'][1:]];root=tree['nodes'][0]['id']
             base={k:source[k] for k in ('id','group','split','source_sha')}
             for key in ('page_id','view'):
@@ -125,20 +127,22 @@ def _render_page(task):
                         viewport=viewport,target_image=str(work/'target.png'),
                         target_abstract=str(work/'target-abstract.png'),
                         teacher_strategy='unlabeled-css-corruption-v1',target_elements=target_elements)
-            abstract_image(target_elements,viewport,args.abstract_size).save(base['target_abstract'])
+            if not clean_only:abstract_image(target_elements,viewport,args.abstract_size).save(base['target_abstract'])
             def observe():
                 boxes=browser.tagged_boxes(ids);boxes[root]=[0,0,*viewport];return boxes
-            def save_example(name,current_html,boxes,corruption=None):
+            def save_example(name,current_html,corruption=None):
                 from .explicit_html import feedback_screenshot
-                screenshot=work/f'{name}.png';feedback_screenshot(browser,path=str(screenshot),animations='disabled')
+                screenshot=work/('target.png' if clean_only and name=='clean' else f'{name}.png')
+                feedback_screenshot(browser,path=str(screenshot),animations='disabled')
                 browser.screenshots+=1
                 boxes=observe()
                 current_tree=refresh_geometry(tree,boxes)
-                abstract=work/f'{name}-abstract.png'
+                abstract=work/('target-abstract.png' if clean_only and name=='clean' else f'{name}-abstract.png')
                 feedback=feedback_metadata(browser,current_tree)
                 labels=elements(current_tree,boxes,viewport,feedback.get('current_clip_boxes'))
                 abstract_image(labels,viewport,args.abstract_size).save(abstract)
-                html_path=work/f'{name}.html';html_path.write_text(current_html)
+                html_path=work/('target.html' if clean_only and name=='clean' else f'{name}.html')
+                html_path.write_text(current_html)
                 record={**base,'id':source['id']+'/'+name,'current':current_tree,'current_boxes':copy.deepcopy(boxes),
                     'current_image':str(screenshot),'current_abstract':str(abstract),'current_html':str(html_path),
                     'corruption_edit':corruption,**feedback}
@@ -146,7 +150,7 @@ def _render_page(task):
                 detection=detector_labels(browser) if detection_contract else {'elements':labels}
                 local_detection.append({**base,'id':record['id'],'image':str(screenshot),
                                         'detector_label_contract':detection_contract,**detection})
-            browser.load(tagged,viewport);save_example('clean',tagged,target_boxes)
+            browser.load(tagged,viewport);save_example('clean',tagged)
             # Screenshot waits for fonts. Use geometry measured after that same
             # capture for both supervision and the clean corruption reference.
             clean=local_policy[0]
@@ -154,8 +158,9 @@ def _render_page(task):
             target_elements=elements(tree,target_boxes,viewport,clean.get('current_clip_boxes'))
             base['target_elements']=target_elements
             for record in (local_policy[0],local_detection[0]):record['target_elements']=target_elements
-            (work/'target.png').write_bytes(Path(clean['current_image']).read_bytes())
-            abstract_image(target_elements,viewport,args.abstract_size).save(base['target_abstract'])
+            if not clean_only:
+                (work/'target.png').write_bytes(Path(clean['current_image']).read_bytes())
+                abstract_image(target_elements,viewport,args.abstract_size).save(base['target_abstract'])
             last_corrupted=None
             for trajectory in range(0 if getattr(args,'clean_only',False) else args.trajectories):
                 html=tagged
@@ -171,18 +176,18 @@ def _render_page(task):
                         except Exception as exc:
                             if isinstance(exc,ValueError) or 'Explicit ' in str(exc):continue
                             raise
-                        candidate_html=browser.page.content();candidate=observe()
+                        candidate_html=browser.page.content()
                         # Corruption validity is syntactic/executable, not
                         # "farther from target pixels". The teacher will diff
                         # actual declarations later, never negate this delta.
                         if candidate_html==html:continue
-                        save_example(f't{trajectory}-s{step}',candidate_html,candidate,[i,field,value])
+                        save_example(f't{trajectory}-s{step}',candidate_html,[i,field,value])
                         html=candidate_html;accepted=True
                         last_corrupted=local_policy[-1];break
                     if not accepted:break
             if getattr(args,'clean_only',False):last_corrupted=local_policy[0]
             if last_corrupted is None:raise ValueError('No verified corruption; page excluded, not silently clean-only')
-            page={**base,'screenshot':base['target_image'],'html':str(work/'reference.html'),
+            page={**base,'screenshot':base['target_image'],'html':str(reference_html),
                   'initial_html':last_corrupted['current_html'],'evaluation_target_boxes':target_boxes,
                   'total_visible_nodes':dom['total_visible_nodes'],'selected_nodes':len(ids),
                   'source_screenshot':source.get('screenshot'),'source_pixel_mae':source_mae,
@@ -195,6 +200,20 @@ def _render_page(task):
         failure={'id':source['id'],'error':str(error)}
         write_json(work/'failure.json',failure)
         return None, failure, False
+
+
+def _guard_render_run(out,config,resume):
+    """Allow recovered clean pages while preserving every existing source identity."""
+    path=out/'config.json'
+    if resume and path.exists() and config['settings'].get('clean_only'):
+        previous=read_json(path)
+        old={k:v for k,v in previous.items() if k!='sources'}
+        new={k:v for k,v in config.items() if k!='sources'}
+        if old==new:
+            current={r['id']:r for r in config['sources']}
+            if all(current.get(r['id'])==r for r in previous['sources']):
+                write_json(path,config);return
+    guard_run(out,config,resume)
 
 
 def build(args):
@@ -213,7 +232,7 @@ def build(args):
             'sources':sources,'settings':{k:v for k,v in vars(args).items() if k not in ('out','resume','workers')}}
     if not getattr(args,'clean_only',False):config['settings'].pop('clean_only',None)
     if any(r.get('hierarchy') for r in sources):raise ValueError('Use original parent-preserving HTML, not flat manifests')
-    guard_run(out,config,args.resume)
+    _guard_render_run(out,config,args.resume)
     policy=[];detection=[];pages=[];errors=[]
     cache_hits=0
     tasks=((args,out,index,source) for index,source in enumerate(sources))

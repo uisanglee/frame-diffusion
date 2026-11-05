@@ -19,6 +19,15 @@ from .web_experiment import digest,guard_run
 from .training_shutdown import cleanup_on_termination
 
 
+def save_checkpoint(checkpoint,path):
+    """A failed write leaves the last complete checkpoint available for resume."""
+    path=Path(path);temporary=path.with_name(path.name+'.tmp')
+    try:
+        torch.save(checkpoint,temporary)
+        temporary.replace(path)
+    finally:temporary.unlink(missing_ok=True)
+
+
 def guard_detector_resume(out, config, resume):
     """Allow microbatch changes only at the same effective batch size."""
     import copy
@@ -282,8 +291,8 @@ def _train(args,stack):
                 'training_groups':sorted(groups),'training_hashes':sorted(source_hashes),
                 'parser_training_groups':sorted(parser_groups),'parser_training_hashes':sorted(parser_hashes),
                 'data_signature':data_signature,'early_stopping':early}
-            torch.save(checkpoint,out/'last.pt')
-            if improved:torch.save(checkpoint,out/'best.pt')
+            save_checkpoint(checkpoint,out/'last.pt')
+            if improved:save_checkpoint(checkpoint,out/'best.pt')
             with (out/'train.jsonl').open('a') as stream:
                 import json
                 stream.write(json.dumps(eval_row)+'\n')
@@ -322,10 +331,9 @@ def cache_targets(args):
     device=select_device(args.device)
     if device=='cpu':torch.set_num_threads(args.cpu_threads)
     rows=list(read_jsonl(args.data))
-    lazy=bool(rows) and all(r.get('lazy_contract') for r in rows)
-    if lazy:
-        model=None;ck=torch.load(args.checkpoint,map_location='cpu',weights_only=True)
-    else:model,ck=load_detector(args.checkpoint,device)
+    model=None;ck=torch.load(args.checkpoint,map_location='cpu',weights_only=True)
+    if ck.get('kind')!='visual-detector-v1' or ck['config']['contract']!=CONTRACT:
+        raise ValueError('Detector checkpoint contract mismatch')
     from .visual import label_contract
     if label_contract(rows)!=ck.get('config',{}).get('visual_geometry_contract'):
         raise ValueError('Detector and target visual label versions differ')
@@ -357,6 +365,9 @@ def cache_targets(args):
                 path=reuse/f'{key}.png'
             cached=path.exists() and path.with_suffix('.json').exists()
             if not (cached and (args.resume or path.parent==reuse)):
+                if model is None:
+                    model=detector(ck['config'],False)
+                    model.load_state_dict(ck['model']);model=model.to(device).eval()
                 predictions=detect(model,detector_input(r['target_image']),args.threshold)
                 abstract_image(predictions,r['viewport'],args.size).save(path)
                 write_json(out/f'{key}.json',predictions)

@@ -12,14 +12,19 @@ from framediff.training_shutdown import cleanup_on_termination
 
 
 def test_lifecycle_change_keeps_prepared_and_inspection_cache_keys():
-    from framediff.browser_fingerprint import compatible_browser_digest
+    from framediff.browser_fingerprint import compatible_browser_digest, compatible_visual_digest
     from framediff.lazy_webui import preparation_fingerprint
     from framediff.tree_online import inspection_fingerprint
     legacy='4e3e43aef0e8deb0bae424d2dc5e8a438d86d7ec5149c09d836c48cdde3b8882'
     assert preparation_fingerprint()['browser.py'] == legacy
     assert inspection_fingerprint()['browser.py'] == legacy
-    assert preparation_fingerprint()['online_preparation'] == 'e598fecb8a9bb423bba5e9cf118b338f89be0bbe3d83195d5512e4e7c2fbf53d'
+    assert preparation_fingerprint()['online_preparation'] == '15090105961fffda27561f8244d3131716b037e565aa5dfd4daf7703514a4573'
+    assert preparation_fingerprint()['tree_normalize.py'] == 'ee391e20486af27009ea4675d82c24562b7762c2bd9fa7ed224db7467d01e3ce'
+    assert preparation_fingerprint()['visual_data.py'] == '47f188efeb3944e610a8a315afd07539f8f3b76b7fc485587c717e1d5d63d4ff'
+    visual_legacy='81ac6d0d50303868ee4f3958d9dec22818c75c025926e72153b0da3f06dc884f'
+    assert preparation_fingerprint()['visual.py'] == inspection_fingerprint()['visual.py'] == visual_legacy
     assert compatible_browser_digest('future-change') == 'future-change'
+    assert compatible_visual_digest('future-change') == 'future-change'
 
 
 def test_handlers_restored_and_cleanup_survives_second_signal():

@@ -124,19 +124,28 @@ class OnlineWorkerPool:
         else: raise RuntimeError('Unknown online worker message')
         return True
 
+    def poll(self):
+        """Receive ready jobs without waiting for an earlier submitted job."""
+        received=False
+        for slot in self.slots:
+            while self._receive(slot):received=True
+        self._dispatch()
+        return received
+
+    def check_timeout(self,job,timeout):
+        if job.done:return
+        now=time.monotonic()
+        if job.stage=='cache_wait':
+            if job.wait_s+now-job.mark>=self.cache_wait_timeout:
+                raise TimeoutError(f'Shared cache lock wait exceeded {self.cache_wait_timeout}s: {job.path}')
+        elif job.stage=='working' and timeout is not None and job.active_s+now-job.mark>=timeout:
+            raise TimeoutError(f'Online sample active work exceeded {timeout}s')
+
     def result(self,job,timeout):
         while not job.done:
-            received=False
-            for slot in self.slots:
-                while self._receive(slot):received=True
-            self._dispatch()
+            received=self.poll()
             if job.done: break
-            now=time.monotonic()
-            if job.stage=='cache_wait':
-                if job.wait_s+now-job.mark>=self.cache_wait_timeout:
-                    raise TimeoutError(f'Shared cache lock wait exceeded {self.cache_wait_timeout}s: {job.path}')
-            elif job.stage=='working' and timeout is not None and job.active_s+now-job.mark>=timeout:
-                raise TimeoutError(f'Online sample active work exceeded {timeout}s')
+            self.check_timeout(job,timeout)
             if not received:time.sleep(.01)
         if job.error is not None: raise job.error
         return job.value

@@ -20,6 +20,9 @@ numeric-prefix 전처리 `visual-subset-numeric`는 제거했습니다. 기존 �
 체크포인트 로딩·평가 코드는 보존하며, 현재 공유 캐시와 체크포인트 재개는
 그대로 사용할 수 있습니다.
 
+과거 데이터 경로와 GPU 번호가 고정된 `resume_webui_training.sh`는 제거했습니다.
+학습과 재개는 `scripts/run_webui_scale.sh`에서 데이터·출력 경로를 지정해 실행합니다.
+
 Inline과 `<style>` 규칙을 함께 훼손·복구하는 `css-owner-tree-v2` 경로를 추가했습니다.
 [Stylesheet 정책 준비·GPU 1/3 학습·평가](docs/stylesheet-policy.md)를 참고하세요.
 
@@ -515,13 +518,14 @@ Train은 정규화된 clean target으로 온라인 손상을 생성한다. 과�
 전체 전처리 또는 중단 후 재개:
 
 ```bash
-COLOR_DATA=data/new PREPARE_WORKERS=4 bash scripts/prepare_webui_color_images.sh
+COLOR_DATA=data/new PREPARE_WORKERS=4 PREPARE_TIMEOUT=180 \
+  bash scripts/prepare_webui_color_images.sh
 ```
 
 `master/labels` 정규화까지 완료됐다면 이미지 처리와 렌더링 단계를 건너뛰고 최종 분할만 실행:
 
 ```bash
-python -m framediff.webui_final_split --data data/new --size 7000 --seed 42 --workers 4
+python -m framediff.webui_final_split --data data/new --size 7000 --seed 42 --workers 4 --timeout 180
 ```
 
 학습 입력은 `data/new/7000/rendered`와 `data/new/7000/css`에 저장한다. `7000`은 기존
@@ -530,5 +534,19 @@ python -m framediff.webui_final_split --data data/new --size 7000 --seed 42 --wo
 기존 공개 manifest는 변경 시 `data/new/split-history`에 백업하며 master 자산은 유지한다.
 원래 단계의 탈락 기록은 master의 보고서에 보존한다. 분할이 달라졌으므로 기존 분할에서
 학습한 체크포인트를 재개하거나 새 Test의 성능으로 보고하지 말고 새 학습 출력 폴더를 사용한다.
+
+이미지 다운로드·색상 치환도 `PREPARE_WORKERS`로 병렬 처리하며, 동일 URL 다운로드는
+프로세스 간 잠금으로 공유한다. 성공 목록이 늘어도 기존 페이지 내용·설정이 같으면 후속
+렌더링/정규화 캐시를 재사용한다. 기존 ID의 내용 변경이나 삭제는 조용히 수용하지 않는다.
+`PREPARE_TIMEOUT`은 최종 Val/Test 손상 생성의 페이지별 작업 시간 제한이며,
+이미지 다운로드 자체나 전체 정규화 작업 시간 제한은 아니다. 시간 초과 worker만 교체하고
+다른 완료 결과를 보존한다. 더 큰 제한으로 재개하면 timeout 실패만 다시 시도하며,
+완료된 결과는 제한 변경과 무관하게 재사용한다.
+
+학습에서는 전체 HTML의 불필요한 worker 전송을 생략하고, 후보 검사 상세 진단은 원본을
+보존한 채 `.training` 파생 캐시로 가볍게 읽는다. 고정 검증 입력은 CPU에서 최대 128 MiB로
+캐시하며 모델 특징이나 GPU 텐서는 보관하지 않는다. Detector 체크포인트는 임시 파일 저장
+완료 후 교체한다. 검증 중 CUDA/OOM 등 실행 오류는 잘못된 예측으로 집계하지 않고 보고한다.
+이 최적화 자체는 기존 학습 체크포인트의 모델/optimizer 형식을 변경하지 않는다.
 
 배경 논문: [Diffusion On Syntax Trees For Program Synthesis, ICLR 2025](https://proceedings.iclr.cc/paper_files/paper/2025/hash/666dd0d92a64396e753c691db93493d4-Abstract-Conference.html). 이 구현의 차이와 실측 검증은 `docs/VALIDATION.md`에 기록합니다.

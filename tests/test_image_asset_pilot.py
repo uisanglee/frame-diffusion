@@ -52,7 +52,6 @@ def test_prepare_remeasures_paired_images_with_same_frozen_edit(tmp_path,monkeyp
     from framediff.visual import annotate
     from framediff.ir import write_jsonl,read_jsonl
     from framediff.image_asset_pilot import prepare
-    from framediff import css_owners
     data=tmp_path/'data/7000/css';data.mkdir(parents=True)
     source_dir=data.parent/'source';source_dir.mkdir()
     raw=tmp_path/'raw/page/default_320-240-html.html';raw.parent.mkdir(parents=True)
