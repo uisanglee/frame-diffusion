@@ -2,12 +2,15 @@
 # Rebuild labels and frozen corruption from raw source HTML, never old normalized pages.
 set -euo pipefail
 resume_after_images=0
+rebuild_after_images=0
 case "${1:-}" in
   '') ;;
   --resume-after-images) resume_after_images=1 ;;
+  --rebuild-after-images) resume_after_images=1; rebuild_after_images=1 ;;
   -h|--help)
-    echo 'Usage: bash scripts/prepare_webui_color_images.sh [--resume-after-images]'
+    echo 'Usage: bash scripts/prepare_webui_color_images.sh [--resume-after-images|--rebuild-after-images]'
     echo 'Resume skips image conversion, reuses rendering/normalization caches, and publishes the final 8:1:1 page split.'
+    echo 'Rebuild preserves converted images, backs up incompatible downstream caches, and rebuilds rendering/labels before the final split.'
     exit 0 ;;
   *) echo "Unknown option: $1" >&2; exit 2 ;;
 esac
@@ -27,6 +30,17 @@ if [[ "$resume_after_images" == 1 ]]; then
   echo "Reusing converted image manifest: $data/master/source/manifest.jsonl"
 else
   python -m framediff.webui_placeholders --manifest "$source_manifest" --out "$data/master/source" --workers "$workers"
+fi
+if [[ "$rebuild_after_images" == 1 ]]; then
+  backup="$data/preparation-history/$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  for stage in rendered labels css final-split-cache; do
+    if [[ -e "$data/master/$stage" ]]; then
+      mkdir -p "$backup"
+      mv "$data/master/$stage" "$backup/$stage"
+      echo "Backed up $data/master/$stage -> $backup/$stage"
+    fi
+  done
+  echo 'Rebuilding downstream data from converted images; image downloads/conversion are skipped.'
 fi
 python -m framediff visual-build-data --manifest "$data/master/source/manifest.jsonl" \
   --out "$data/master/rendered" --workers "$workers" --clean-only \
