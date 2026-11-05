@@ -18,7 +18,7 @@ from .preparation_progress import PreparationProgress
 from .visual_data import validate_splits
 from .web_experiment import digest
 
-CONTRACT = 'webui-final-success-page-811-v1'
+CONTRACT = 'webui-final-success-page-source-811-v2'
 SPLITS = ('train', 'val', 'test')
 
 
@@ -31,6 +31,39 @@ def allocate(pages, seed):
     assignment = {}; offset = 0
     for split, count in counts.items():
         assignment.update((p, split) for p in ordered[offset:offset+count]); offset += count
+    return assignment, counts
+
+
+def allocate_linked(pages, seed, links):
+    """Keep source-equivalent pages together; preserve v1 allocation if unique."""
+    pages = set(pages)
+    original, quotas = allocate(pages, seed)
+    parent = {p:p for p in pages}
+    def find(p):
+        while parent[p] != p:
+            parent[p] = parent[parent[p]]
+            p = parent[p]
+        return p
+    owners = {}
+    for page, sha in sorted(links):
+        if page not in pages: continue
+        if sha in owners:
+            a, b = find(page), find(owners[sha])
+            parent[max(a,b)] = min(a,b)
+        else: owners[sha] = page
+    groups = {}
+    for page in sorted(pages): groups.setdefault(find(page), []).append(page)
+    if len(groups) == len(pages): return original, quotas
+    if len(groups) < 3:
+        raise ValueError('Fewer than 3 independent source groups; cannot publish leakage-free train/val/test')
+    ordered = sorted(groups.values(), key=lambda g:(-len(g), hashlib.sha256(f'{seed}:{g[0]}'.encode()).hexdigest()))
+    assignment = {}; counts = dict.fromkeys(SPLITS, 0)
+    for index, group in enumerate(ordered):
+        empty = [s for s in SPLITS if counts[s] == 0]
+        choices = empty if len(ordered)-index == len(empty) else SPLITS
+        target = max(choices, key=lambda s: quotas[s]-counts[s])
+        assignment.update((p,target) for p in group)
+        counts[target] += len(group)
     return assignment, counts
 
 
@@ -105,12 +138,22 @@ def publish(root, size=7000, seed=42, workers=4, timeout=180):
     if any(not clean[v].get('clean_target_only') or clean[v].get('lazy_contract') for v in available):
         raise ValueError('Prepare materialized --clean-targets-only labels before final splitting')
     page_ids = {v: str(source[v].get('page_id', v)) for v in available}
+    # Hash constraints may appear in source, rendered, or normalized manifests.
+    links = set()
+    def link(row, view):
+        if view in available and row.get('source_sha') is not None:
+            links.add((page_ids[view], str(row['source_sha'])))
+    for view in available: link(source[view], view)
+    for kinds in tables.values():
+        for kind, rows in kinds.items():
+            for row in rows:
+                link(row, row['id'] if kind=='pages' else row['id'].rsplit('/',1)[0])
     normalized_count = len(set(page_ids.values()))
     frozen = {}; rejected = {}
     settings = dict(seed=90210,max_noise=4,samples_per_page=1,observation_size=384)
     round_number = 0
     while True:
-        assignment, counts = allocate((page_ids[v] for v in available), seed)
+        assignment, counts = allocate_linked((page_ids[v] for v in available), seed, links)
         validate_splits([{**source[v], 'group':'webui-page:'+page_ids[v],
                           'page_id':page_ids[v], 'split':assignment[page_ids[v]]} for v in available])
         pending = sorted(v for v in available if assignment[page_ids[v]]!='train' and v not in frozen)
@@ -174,8 +217,9 @@ def publish(root, size=7000, seed=42, workers=4, timeout=180):
         normalized_candidate_pages=normalized_count,
         image_success_pages=len({r.get('page_id',r['id']) for r in source.values()}),
         renderings={s:len(outputs[f'css/pages-{s}.jsonl']) for s in SPLITS},
-        protocol='Successful unique pages, page-disjoint (not domain-disjoint); all usable views stay together',
-        rounding='val=test=floor(N/10); train=N-val-test',
+        protocol='Successful unique pages, page/source-disjoint (not domain-disjoint); all usable views and source-linked pages stay together',
+        rounding='Target val=test=floor(N/10); source-linked pages stay together, so actual counts may differ',
+        target_counts=allocate((page_ids[v] for v in available), seed)[1],
         heldout_rejections=[rejected[v] for v in sorted(rejected)],assets_root=str(master),
         note='Train uses normalized clean targets; val/test additionally require fixed corruption. No automatic top-up to the directory size.')
     # Back up only published manifests/metadata, never images or HTML assets.

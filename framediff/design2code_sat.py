@@ -116,9 +116,14 @@ class Design2CodeRuntime:
         if len(visible) != 2 or any(not value.strip() for value in visible):
             raise ValueError('Design2Code-18B requires exactly two visible GPUs, e.g. CUDA_VISIBLE_DEVICES=0,1')
         from huggingface_hub import snapshot_download
+        print(json.dumps({'design2code_stage': 'checkpoint_download', 'status': 'started',
+                          'model': MODEL_ID, 'overall_timeout_s': None}), flush=True)
         snapshot = Path(snapshot_download(MODEL_ID, revision=args.revision)).resolve()
+        print(json.dumps({'design2code_stage': 'checkpoint_download', 'status': 'completed'}), flush=True)
         self.revision = snapshot.name
+        print(json.dumps({'design2code_stage': 'checkpoint_extract', 'status': 'started'}), flush=True)
         checkpoint = checkpoint_directory(snapshot, self.revision)
+        print(json.dumps({'design2code_stage': 'checkpoint_extract', 'status': 'completed'}), flush=True)
         self.timeout = float(os.environ.get('DESIGN2CODE_TIMEOUT', '1800'))
         self.directory = Path(tempfile.mkdtemp(prefix='framediff-design2code-'))
         log_dir = Path(os.environ.get('DESIGN2CODE_LOG_DIR', '.cache/design2code-sat')).resolve()
@@ -133,7 +138,10 @@ class Design2CodeRuntime:
                                             stdin=subprocess.DEVNULL, start_new_session=True)
         atexit.register(self.close)
         try:
+            print(json.dumps({'design2code_stage': 'model_load', 'status': 'started',
+                              'timeout_s': self.timeout}), flush=True)
             self._wait(self.directory/'ready.json')
+            print(json.dumps({'design2code_stage': 'model_load', 'status': 'completed'}), flush=True)
         except BaseException:
             self.close()
             raise

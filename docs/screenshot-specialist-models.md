@@ -132,3 +132,5 @@ it is not claimed to be a bitwise-identical reproduction. See
 `baselines/design2code/README.md` for CPU RAM and checkpoint storage requirements.
 
 WebSight startup (including first weight download) has a separate `WEBSIGHT_STARTUP_TIMEOUT=7200` second limit. `WEBSIGHT_TIMEOUT=1800` continues to limit each generation request. Increase the startup limit for slow downloads; resuming preserves the Hugging Face download cache and completed experiment results.
+
+Design2Code-18B downloads its checkpoint and extracts the ZIP in the parent process before starting the SAT worker. `DESIGN2CODE_TIMEOUT` does not limit this download/extraction; it limits worker readiness and generation waits. Stage logs distinguish these operations. Network request timeouts can still occur independently.

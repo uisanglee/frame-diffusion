@@ -140,3 +140,33 @@ def test_completion_order_does_not_change_final_manifests(tmp_path,monkeypatch):
     assert progress['stage']=='heldout-round-1'
     assert progress['processed']==progress['total']==progress['kept']==8
     assert progress['percent']==100 and progress['failures']==progress['timeouts']==0
+
+
+def test_shared_sources_across_page_ids_publish_and_resume(tmp_path, monkeypatch):
+    master = corpus(tmp_path)
+    initial, _ = split.allocate([f'p{i}' for i in range(20)],42)
+    train = next(p for p,s in initial.items() if s=='train')
+    test = next(p for p,s in initial.items() if s=='test')
+    path = master/'source/manifest.jsonl'
+    rows = list(read_jsonl(path))
+    for row in rows:
+        if row['page_id'] in (train,test): row['source_sha']='shared-source'
+    write_jsonl(path,rows)
+    calls = fake_sampler(monkeypatch)
+    report = split.publish(tmp_path)
+    final = list(read_jsonl(tmp_path/'7000/source/manifest.jsonl'))
+    validate_splits(final)
+    assert len({r['split'] for r in final if r['page_id'] in (train,test)}) == 1
+    assert report['unique_pages'] == 20
+    previous = list(calls)
+    assert split.publish(tmp_path) == report
+    assert calls == previous
+
+
+def test_transitive_source_groups_are_deterministic():
+    pages = [str(i) for i in range(20)]
+    links = [('0','a'),('1','a'),('1','b'),('2','b')]
+    assignment, counts = split.allocate_linked(pages,42,links)
+    assert assignment['0'] == assignment['1'] == assignment['2']
+    assert sum(counts.values()) == 20 and all(counts.values())
+    assert split.allocate_linked(reversed(pages),42,reversed(links)) == (assignment,counts)
