@@ -33,7 +33,7 @@ def test_build_can_skip_api_expensive_ablation(tmp_path):
     assert 'gpt4o' in index and 'Ablation' not in index
 
 
-@pytest.mark.parametrize('name', ['qwen', 'ui2coden'])
+@pytest.mark.parametrize('name', ['qwen', 'ui2coden', 'websight-8b', 'design2code-18b'])
 def test_ui2coden_shares_initial_and_target(tmp_path, name):
     alias = tmp_path / name
     alias.mkdir()
@@ -42,6 +42,8 @@ def test_ui2coden_shares_initial_and_target(tmp_path, name):
     prepared = {'id': 'page', 'screenshot': str(target), 'methods': {
                 'initial': {'html': str(initial)}, 'design2code-self-revision-3': {'html': str(initial)}},
                 'benchmark_protocol': 'local-reference-render-v1'}
+    if name in ('websight-8b', 'design2code-18b'):
+        prepared['methods'].pop('design2code-self-revision-3')
     prep_dir = alias / 'prepare'; prep_dir.mkdir()
     (prep_dir / 'prepared.jsonl').write_text(json.dumps(prepared) + '\n')
     main_result = {**prepared, 'page_id': 'page', 'id': 'page/repeat-1'}
@@ -64,6 +66,8 @@ def test_ui2coden_shares_initial_and_target(tmp_path, name):
     assert 'Block ↑' not in table
     if name == 'ui2coden':
         assert 'UI2CodeN self-revision' in table and 'D2C Self-Revision (RGB)' not in table
+    elif name in ('websight-8b', 'design2code-18b'):
+        assert 'UI2CodeN polishing' in table and 'D2C Self-Revision (RGB)' not in table
     else:
         assert 'UI2CodeN polishing' in table and 'D2C Self-Revision (RGB)' in table
     scores = [json.loads(line) for line in (evaluation/'metrics.jsonl').read_text().splitlines()]

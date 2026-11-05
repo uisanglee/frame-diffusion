@@ -26,7 +26,7 @@ export DETECTOR_CHECKPOINT=${DETECTOR_CHECKPOINT:-$train/detector/best.pt}
 export ABSTRACT_CHECKPOINT=${ABSTRACT_CHECKPOINT:-$train/tuide-s-abstract/replacement/abstract-stage2/best.pt}
 export REPEATS=1 REPAIR_STEPS=20
 export UI2CODEN_MAX_NEW_TOKENS=16384 UI2CODEN_MAX_CONTEXT=0
-aliases=llava-next-7b,gemma3-12b,pixtral-12b,glm4v-9b-thinking,qwen3vl8b,ui2coden
+aliases=llava-next-7b,glm4v-9b-thinking,websight-8b,design2code-18b,ui2coden
 datasets=()
 found=0
 for dataset in webui design2code design2code-hard; do
@@ -43,11 +43,13 @@ for dataset in webui design2code design2code-hard; do
     cp "$input" "$out/inputs/$dataset.jsonl"
   fi
   # Finish polishing saved drafts first. Never invoke web-prepare on old runs.
-  for alias in llava-next-7b gemma3-12b pixtral-12b glm4v-9b-thinking qwen3vl8b; do
+  for alias in llava-next-7b glm4v-9b-thinking websight-8b design2code-18b; do
     manifest="$old/$dataset/$alias/seeds/42/prepare/prepared.jsonl"
     if [[ ! -f "$manifest" ]]; then
       case "$alias" in
         llava-next-7b) spec='llava-next-7b|hf|llava-hf/llava-v1.6-mistral-7b-hf|bf16';;
+        websight-8b) spec='websight-8b|websight|HuggingFaceM4/VLM_WebSight_finetuned|bf16';;
+        design2code-18b) spec='design2code-18b|design2code-sat|SALT-NLP/Design2Code-18B-v0|bf16';;
         gemma3-12b) spec='gemma3-12b|hf|google/gemma-3-12b-it|bf16';;
         pixtral-12b) spec='pixtral-12b|hf|mistral-experimental/pixtral-12b|bf16';;
         glm4v-9b-thinking) spec='glm4v-9b-thinking|hf|zai-org/GLM-4.1V-9B-Thinking|bf16';;

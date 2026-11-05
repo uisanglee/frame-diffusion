@@ -6,12 +6,18 @@ pilot, not a representative benchmark estimate). Input manifests are frozen unde
 the output directory and shared by every model. On resume, changed selections are
 rejected. Source HTML/PNG pairs and `rick.jpg` must exist in both input directories.
 
-Models run sequentially: LLaVA-NeXT-7B, Gemma-3-12B, Pixtral-12B, UI2CodeN,
-GLM-4.1V-9B-Thinking, Qwen3-VL-8B-Instruct. Each model is distributed over GPUs 0
-and 1 with BF16 weights, no 4-bit quantization and no CPU weight offload. Default
-weight budget is 20 GiB per GPU; runtime memory still depends on context/image size.
-Requires access to the model repositories, including accepted Gemma access terms,
-the main evaluation environment and `baselines/ui2coden/setup_4090.sh` setup.
+The official table uses five initial models, in this execution order:
+LLaVA-NeXT-7B, GLM-4.1V-9B-Thinking, WebSight VLM-8B,
+Design2Code-18B-v0, and UI2CodeN. Qwen, Gemma, and Pixtral adapters and
+individual runners remain available but are excluded from this default matrix.
+
+The BF16 two-GPU launcher uses GPUs 0 and 1. General Transformers models use
+layer placement; Design2Code uses a separate SAT model-parallel runtime.
+WebSight and Design2Code require their dedicated environments (`WEBSIGHT_PYTHON`
+and `DESIGN2CODE_PYTHON` may override their Python executables). Set these up before
+starting the matrix. No 4-bit quantization is enabled by this launcher. Runtime
+memory depends on the model's image processing and context size; GPU execution
+must still be verified on the server.
 
 ```bash
 cd /home/uisang/2027/frame-diffusion
@@ -23,7 +29,13 @@ echo $! > log/d2c-pilot10-seed42-n2-bf16-2gpu.pid
 ```
 
 Defaults are in the script: seed 42, model-specific initial sampling settings,
-16,384 maximum output tokens, two refinement rounds. Each ordinary VLM's Initial
+16,384 maximum output tokens for the chat VLMs, and two refinement rounds.
+WebSight and Design2Code instead use their official `max_length=4096` (total
+sequence length, not 4096 new tokens), image preprocessing, and decoding settings.
+They do not receive the generic text-augmented chat prompt. Their official
+protocols accept one screenshot and do not implement two-image self-revision;
+therefore their table groups contain Initial, UI2CodeN polishing, and (when
+requested) TUIDE, with no fabricated Self Revision scores. Each ordinary VLM's Initial
 is the common starting HTML for its own RGB Self-Revision and UI2CodeN polishing.
 For UI2CodeN's own Initial, its polishing is its Self-Revision (not a duplicate
 second experiment). Intermediate rounds are retained; the comparison selects N=2.

@@ -6,14 +6,30 @@ if [[ $# -ne 3 ]]; then
   exit 2
 fi
 root=$1;output=$2;train=$3
-specs=${VLM_SPECS:-qwen3vl8b\|qwen\|Qwen/Qwen3-VL-8B-Instruct\|bf16}
+specs=${VLM_SPECS:-'llava-next-7b|hf|llava-hf/llava-v1.6-mistral-7b-hf|bf16,glm4v-9b-thinking|hf|zai-org/GLM-4.1V-9B-Thinking|bf16,websight-8b|websight|HuggingFaceM4/VLM_WebSight_finetuned|bf16,design2code-18b|design2code-sat|SALT-NLP/Design2Code-18B-v0|bf16,ui2coden|hf|zai-org/UI2Code_N|bf16'}
 IFS=',' read -ra entries <<< "$specs"
+# Fail before generating any pages if a selected legacy runtime is missing.
+for selected_entry in "${entries[@]}"; do
+  IFS='|' read -r selected_alias selected_backend _ <<< "$selected_entry"
+  case "$selected_backend" in
+    websight)
+      export WEBSIGHT_PYTHON=${WEBSIGHT_PYTHON:-$PWD/baselines/websight/.venv/bin/python}
+      [[ -x "$WEBSIGHT_PYTHON" ]] || { echo 'Run bash baselines/websight/setup.sh first (or set WEBSIGHT_PYTHON)' >&2; exit 2; } ;;
+    design2code-sat)
+      export DESIGN2CODE_PYTHON=${DESIGN2CODE_PYTHON:-$PWD/baselines/design2code/.venv/bin/python}
+      [[ -x "$DESIGN2CODE_PYTHON" ]] || { echo 'Run bash baselines/design2code/setup.sh first (or set DESIGN2CODE_PYTHON)' >&2; exit 2; }
+      IFS=',' read -ra sat_gpus <<< "${CUDA_VISIBLE_DEVICES:-}"
+      [[ ${#sat_gpus[@]} == 2 && -n "${sat_gpus[0]}" && -n "${sat_gpus[1]}" && "${sat_gpus[0]}" != "${sat_gpus[1]}" ]] || {
+        echo 'Design2Code-18B official model-parallel runner requires two distinct GPUs; set CUDA_VISIBLE_DEVICES=0,1' >&2; exit 2;
+      } ;;
+  esac
+done
 first=${entries[0]};first_alias=${first%%|*};[[ "$first_alias" == "$first" ]] && first_alias=${first%%=*}
 representative=${ABLATION_VLM_ALIAS:-$first_alias}
 revision_rounds=${REVISION_ROUNDS:-3}
 [[ "$revision_rounds" =~ ^[1-9][0-9]*$ ]] || { echo "REVISION_ROUNDS must be positive" >&2; exit 2; }
 run_ablation=${RUN_ABLATION:-0}
-run_ui2coden=${RUN_UI2CODEN:-0}
+run_ui2coden=${RUN_UI2CODEN:-1}
 run_tuide=${RUN_TUIDE:-1}
 [[ "$run_tuide" == 0 || "$run_tuide" == 1 ]] || { echo 'RUN_TUIDE must be 0 or 1' >&2; exit 2; }
 [[ "$run_tuide" == 1 || "$run_ablation" == 0 ]] || { echo 'RUN_TUIDE=0 requires RUN_ABLATION=0' >&2; exit 2; }
@@ -43,7 +59,7 @@ abstract_only=1
 [[ "$run_ablation" == 1 ]] && abstract_only=0
 aliases=()
 shared_target_manifest=
-initial_seeds=${INITIAL_SEEDS:-2024}
+initial_seeds=${INITIAL_SEEDS:-42}
 IFS=',' read -ra seed_entries <<< "$initial_seeds"
 [[ ${#seed_entries[@]} -ge 1 ]] || { echo 'INITIAL_SEEDS must list at least one seed' >&2; exit 2; }
 seen_seeds=','
@@ -61,7 +77,7 @@ for entry in "${entries[@]}"; do
     api_key_env=${VLM_API_KEY_ENV:-VLM_API_KEY};reasoning_effort=${VLM_REASONING_EFFORT:-}
   fi
   [[ -n "$alias" && -n "$backend" && -n "$model" ]] || { echo "Invalid VLM spec: $entry" >&2; exit 2; }
-  [[ "$backend" == qwen || "$backend" == hf || "$backend" == openai-compatible ]] || { echo "Invalid backend in: $entry" >&2; exit 2; }
+  [[ "$backend" == qwen || "$backend" == hf || "$backend" == openai-compatible || "$backend" == websight || "$backend" == design2code-sat ]] || { echo "Invalid backend in: $entry" >&2; exit 2; }
   temperature_request=${INITIAL_TEMPERATURE:-auto}
   if [[ "$backend" == openai-compatible && "$temperature_request" == auto ]]; then
     temperature_request=0
@@ -81,6 +97,11 @@ PYTEMP
   api_key_env=${api_key_env:-${VLM_API_KEY_ENV:-VLM_API_KEY}}
   revision=${revision:-${VLM_REVISION:-main}}
   rounds=$revision_rounds
+  self_revision_protocol=design2code
+  if [[ "$backend" == websight || "$backend" == design2code-sat ]]; then
+    rounds=0
+    self_revision_protocol=none
+  fi
   if [[ "$alias" == ui2coden ]]; then
     [[ "$run_ui2coden" == 1 && "$model" == zai-org/UI2Code_N ]] || { echo 'ui2coden group requires its own model and RUN_UI2CODEN=1' >&2; exit 2; }
     revision=$ui_revision
@@ -100,7 +121,7 @@ PYREV
     abstract=0
     [[ "$run_ablation" == 1 && "$alias" == "$representative" && "$seed" == "${seed_entries[0]}" ]] && abstract=1
     echo "Running $alias initial seed=$seed temperature=$initial_temperature ($backend, $model, $precision), abstract ablation=$abstract"
-    CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} WEB_DATASET="${WEB_DATASET:-design2code}" SELF_REVISION_PROTOCOL=design2code REVISION_ROUNDS="$rounds" \
+    CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} WEB_DATASET="${WEB_DATASET:-design2code}" SELF_REVISION_PROTOCOL="$self_revision_protocol" REVISION_ROUNDS="$rounds" VLM_RETRIES="${VLM_RETRIES:-0}" \
       TARGET_IMAGE_SOURCE="${TARGET_IMAGE_SOURCE:-reference-render}" REFERENCE_MANIFEST="$shared_target_manifest" \
       INITIAL_TEMPERATURE="$initial_temperature" SEED="$seed" \
       ABSTRACT_ONLY="$abstract_only" ABSTRACT_VLM_REVISION=$abstract VLM_BACKEND="$backend" VLM_MODEL="$model" \

@@ -8,6 +8,7 @@ import statistics
 
 from .ir import read_jsonl
 from .paper_report import report
+from .paper_matrix import NO_SELF_REVISION_ALIASES
 
 
 MAIN_METHODS = {
@@ -125,10 +126,10 @@ def build(root, aliases, representative, out, include_ablation=True, include_ui2
             _check_same_inputs(prepared, main_path, f'{alias} main')
         required_round = revision_rounds or (3 if require_three_rounds else None)
         revision_method = ('design2code-self-revision' if required_round == 1 else f'design2code-self-revision-{required_round}')
-        if required_round and not own_initial and any(revision_method not in row['methods']
+        if required_round and not own_initial and alias not in NO_SELF_REVISION_ALIASES and any(revision_method not in row['methods']
                                         for row in read_jsonl(alias_root / 'prepare' / 'prepared.jsonl')):
             raise ValueError(f'{alias}: missing Design2Code self-revision round {required_round}')
-        mapping = ({'initial':'Initial VLM','abstract-policy':'TUIDE'} if own_initial else ({'initial':'Initial VLM', revision_method:'D2C Self-Revision (RGB)',
+        mapping = ({'initial':'Initial VLM','abstract-policy':'TUIDE'} if own_initial or alias in NO_SELF_REVISION_ALIASES else ({'initial':'Initial VLM', revision_method:'D2C Self-Revision (RGB)',
                    'abstract-policy':'TUIDE'} if required_round else MAIN_METHODS))
         if not include_tuide:mapping={k:v for k,v in mapping.items() if v!='TUIDE'}
         rows = selected(read_jsonl(path), mapping)

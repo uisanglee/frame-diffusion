@@ -15,6 +15,8 @@ from .vlm_devices import (deployment_settings as deployment_settings, placement_
     input_device, start_cuda_measurement, finish_cuda_measurement, efficient_generation_options)
 
 QWEN_BF16_MEMORY_CONTRACT = 'bf16-dynamic-kv-v1'
+IMAGE_ONLY_BACKENDS = ('websight', 'design2code-sat')
+LOCAL_BACKENDS = ('qwen', 'hf', *IMAGE_ONLY_BACKENDS)
 
 def initial_temperature(model, requested='auto'):
     """Paper draft defaults from model cards/configs; explicit overrides stay explicit.
@@ -30,6 +32,8 @@ def initial_temperature(model, requested='auto'):
         'mistral-experimental/pixtral-12b': .35,
         'mistral-community/pixtral-12b': .35,
         'mistralai/Pixtral-12B-2409': .35,
+        'HuggingFaceM4/VLM_WebSight_finetuned': 0.,
+        'SALT-NLP/Design2Code-18B-v0': .5,
     }
     if requested == 'auto':
         if model not in defaults:
@@ -100,6 +104,10 @@ def images_for(args):
     images=[]
     for path in args.image:
         with Image.open(path) as source:
+            if getattr(args, 'backend', None) in IMAGE_ONLY_BACKENDS:
+                # Dedicated official transforms handle RGB/alpha and resolution.
+                images.append(source.copy())
+                continue
             image=source.convert('RGB');scale=min(1,(args.max_pixels/(image.width*image.height))**.5)
             if scale<1:image=image.resize((max(1,int(image.width*scale)),max(1,int(image.height*scale))))
             images.append(image.copy())
@@ -296,15 +304,47 @@ def hf_generate(args,prompt,images,runtime=None):
                    'weight_precision':'nf4-4bit' if args.four_bit else 'bf16'}
 
 def generate(args,prompt,images,runtime=None):
+    if args.backend in IMAGE_ONLY_BACKENDS:
+        from .runtime_errors import InferenceWorkerError
+        try:
+            if args.backend == 'websight':
+                from .websight_backend import websight_generate
+                return websight_generate(args, prompt, images, runtime)
+            from .design2code_sat import design2code_generate
+            return design2code_generate(args, prompt, images, runtime)
+        except Exception as error:
+            raise InferenceWorkerError(str(error)) from error
     if args.backend=='qwen':return qwen_generate(args,prompt,images,runtime)
     if args.backend=='hf':return hf_generate(args,prompt,images,runtime)
     return api_generate(args,prompt,images)
+
+
+def load_runtime(args):
+    if args.backend == 'qwen': return load_qwen_runtime(args)
+    if args.backend == 'hf': return load_hf_runtime(args)
+    from .runtime_errors import InferenceWorkerError
+    try:
+        if args.backend == 'websight':
+            from .websight_backend import load_websight_runtime
+            return load_websight_runtime(args)
+        if args.backend == 'design2code-sat':
+            from .design2code_sat import load_design2code_runtime
+            return load_design2code_runtime(args)
+    except Exception as error:
+        raise InferenceWorkerError(str(error)) from error
+    return None
 
 def run(args):
     if args.max_pixels<1:raise ValueError('max-pixels must be positive')
     if args.task.startswith('revise') and not args.current:raise ValueError('Revision requires --current')
     if not args.image and not args.frames:raise ValueError('Supply reference --image and/or --frames')
-    prompt=prompt_for(args);images=images_for(args)
+    if args.backend in IMAGE_ONLY_BACKENDS:
+        if args.task != 'generate-html' or args.current or args.frames or len(args.image) != 1:
+            raise ValueError('Official image-only models support generate-html with exactly one image only')
+        prompt = ''
+    else:
+        prompt = prompt_for(args)
+    images=images_for(args)
     if args.task=='extract-frames':
         if len(args.image)!=1:raise ValueError('Extract frames one viewport/screenshot at a time')
         with Image.open(args.image[0]) as im:original_size=list(im.size)

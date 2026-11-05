@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Thirty fixed inputs, all six initial VLMs, no training or dataset changes.
+# Thirty fixed inputs, all five initial VLMs, no training or dataset changes.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 source .venv/bin/activate
@@ -48,4 +48,4 @@ for dataset in webui design2code design2code-hard; do
   WEB_DATASET="$kind" PAGE_MANIFEST="$output/inputs/$dataset.jsonl" \
     bash scripts/run_paper_4090_vlms.sh . "$output/$dataset" "$train"
 done
-python -m framediff.paper_matrix export --root "$output" --out "$output/table"
+python -m framediff.paper_matrix export --root "$output" --out "$output/table" --revision-rounds "$REVISION_ROUNDS"

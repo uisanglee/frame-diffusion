@@ -109,37 +109,40 @@ The fixed RTX 4090 comparison requested for the paper has a dedicated wrapper:
 
 ```bash
 pip install -e '.[vlm,visual,visual-metrics,test]'
-hf auth login  # required once for the gated Gemma weights
+hf auth login  # if required for your selected repositories
 bash baselines/ui2coden/setup_4090.sh  # isolated UI2CodeN environment
+bash baselines/websight/setup.sh
+bash baselines/design2code/setup.sh
+export CUDA_VISIBLE_DEVICES=0,1
 
 bash scripts/run_paper_4090_vlms.sh \
   "$D2C_ROOT" runs/paper-d2c runs/webui-10k-v3-nospacing-fresh-webui
 ```
 
-It runs models sequentially with the following exact settings:
+The current default matrix runs five BF16 models sequentially: LLaVA-NeXT-7B,
+GLM-4.1V-9B, WebSight VLM-8B, Design2Code-18B-v0, and UI2CodeN. Use
+`CUDA_VISIBLE_DEVICES=0,1`; Design2Code uses SAT model parallelism. Install the
+separate WebSight and Design2Code runtimes before running this wrapper (see
+`docs/d2c-vlm-pilot.md`). Qwen/Gemma/Pixtral remain optional individual baselines;
+they are no longer part of the official matrix.
 
-The 4090 wrapper runs both self-revision and UI2CodeN for exactly three rounds
-(`RUN_UI2CODEN=1` by default). Use a **new output directory** if an older run
-was prepared with one self-revision round; its resume configuration is different.
-Set `RUN_UI2CODEN=0` only for a quick model smoke test; the resulting main table
-will omit that baseline.
+See [specialist setup and protocol details](screenshot-specialist-models.md) for
+the separate environments and SAT LoRA partitioning adaptation.
 
-Set `INITIAL_SEEDS=11,22,33` and `INITIAL_TEMPERATURE=0.7` to generate three
-independent initial drafts per VLM. The first VLM/seed run renders the target reference;
-all later runs reuse its target PNG and DOM observation. Every seed has its own
-`<VLM>/seeds/<seed>/prepare`, `repair`, `ui2coden`, and `evaluation` directory.
-The fixed checkpoint hashes are checked before aggregation. The output
-`paper/main/<VLM>/main-table.md` reports mean ± SD across initial seeds for
-**all** methods; `initial-seed-summary.json` preserves the per-seed values.
-With one seed, the wrapper uses greedy initial generation and reports no SD.
+WebSight and Design2Code follow their official image-only drafting interfaces,
+including a total `max_length=4096`. They do not implement the generic two-image,
+current-HTML Self Revision interface, so that row is omitted. Their saved drafts
+are still repaired by UI2CodeN and TUIDE. Other VLMs retain Self Revision.
+Refinement rounds are selected by `REVISION_ROUNDS`; the pilot scripts use two.
 
-- `Qwen/Qwen3-VL-8B-Instruct`: BF16.
-- `google/gemma-3-12b-it`: bitsandbytes NF4 4-bit with BF16 compute and double quantization.
-- `mistral-experimental/pixtral-12b`: bitsandbytes NF4 4-bit with BF16 compute and double quantization. This is the Transformers-compatible conversion referenced by the Hugging Face Pixtral documentation.
-- `zai-org/GLM-4.1V-9B-Thinking`: bitsandbytes NF4 4-bit with BF16 compute and double quantization.
-- `llava-hf/llava-v1.6-mistral-7b-hf` (LLaVA-NeXT-7B): bitsandbytes NF4 4-bit with BF16 compute and double quantization. Its model-specific loader accepts the target/current two-image self-revision prompt.
-
-Gemma is gated on Hugging Face, so accept its license and run `hf auth login` first. Local models are loaded in separate `web-prepare` processes and released before the detector/policies are loaded.
+Use seed 42 and `INITIAL_TEMPERATURE=auto` for the official model defaults.
+WebSight's greedy decoding does not produce an independent sampling experiment
+by changing the seed; the combined official matrix therefore uses one seed.
+Do not override its temperature to manufacture seed variance. Model profiles,
+image preprocessing, and output-length differences must be reported with results.
+The first model renders each reference; later models reuse that same target PNG
+and DOM observation. Each model stores its own `seeds/42/prepare`, `repair`,
+`ui2coden`, and `evaluation` outputs. Checkpoint hashes are checked at aggregation.
 
 To smoke-test only LLaVA-NeXT-7B on a 24 GB RTX 4090, use a new output directory:
 
@@ -163,7 +166,7 @@ bash scripts/run_paper_4090_vlms.sh \
   "$D2C_ROOT" runs/paper-d2c-smoke runs/webui-10k-v3-nospacing-fresh-webui
 ```
 
-The general format is a comma-separated list of `alias|backend|model|precision` records. `backend` is `qwen`, `hf`, or `openai-compatible`; local precision is `bf16` or `4bit`:
+The general format is a comma-separated list of `alias|backend|model|precision` records. `backend` is `qwen`, `hf`, `websight`, `design2code-sat`, or `openai-compatible`; local precision is `bf16` or `4bit`:
 
 ```bash
 export VLM_SPECS='qwen3vl8b|qwen|Qwen/Qwen3-VL-8B-Instruct|bf16,gemma3-12b|hf|google/gemma-3-12b-it|4bit,pixtral-12b|hf|mistral-experimental/pixtral-12b|4bit'
@@ -260,14 +263,13 @@ bash scripts/run_paper_4090_vlms.sh \
 
 Use a separate output directory for the full benchmark and match `PAGE_LIMIT`, `REPEATS`, `REPAIR_STEPS`, image resolution, and generation token budget across comparisons. Thinking tokens count toward the generation limit, token usage, and latency. Only the final answer after `</think>` is passed to HTML processing; an unfinished `<think>` response is rejected as empty output. Real 4090 memory usage must be checked in the smoke test; 4-bit does not guarantee that arbitrary image/context lengths fit.
 
-## Three datasets × six initial models
+## Three datasets × five initial models
 
-The default 4090 wrapper includes UI2CodeN as the sixth initial model. Its group
-contains **Initial / Self Revision / TUIDE**. Initial uses the shared text-augmented
-drafting prompt and pretrained `zai-org/UI2Code_N` in 4-bit. Self Revision uses the
-isolated UI2CodeN polishing adapter for three rounds, starting from its own saved
-draft. This is our common evaluation protocol, not a reproduction of the original
-paper's entire evaluation setup.
+The current roster is listed above. UI2CodeN's group contains
+**Initial / Self Revision / TUIDE**; Self Revision uses its own polishing adapter
+starting from its saved draft. The Design2Code/WebSight groups contain
+**Initial / UI2CodeN polishing / TUIDE**. This is our common repair evaluation,
+not a reproduction of each original paper's entire benchmark protocol.
 
 WebUI uses a held-out HTML/screenshot manifest (for example `css/pages-test.jsonl`).
 Its target is rendered locally and the DOM comes from that same observation;
@@ -311,7 +313,7 @@ The main quality table reports Position, CLIP, Box IoU, and Improved (%). CLIP u
 
 ## Ten-page pilot per dataset
 
-Run `bash scripts/run_paper_pilot10.sh` from the repository virtual environment (the wrapper activates `.venv`). Default output: `runs/paper-pilot10-seed42-n2-v1`. It uses fixed seed 42, automatic model decoding settings, up to 16,384 generated tokens, two VLM refinement rounds, and 20 TUIDE steps. All six initial VLMs run sequentially on `CUDA_VISIBLE_DEVICES`; checkpoints are reused without training. The official metrics dependencies, Hugging Face model access, and UI2CodeN environment must already be installed.
+Run `bash scripts/run_paper_pilot10.sh` from the repository virtual environment (the wrapper activates `.venv`). Default output: `runs/paper-pilot10-seed42-n2-v1`. It uses fixed seed 42, automatic model decoding settings, up to 16,384 generated tokens, two VLM refinement rounds, and 20 TUIDE steps. All five initial VLMs run sequentially on `CUDA_VISIBLE_DEVICES`; checkpoints are reused without training. The official metrics dependencies, Hugging Face model access, and UI2CodeN environment must already be installed.
 
 Each dataset contributes ten fixed inputs. WebUI selects ten unique pages, preferring the 1280x720 view for each; the other benchmarks select ten image/HTML pairs. These are deterministic smoke-test samples, not a representative accuracy estimate. Input manifests are saved under `inputs/` and checked on resume. WebUI's external asset limitation remains; inspect pilot renderings before scaling up.
 

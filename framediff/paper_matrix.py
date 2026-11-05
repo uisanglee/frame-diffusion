@@ -1,4 +1,4 @@
-"""Preflight and export the three-dataset, six-initial-model paper comparison."""
+"""Preflight and export the three-dataset, five-initial-model paper comparison."""
 import argparse
 from collections import Counter
 import json
@@ -10,9 +10,18 @@ from .benchmarks import discover_design2code
 from .ir import read_jsonl
 
 DATASETS = [('webui', 'WebUI'), ('design2code', 'Design2Code'), ('design2code-hard', 'Design2Code-Hard')]
-MODELS = [('qwen3vl8b', 'Qwen3-VL-8B'), ('glm4v-9b-thinking', 'GLM-4.1V-9B'),
-          ('gemma3-12b', 'Gemma-3-12B'), ('llava-next-7b', 'LLaVA-NeXT-7B'),
-          ('pixtral-12b', 'Pixtral-12B'), ('ui2coden', r'UI2Code$^{n}$')]
+MODELS = [('llava-next-7b', 'LLaVA-NeXT-7B'), ('glm4v-9b-thinking', 'GLM-4.1V-9B'),
+          ('websight-8b', 'WebSight VLM-8B'), ('design2code-18b', 'Design2Code-18B-v0'),
+          ('ui2coden', r'UI2Code$^{n}$')]
+# These public checkpoints have an image-only drafting protocol, not a chat
+# protocol taking current HTML and two images for self-revision.
+NO_SELF_REVISION_ALIASES = frozenset({'websight-8b', 'design2code-18b'})
+# Retained only for explicitly requested legacy reports and individual runs.
+LEGACY_MODELS = [('qwen3vl8b', 'Qwen3-VL-8B'), ('glm4v-9b-thinking', 'GLM-4.1V-9B'),
+                 ('gemma3-12b', 'Gemma-3-12B'), ('llava-next-7b', 'LLaVA-NeXT-7B'),
+                 ('pixtral-12b', 'Pixtral-12B'), ('ui2coden', r'UI2Code$^{n}$')]
+MODEL_LABELS = dict([*LEGACY_MODELS, *MODELS])
+
 METRICS = ('official_position', 'official_clip', 'dom_box_iou', 'improved_page_rate')
 
 
@@ -66,15 +75,18 @@ def check_official(repo):
     return scorer.source_sha
 
 
-def export_matrix(root, out, datasets=None, include_tuide=True, revision_rounds=3):
+def export_matrix(root, out, datasets=None, include_tuide=True, revision_rounds=3, models=None):
     root=Path(root); out=Path(out)
+    selected_models = MODELS if models is None else [(key, MODEL_LABELS[key]) for key in models]
+    if not selected_models or len({k for k, _ in selected_models}) != len(selected_models):
+        raise ValueError('Select distinct, nonempty models')
     selected_datasets=DATASETS if datasets is None else [(key,dict(DATASETS)[key]) for key in datasets]
     if not selected_datasets or len({k for k,_ in selected_datasets})!=len(selected_datasets):
         raise ValueError('Select distinct, nonempty datasets')
     records={}; seeds=checkpoints=None
     for dataset,_ in selected_datasets:
         counts=set()
-        for alias,_ in MODELS:
+        for alias,_ in selected_models:
             path=root/dataset/'paper/main'/alias/'initial-seed-summary.json'
             record=json.loads(path.read_text())
             if record.get('cohort_protocol') != 'initial-success-shared-v1':
@@ -91,6 +103,7 @@ def export_matrix(root, out, datasets=None, include_tuide=True, revision_rounds=
             seeds=record['initial_seeds']; checkpoints=record['fixed_checkpoint_hashes']
             required = ['Initial VLM', 'UI2CodeN self-revision', 'TUIDE'] if alias=='ui2coden' else [
                 'Initial VLM','D2C Self-Revision (RGB)','UI2CodeN polishing','TUIDE']
+            if alias in NO_SELF_REVISION_ALIASES:required.remove('D2C Self-Revision (RGB)')
             if not include_tuide:required.remove('TUIDE')
             if set(record['methods']) != set(required):
                 raise ValueError(f'{path}: incomplete method group')
@@ -115,6 +128,7 @@ def export_matrix(root, out, datasets=None, include_tuide=True, revision_rounds=
            r'Within each dataset and initial VLM, repair methods share the same initial HTML. '
            r'Self Revision and UI2Code$^{n}$ polishing use '+str(revision_rounds)+' refinement rounds. '
            r'If refinement fails, the last available implementation is retained and remains in the evaluation. '
+           r'WebSight and Design2Code use their official image-only drafting protocols; unsupported self-revision is omitted. '
            r'Quality is measured on the shared set of successfully generated Initial pages within each model and seed. '
            r'The last column reports Initial generation success over all attempted inputs, and Box IoU improvement over Initial for repair methods. '
            r'Results are means across initial-generation seeds with fixed model checkpoints; $\pm$ denotes sample standard deviation when multiple seeds are used.}',
@@ -124,10 +138,12 @@ def export_matrix(root, out, datasets=None, include_tuide=True, revision_rounds=
            ''.join(r'\cline{'+f'{3+4*i}-{6+4*i}'+'}' for i in range(len(selected_datasets))),
            '& & '+' & '.join([r'Position $\uparrow$',r'CLIP $\uparrow$',r'Box IoU $\uparrow$',r'Success / Improved (\%) $\uparrow$']*len(selected_datasets))+r' \\',r'\hline']
     coverage={}
-    for alias,label in MODELS:
+    for alias,label in selected_models:
         methods=[('Initial VLM','Initial')]
         methods += [('UI2CodeN self-revision','Self Revision')] if alias=='ui2coden' else [
             ('D2C Self-Revision (RGB)','Self Revision'),('UI2CodeN polishing',r'UI2Code$^{n}$')]
+        if alias in NO_SELF_REVISION_ALIASES:
+            methods = [(method, title) for method, title in methods if method != 'D2C Self-Revision (RGB)']
         if include_tuide:methods += [('TUIDE','TUIDE')]
         for index,(method,title) in enumerate(methods):
             cells=[]
@@ -162,6 +178,7 @@ def main():
     pre.add_argument('--official-repo',required=True)
     export=sub.add_parser('export'); export.add_argument('--root',required=True); export.add_argument('--out',required=True)
     export.add_argument('--datasets',nargs='+',choices=[key for key,_ in DATASETS])
+    export.add_argument('--models', nargs='+', choices=list(MODEL_LABELS), help='Defaults to the current official five-model roster; use explicit aliases for legacy reports')
     export.add_argument('--skip-tuide',action='store_true')
     export.add_argument('--revision-rounds',type=int,choices=range(1,101),default=3)
     args=parser.parse_args()
@@ -169,7 +186,7 @@ def main():
         rows=check_sources(args.root,args.manifest,args.dataset,args.webui_view,args.limit)
         sha=check_official(args.official_repo)
         print(json.dumps(dict(pages=len(rows),official_source_sha=sha,protocol='local-reference-render-v1')))
-    else: print(export_matrix(args.root,args.out,args.datasets,not args.skip_tuide,args.revision_rounds))
+    else: print(export_matrix(args.root,args.out,args.datasets,not args.skip_tuide,args.revision_rounds,args.models))
 
 
 if __name__=='__main__': main()

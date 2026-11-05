@@ -1,6 +1,6 @@
 import json
 import pytest
-from framediff.paper_matrix import DATASETS, MODELS, METRICS, export_matrix, check_sources
+from framediff.paper_matrix import DATASETS, MODELS, METRICS, NO_SELF_REVISION_ALIASES, LEGACY_MODELS, export_matrix, check_sources
 
 
 def test_matrix_has_all_groups_and_rejects_missing_scores(tmp_path):
@@ -8,11 +8,12 @@ def test_matrix_has_all_groups_and_rejects_missing_scores(tmp_path):
         for alias, _ in MODELS:
             methods = ['Initial VLM', 'TUIDE']
             methods += ['UI2CodeN self-revision'] if alias == 'ui2coden' else ['D2C Self-Revision (RGB)', 'UI2CodeN polishing']
+            if alias in NO_SELF_REVISION_ALIASES: methods.remove('D2C Self-Revision (RGB)')
             summary = dict(complete_metrics_required=True, target_image_protocol='local-reference-render-v1',
                 initial_seeds=['11','22'], fixed_checkpoint_hashes=['fixed'], methods={
                     m: dict(n_pages=10, metrics={k: dict(mean=.5, sd=.1) for k in METRICS}) for m in methods})
             summary['cohort_protocol'] = 'initial-success-shared-v1'
-            n = 8 if alias == 'qwen3vl8b' else 10
+            n = 8 if alias == 'llava-next-7b' else 10
             summary['initial_coverage_by_seed'] = {seed: dict(attempted=10, successful=n, failed=10-n) for seed in ('11','22')}
             for item in summary['methods'].values():
                 item['n_pages'] = n
@@ -27,9 +28,9 @@ def test_matrix_has_all_groups_and_rejects_missing_scores(tmp_path):
     assert 'Success / Improved' in table
     assert '80.000' in table
     assert 'Block $' not in table
-    assert table.count(' & Initial & ') == 6
-    assert table.count(' & Self Revision & ') == 6
-    assert table.count(' & TUIDE & ') == 6
+    assert table.count(' & Initial & ') == 5
+    assert table.count(' & Self Revision & ') == 3
+    assert table.count(' & TUIDE & ') == 5
     assert 'last available implementation' in table
     assert r'\multirow{3}{*}{UI2Code$^{n}$}' in table
     for line in table.splitlines():
@@ -51,12 +52,14 @@ def test_preflight_requires_heldout_html(tmp_path):
         check_sources(manifest=manifest)
 
 
-def test_export_two_datasets_without_tuide(tmp_path):
+@pytest.mark.parametrize('models', [None, LEGACY_MODELS])
+def test_export_two_datasets_without_tuide(tmp_path, models):
     datasets=['design2code','design2code-hard']
     for dataset in datasets:
-        for alias,_ in MODELS:
+        for alias,_ in (models or MODELS):
             methods=['Initial VLM','UI2CodeN self-revision'] if alias=='ui2coden' else [
                 'Initial VLM','D2C Self-Revision (RGB)','UI2CodeN polishing']
+            if alias in NO_SELF_REVISION_ALIASES: methods.remove('D2C Self-Revision (RGB)')
             record=dict(complete_metrics_required=True,target_image_protocol='local-reference-render-v1',
                 initial_seeds=['42'],fixed_checkpoint_hashes={},cohort_protocol='initial-success-shared-v1',
                 initial_coverage_by_seed={'42':dict(attempted=10,successful=8,failed=2)},methods={})
@@ -65,10 +68,11 @@ def test_export_two_datasets_without_tuide(tmp_path):
                     k:dict(mean=.5,sd=None) for k in (*METRICS,'initial_success_rate')})
             folder=tmp_path/dataset/'paper/main'/alias;folder.mkdir(parents=True)
             (folder/'initial-seed-summary.json').write_text(json.dumps(record))
-    table=export_matrix(tmp_path,tmp_path/'table',datasets,False,2).read_text()
+    table=export_matrix(tmp_path,tmp_path/'table',datasets,False,2, None if models is None else [a for a, _ in models]).read_text()
     assert 'TUIDE' not in table and 'WebUI' not in table
     assert '2 refinement rounds' in table
-    assert table.count(' & Initial & ')==6 and table.count(' & Self Revision & ')==6
+    assert table.count(' & Initial & ')==len(models or MODELS)
+    assert table.count(' & Self Revision & ')==(6 if models else 3)
     assert r'\begin{tabular}{ll*{2}{cccc}}' in table
     assert all(line.count('&')==9 for line in table.splitlines() if ' & Initial & ' in line)
 
@@ -143,3 +147,40 @@ printf '%s|%s|%s|%s|%s|%s\\n' "$VLM_SPECS" "$CUDA_VISIBLE_DEVICES" "$MAX_NEW_TOK
     for line, dataset in zip(calls, ('webui', 'design2code', 'design2code-hard')):
         assert line == ('qwen3vl8b|qwen|Qwen/Qwen3-VL-8B-Instruct|bf16|0|16384|42|auto|'
                         'runs/paper-qwen3vl8b-bf16-seed42-16k-gpu-kv/' + dataset)
+
+
+def test_official_roster_contains_only_requested_models():
+    from pathlib import Path
+    expected = ['llava-next-7b', 'glm4v-9b-thinking', 'websight-8b', 'design2code-18b', 'ui2coden']
+    assert [alias for alias, _ in MODELS] == expected
+    for script in ('run_paper_4090_vlms.sh', 'run_paper_pilot10_bf16_2gpu.sh', 'run_d2c_pilot10_bf16_2gpu.sh'):
+        line = next(s for s in (Path('scripts')/script).read_text().splitlines() if s.startswith('export VLM_SPECS='))
+        specs = line.split("'", 2)[1].split(',')
+        assert [spec.split('|')[0] for spec in specs] == expected
+
+
+def test_image_only_drafters_select_direct_generation_without_self_revision(tmp_path):
+    import os
+    import subprocess
+    from pathlib import Path
+    script = Path('scripts/run_paper_experiments.sh').resolve()
+    tools = tmp_path/'bin'; tools.mkdir()
+    py = tools/'python'
+    py.write_text('#!/bin/sh\nif [ "$1" = "-" ]; then cat >/dev/null; echo pinned-sha; fi\n')
+    py.chmod(0o755)
+    bash = tools/'bash'
+    bash.write_text('#!/bin/sh\nprintf "%s|%s|%s\\n" "$VLM_BACKEND" "$SELF_REVISION_PROTOCOL" "$REVISION_ROUNDS" >> "$CALL_LOG"\n')
+    bash.chmod(0o755)
+    env = dict(os.environ, PATH=str(tools)+os.pathsep+os.environ['PATH'],
+        CALL_LOG=str(tmp_path/'calls'), OFFICIAL_REPO='official', RUN_UI2CODEN='0', RUN_TUIDE='0',
+        RUN_ABLATION='0', INITIAL_SEEDS='42', CUDA_VISIBLE_DEVICES='0,1',
+        WEBSIGHT_PYTHON=str(py), DESIGN2CODE_PYTHON=str(py),
+        VLM_SPECS='websight-8b|websight|HuggingFaceM4/VLM_WebSight_finetuned|bf16,design2code-18b|design2code-sat|SALT-NLP/Design2Code-18B-v0|bf16')
+    result = subprocess.run(['/bin/bash',str(script),'data','out','unused'],cwd=tmp_path,env=env,capture_output=True,text=True)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path/'calls').read_text().splitlines() == ['websight|none|0', 'design2code-sat|none|0']
+    (tmp_path/'calls').unlink()
+    env['CUDA_VISIBLE_DEVICES'] = '0'
+    result = subprocess.run(['/bin/bash',str(script),'data','out','unused'],cwd=tmp_path,env=env,capture_output=True,text=True)
+    assert result.returncode == 2 and 'requires two distinct GPUs' in result.stderr
+    assert not (tmp_path/'calls').exists()

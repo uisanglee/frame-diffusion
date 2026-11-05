@@ -17,6 +17,14 @@ from contextlib import ExitStack
 from functools import wraps
 from pathlib import Path
 
+EVALUATION_CONTRACT = 'preserve-html-no-repetition-removal-v1'
+
+
+def preserve_html(filename):
+    """Do not truncate CSS/text or delete repeated DOM elements during scoring."""
+    if not Path(filename).is_file():
+        raise FileNotFoundError(filename)
+
 
 class OfficialMetrics:
     def __init__(self, repo):
@@ -78,6 +86,10 @@ class OfficialMetrics:
         from .evaluation_timing import EvaluationTiming
         from .official_eval_cache import cached_mask, CachedClipModel
         timing = timing or EvaluationTiming(output=str(out))
+        # Upstream pre_process truncates repeated strings (including CSS) and
+        # deletes repeated elements. Both alter valid rendered implementations.
+        # Apply this override to every method, before installing timing hooks.
+        self.module.pre_process = preserve_html
         if not hasattr(self, '_render_cache'):
             self._init_caches()
         if getattr(self, '_cache_browser', None) is not browser:
@@ -183,6 +195,7 @@ class OfficialMetrics:
                 raise ValueError('Invalid official metric output')
             scores = dict(zip(('official_block','official_text','official_position','official_color','official_clip'),map(float,values)))
             write_json(out/'official.json',{'scores':scores,'source_sha':self.source_sha,
+                'evaluation_contract': EVALUATION_CONTRACT,
                 'evaluation_timing':timing.report(),
                 'optimizations': {
                     'exact_pixel_fast_path': getattr(self, '_pixel_ops', self.ocr) is not self.ocr,
@@ -190,5 +203,5 @@ class OfficialMetrics:
                     'bounded_render_and_clip_caches': True,
                 },
                 'compatibility_patch':self.compatibility_patch,
-                'protocol':'Upstream metric functions; shared fixed viewport; JS/external network disabled; offline assets; temporary preprocessing copies'})
+                'protocol':'Upstream metric functions; shared fixed viewport; JS/external network disabled; offline assets; HTML repetition removal disabled'})
             return scores

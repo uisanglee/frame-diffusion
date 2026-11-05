@@ -14,7 +14,7 @@ def test_ui2coden_rerun_aggregates_previous_methods(tmp_path,with_tuide):
     old=tmp_path/'old';out=tmp_path/'new'
     (old/'inputs').mkdir(parents=True)
     (old/'inputs/design2code.jsonl').write_text('{"id":"page"}\n')
-    for alias in ('llava-next-7b','gemma3-12b','pixtral-12b','glm4v-9b-thinking','qwen3vl8b'):
+    for alias in ('llava-next-7b','glm4v-9b-thinking','websight-8b','design2code-18b'):
         run=old/'design2code'/alias/'seeds/42'
         for name in ('prepare','evaluation','repair'):(run/name).mkdir(parents=True)
         (run/'prepare/prepared.jsonl').write_text('{"id":"page"}\n')
@@ -28,12 +28,12 @@ def test_ui2coden_rerun_aggregates_previous_methods(tmp_path,with_tuide):
     result=subprocess.run(['/bin/bash',str(script),str(old),str(out)],env=env,capture_output=True,text=True)
     assert result.returncode==0,result.stderr
     calls=(tmp_path/'py.log').read_text()
-    assert 'framediff.paper_suite' in calls and '--aliases llava-next-7b,gemma3-12b' in calls
+    assert 'framediff.paper_suite' in calls and '--aliases llava-next-7b,glm4v-9b-thinking' in calls
     assert 'framediff.paper_matrix export' in calls and '--datasets design2code --revision-rounds 2' in calls
     assert ('--skip-tuide' in calls)==(with_tuide=='0')
     assert (out/'design2code/llava-next-7b/seeds/42/evaluation').is_symlink()
     bashcalls=(tmp_path/'bash.log').read_text().splitlines()
-    assert len(bashcalls)==6
+    assert len(bashcalls)==5
     assert all(line.startswith(with_tuide+'|') for line in bashcalls)
     assert 'run_paper_experiments.sh' in bashcalls[-1]
 

@@ -18,7 +18,7 @@ export PAGE_LIMIT=0 REVISION_ROUNDS=2 REPEATS=1
 export RUN_TUIDE=0 RUN_UI2CODEN=1 RUN_ABLATION=0 PAPER_DIAGNOSTICS=0 TUIDE_SCALES=0
 export OFFICIAL_REPO=${OFFICIAL_REPO:-$PWD/external/design2code-official}
 export PAPER_REFERENCE_CACHE=${PAPER_REFERENCE_CACHE:-$PWD/.cache/paper-reference-renders}
-export VLM_SPECS='llava-next-7b|hf|llava-hf/llava-v1.6-mistral-7b-hf|bf16,gemma3-12b|hf|google/gemma-3-12b-it|bf16,pixtral-12b|hf|mistral-experimental/pixtral-12b|bf16,ui2coden|hf|zai-org/UI2Code_N|bf16,glm4v-9b-thinking|hf|zai-org/GLM-4.1V-9B-Thinking|bf16,qwen3vl8b|qwen|Qwen/Qwen3-VL-8B-Instruct|bf16'
+export VLM_SPECS=${VLM_SPECS:-'llava-next-7b|hf|llava-hf/llava-v1.6-mistral-7b-hf|bf16,glm4v-9b-thinking|hf|zai-org/GLM-4.1V-9B-Thinking|bf16,websight-8b|websight|HuggingFaceM4/VLM_WebSight_finetuned|bf16,design2code-18b|design2code-sat|SALT-NLP/Design2Code-18B-v0|bf16,ui2coden|hf|zai-org/UI2Code_N|bf16'}
 pilot_pages=${D2C_PILOT_PAGES:-10}
 [[ "$pilot_pages" =~ ^[1-9][0-9]*$ ]] || {
   echo 'D2C_PILOT_PAGES must be a positive integer' >&2; exit 2;

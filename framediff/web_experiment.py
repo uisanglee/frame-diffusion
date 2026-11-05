@@ -11,6 +11,7 @@ import math
 import statistics
 import time
 from collections import Counter
+from contextlib import ExitStack
 from pathlib import Path
 
 from PIL import Image
@@ -83,7 +84,7 @@ def add_parsers(sub):
     p.add_argument('--dataset', choices=['design2code','webui'], default='design2code')
     p.add_argument('--webui-view', default='default_1280-720', help='Exact WebUI viewport prefix, or all')
     p.add_argument('--out', required=True)
-    p.add_argument('--backend', choices=['qwen','hf','openai-compatible'], default='qwen')
+    p.add_argument('--backend', choices=[*vlm.LOCAL_BACKENDS,'openai-compatible'], default='qwen')
     p.add_argument('--model', default='Qwen/Qwen3-VL-8B-Instruct')
     p.add_argument('--revision', default='main')
     p.add_argument('--endpoint', default='http://localhost:8000/v1/chat/completions')
@@ -123,6 +124,20 @@ def add_parsers(sub):
 
 
 def prepare(args):
+    with ExitStack() as resources:
+        return _prepare(args, resources)
+
+
+def _prepare(args, resources):
+    image_only = getattr(args, 'backend', None) in vlm.IMAGE_ONLY_BACKENDS
+    if image_only:
+        if (args.rounds != 0 or args.initial_mode != 'direct'
+                or getattr(args, 'revision_protocol', 'shared') != 'shared'
+                or getattr(args, 'repair_conditioning', 'boxes') != 'visual'):
+            raise ValueError('Official image-only models require rounds=0, initial-mode=direct, '
+                             'revision-protocol=shared and repair-conditioning=visual')
+        if getattr(args, 'vlm_retries', 2) != 0:
+            raise ValueError('Official image-only generation requires --vlm-retries 0; feedback prompts are unsupported')
     retries = getattr(args,'vlm_retries',2)
     revision_protocol = getattr(args,'revision_protocol','shared')
     target_image_source = getattr(args,'target_image_source','provided')
@@ -175,6 +190,10 @@ def prepare(args):
                     if i.get('html') and (Path(i['html']).parent/'rick.jpg').exists() else None} for i in items]
     use_placeholder = getattr(args,'dataset','design2code') == 'design2code'
     settings = {k:v for k,v in vars(args).items() if k not in ('resume','out','retry_failed')}
+    if image_only:
+        settings['initial_protocol'] = 'official-image-only-v1'
+        settings['official_max_length'] = 4096
+        settings['max_new_tokens'] = None  # Official adapters use total sequence length.
     if not use_placeholder:
         settings['prompt_asset_contract'] = 'webui-no-benchmark-placeholder-v1'
         from .webui_placeholders import CONTRACT as IMAGE_CONTRACT
@@ -214,6 +233,13 @@ def prepare(args):
     runtime = None
     rows = []
 
+    def ensure_runtime():
+        nonlocal runtime
+        if runtime is None and args.backend in vlm.LOCAL_BACKENDS:
+            runtime = vlm.load_runtime(args)
+            if hasattr(runtime, 'close'):
+                resources.callback(runtime.close)
+
     def capture_application(source, work, label):
         from .app_browser import freeze_application
         capture = {}
@@ -237,8 +263,7 @@ def prepare(args):
              literal_prompt=False, image_labels=None, prompt_first=False):
         nonlocal runtime
         last_generation = {}
-        if args.backend in ('qwen','hf') and runtime is None:
-            runtime = (vlm.load_qwen_runtime if args.backend=='qwen' else vlm.load_hf_runtime)(args)
+        ensure_runtime()
         c = copy.copy(args); c.task = task; c.image = list(map(str,images)); c.current = str(current) if current else None; c.frames = None
         c.temperature = getattr(args,'initial_temperature',0.) if label == 'initial' and task == 'generate-html' else 0.
         c.image_labels=image_labels; c.prompt_first=prompt_first
@@ -256,6 +281,8 @@ def prepare(args):
             from .webui_placeholders import CONTRACT as IMAGE_CONTRACT, PROMPT as IMAGE_PROMPT
             if item.get('html') and IMAGE_CONTRACT in Path(item['html']).read_text():
                 base_prompt += '\n' + IMAGE_PROMPT
+        if image_only:
+            base_prompt = ''  # No text, viewport, asset or chat instructions in official inference.
         def generate(attempt, feedback):
             name = label if attempt==0 else f'{label}.retry-{attempt}'
             c.seed = int.from_bytes(hashlib.sha256(f'{args.seed}|{record["id"]}|{name}'.encode()).digest()[:4], 'big') if c.temperature else args.seed
@@ -299,8 +326,8 @@ def prepare(args):
 
     # Load outside page timers, consistently excluding one-time model startup.
     needs_vlm = any(not i.get('initial_html') for i in items) or args.rounds > 0 or getattr(args,'repair_conditioning','boxes') != 'visual'
-    if needs_vlm and args.backend in ('qwen','hf') and any(not (out/'pages'/signature(i['id'])[:20]/'record.json').exists() for i in items):
-        runtime = (vlm.load_qwen_runtime if args.backend=='qwen' else vlm.load_hf_runtime)(args)
+    if needs_vlm and args.backend in vlm.LOCAL_BACKENDS and any(not (out/'pages'/signature(i['id'])[:20]/'record.json').exists() for i in items):
+        ensure_runtime()
     with HtmlBrowser() as browser:
         for index, item in enumerate(items):
             work = out/'pages'/signature(item['id'])[:20]; work.mkdir(parents=True, exist_ok=True)
@@ -663,10 +690,11 @@ def evaluate_pages(args):
     if args.official_repo:
         if any(r.get('reference_kind')=='webui_recorded_boxes' for r in records):
             raise ValueError('WebUI uses recorded screenshot/AX boxes, not Design2Code reference rerendering. Omit --official-repo.')
-        from .official_metrics import OfficialMetrics
+        from .official_metrics import OfficialMetrics, EVALUATION_CONTRACT
         with EvaluationTiming().stage("official_initialization_including_clip_load"):
             official = OfficialMetrics(args.official_repo)
         config['official_source_sha'] = official.source_sha
+        config['official_evaluation_contract'] = EVALUATION_CONTRACT
     guard_run(out,config,args.resume)
     rows = []
     with HtmlBrowser() as browser:
