@@ -20,10 +20,26 @@ MODEL_ID = 'SALT-NLP/Design2Code-18B-v0'
 OFFICIAL_SOURCE = 'https://huggingface.co/SALT-NLP/Design2Code-18B-v0'
 OFFICIAL_SETTINGS = dict(max_length=4096, temperature=0.5, top_p=1.0,
                          top_k=1, repetition_penalty=1.1)
-CONTRACT = 'design2code18b-official-sat-image-only-v1'
+CONTRACT = 'design2code18b-sat-image-only-output-budget-html-stop-v2'
+DEFAULT_MAX_NEW_TOKENS = 16384
+
+
+def output_budget(args):
+    budget = int(getattr(args, 'max_new_tokens', DEFAULT_MAX_NEW_TOKENS))
+    if budget <= 0:
+        raise ValueError('max_new_tokens must be positive')
+    return budget
+
+
+def generation_settings(prompt_tokens, max_new_tokens=DEFAULT_MAX_NEW_TOKENS):
+    if prompt_tokens <= 0 or max_new_tokens <= 0:
+        raise ValueError('Input length and output budget must be positive')
+    # SAT chat accepts total max_length, not Hugging Face max_new_tokens.
+    return {**OFFICIAL_SETTINGS, 'max_length': prompt_tokens + max_new_tokens}
 
 
 def validate_request(args, images):
+    output_budget(args)
     if len(images) != 1 or getattr(args, 'task', '').startswith('revise'):
         raise ValueError('Design2Code-18B official protocol supports one target screenshot only; self-revision is not supported')
     if getattr(args, 'temperature', .5) != .5:
@@ -32,8 +48,9 @@ def validate_request(args, images):
         raise ValueError('Design2Code-18B official SAT runtime uses BF16, not 4-bit')
 
 
-def runtime_settings():
-    return dict(contract=CONTRACT, generation=OFFICIAL_SETTINGS.copy(), query='',
+def runtime_settings(max_new_tokens=DEFAULT_MAX_NEW_TOKENS):
+    return dict(contract=CONTRACT, official_example_generation=OFFICIAL_SETTINGS.copy(), query='',
+                max_new_tokens=max_new_tokens, html_completion_stop=True,
                 text_processor_length=2048, weight_precision='bf16', model_parallel_size=2,
                 source=OFFICIAL_SOURCE)
 
@@ -140,7 +157,7 @@ class Design2CodeRuntime:
         image = self.directory/'input.png'
         images[0].save(image)
         name = uuid.uuid4().hex
-        request = dict(id=name, image=str(image), seed=int(args.seed))
+        request = dict(id=name, image=str(image), seed=int(args.seed), max_new_tokens=output_budget(args))
         temp = self.directory/'request.tmp'
         temp.write_text(json.dumps(request))
         temp.replace(self.directory/'request.json')

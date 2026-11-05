@@ -232,7 +232,9 @@ def test_two_image_revision_keeps_target_first_and_allows_short_output(monkeypat
     images=[Image.new('RGB',(4,4),'red'),Image.new('RGB',(4,4),'blue')]
     answer,meta=getattr(vlm,backend+'_generate')(args,'Revise the HTML',images,(Model(),Processor()))
     assert seen['generation']['max_new_tokens']==16384
-    assert ('stopping_criteria' in seen['generation']) == (backend == 'qwen')
+    assert 'stopping_criteria' in seen['generation']
+    assert meta['html_completion_stop'] is True
+    assert meta['generation_stop_reason'] == 'eos'
     assert meta['css_repeat_check'] is (backend == 'qwen')
     assert seen['generation']['min_new_tokens']==0
     assert 'min_length' not in seen['generation']  # Avoid conflicting minimum-length options.
@@ -253,6 +255,40 @@ def test_two_image_revision_keeps_target_first_and_allows_short_output(monkeypat
         for key in ('output_scores', 'output_logits', 'output_attentions', 'output_hidden_states',
                     'return_dict_in_generate'):
             assert seen['generation'][key] is False
+
+
+@pytest.mark.parametrize('backend', ['hf', 'qwen'])
+@pytest.mark.parametrize('task', ['generate-html', 'revise-html'])
+def test_html_calls_stop_before_trailing_explanation(monkeypatch, backend, task):
+    from framediff import vlm
+    prompt = '<html><body>Existing document</body></html>'
+    response = '<think>Draft <html></html></think><html><body>Final</body></html>'
+    class Processor:
+        tokenizer = SimpleNamespace(get_vocab=lambda: {})
+        def apply_chat_template(self, *args, **kwargs):
+            return {'input_ids': torch.tensor([[ord(c) for c in prompt]])}
+        def decode(self, ids, **kwargs):
+            return ''.join(chr(c) for c in ids)
+        def batch_decode(self, ids, **kwargs):
+            return [self.decode(row.tolist(), **kwargs) for row in ids]
+    class Model:
+        device = torch.device('cpu')
+        config = SimpleNamespace(_commit_hash='a'*40)
+        def generate(self, input_ids, **kwargs):
+            assert kwargs['max_new_tokens'] == 16384
+            for char in response + 'Explanation should never be generated':
+                input_ids = torch.cat([input_ids, torch.tensor([[ord(char)]])], dim=1)
+                if any(stop(input_ids, None) for stop in kwargs['stopping_criteria']):
+                    break
+            return input_ids
+    monkeypatch.setattr(vlm, 'start_cuda_measurement', lambda *a: None)
+    monkeypatch.setattr(vlm, 'finish_cuda_measurement', lambda *a: {})
+    args = SimpleNamespace(task=task, max_new_tokens=16384, four_bit=False, temperature=0.)
+    answer, meta = getattr(vlm, backend+'_generate')(args, 'prompt', [], (Model(), Processor()))
+    assert answer == response
+    assert meta['generation_stop_reason'] == 'html_complete'
+    assert meta['output_tokens'] == len(response)
+    assert not meta['hit_output_limit']
 
 
 @pytest.mark.parametrize('ids,expected', [([1,4,2,5],[5]),([1,4],None),([5],[5])])

@@ -191,9 +191,9 @@ def _prepare(args, resources):
     use_placeholder = getattr(args,'dataset','design2code') == 'design2code'
     settings = {k:v for k,v in vars(args).items() if k not in ('resume','out','retry_failed')}
     if image_only:
-        settings['initial_protocol'] = 'official-image-only-v1'
-        settings['official_max_length'] = 4096
-        settings['max_new_tokens'] = None  # Official adapters use total sequence length.
+        # Retain the requested OUTPUT budget. The published examples instead
+        # used a total sequence limit; those cached drafts are not equivalent.
+        settings['initial_protocol'] = 'image-only-output-budget-v2'
     if not use_placeholder:
         settings['prompt_asset_contract'] = 'webui-no-benchmark-placeholder-v1'
         from .webui_placeholders import CONTRACT as IMAGE_CONTRACT

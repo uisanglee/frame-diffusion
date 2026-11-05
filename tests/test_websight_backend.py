@@ -1,7 +1,8 @@
 from types import SimpleNamespace
 import pytest
 from PIL import Image
-from framediff.websight_backend import MODEL_ID, MAX_LENGTH, official_prefix, convert_to_rgb, websight_generate, validate_request
+from framediff.websight_backend import (MODEL_ID, DEFAULT_MAX_NEW_TOKENS, official_prefix,
+    convert_to_rgb, websight_generate, validate_request, generation_options)
 
 
 def args(**values):
@@ -13,7 +14,33 @@ def test_official_prefix_has_no_chat_or_instruction():
     model = SimpleNamespace(config=SimpleNamespace(perceiver_config=SimpleNamespace(resampler_n_latents=64)))
     prefix = official_prefix(processor, model)
     assert prefix == '<s><fake_token_around_image>' + '<image>' * 64 + '<fake_token_around_image>'
-    assert MAX_LENGTH == 4096
+    assert DEFAULT_MAX_NEW_TOKENS == 16384
+
+
+def test_output_budget_counts_output_only_and_checks_real_context():
+    model = SimpleNamespace(config=SimpleNamespace(max_position_embeddings=32768))
+    assert generation_options(model, 67, 16384) == {'max_new_tokens':16384}
+    with pytest.raises(ValueError, match='not silently reduced'):
+        generation_options(model, 17000, 16384)
+
+
+def test_invalid_output_budget_rejected():
+    with pytest.raises(ValueError, match='positive'):
+        validate_request(args(max_new_tokens=0), [object()])
+
+
+def test_runtime_request_forwards_output_budget(tmp_path):
+    import json
+    from framediff.websight_backend import WebSightRuntime
+    runtime = object.__new__(WebSightRuntime)
+    runtime.root, runtime.counter = tmp_path, 0
+    captured = {}
+    def wait(path):
+        captured.update(json.loads((tmp_path/'request-1.json').read_text()))
+        return {'text':'<html></html>', 'metadata':{}}
+    runtime._wait = wait
+    runtime.generate(args(seed=42, max_new_tokens=16384), Image.new('RGB', (2,2)))
+    assert captured['max_new_tokens'] == 16384
 
 
 def test_transparent_images_composite_on_white():

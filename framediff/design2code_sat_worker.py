@@ -11,6 +11,31 @@ import signal
 import threading
 
 
+class HTMLStopStrategy:
+    """Keep SAT's sampling/EOS behavior and also stop at a completed document.
+
+    SAT 0.4.10 calls forward(), then checks is_done. Every model-parallel rank
+    observes the same tokens (broadcast by BaseStrategy) and takes the same exit.
+    """
+    def __init__(self, strategy, completion):
+        self.strategy, self.completion = strategy, completion
+
+    def __getattr__(self, name):
+        return getattr(self.strategy, name)
+
+    @property
+    def is_done(self):
+        return self.strategy.is_done or self.completion.reason is not None
+
+    def forward(self, logits, tokens, mems, *args, **kwargs):
+        tokens, mems = self.strategy.forward(logits, tokens, mems, *args, **kwargs)
+        self.completion(tokens, None)
+        return tokens, mems
+
+    def finalize(self, tokens, mems):
+        return self.strategy.finalize(tokens, mems)
+
+
 def atomic_json(path, value):
     temp = path.with_suffix('.tmp')
     temp.write_text(json.dumps(value))
@@ -80,7 +105,8 @@ def main():
     root = Path(options.requests)
     # Import the project constants without importing the main environment's torch.
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from framediff.design2code_sat import OFFICIAL_SETTINGS, runtime_settings
+    from framediff.design2code_sat import generation_settings, runtime_settings
+    from framediff.html_generation import HTMLCompletionStop
     sys.path.insert(0, options.repo)
     import torch
     import numpy as np
@@ -155,9 +181,13 @@ def main():
     source_hash = hashlib.sha256(b''.join(p.read_bytes() for p in sorted(Path(options.repo).rglob('*.py')))).hexdigest()
     # Count the actual generated sequence, including EOS, before upstream decoding.
     token_counts = {}
+    completion = None
     original_sampling = chat.__globals__['filling_sequence']
     def measured_sampling(model, seq, *args, **kwargs):
         token_counts['input_tokens'] = int((seq >= 0).sum().item())
+        if completion is None:
+            raise RuntimeError('HTML completion guard was not initialized')
+        kwargs['strategy'] = HTMLStopStrategy(kwargs['strategy'], completion)
         output = original_sampling(model, seq, *args, **kwargs)
         tokens = output[0]
         ids = tokens[0].tolist() if hasattr(tokens[0], 'tolist') else tokens[0]
@@ -184,13 +214,21 @@ def main():
         torch.cuda.manual_seed_all(seed)
         torch.cuda.reset_peak_memory_stats(local_rank)
         token_counts.clear()
+        # Exact official image-only prefix, including visual placeholder tokens.
+        # The processor's legacy max_target_length is unused for inference; no
+        # output truncation or context-size mutation is applied to the checkpoint.
+        prefix = processor(processor.history_to_prompt('', []))['input_ids']
+        prompt_tokens = int(prefix.shape[1])
+        settings = generation_settings(prompt_tokens, request['max_new_tokens'])
+        completion = HTMLCompletionStop(tokenizer, prompt_tokens)
+        configured_context = config.get('max_sequence_length', config.get('max_position_embeddings'))
         torch.cuda.synchronize(local_rank)
         started = time.perf_counter()
         # All ranks execute identical inputs and sample settings. SAT broadcasts tokens.
         with torch.inference_mode():
             answer, _, cache = chat(request['image'], model, processor, image_processor, '',
                 history=None, cross_img_processor=cross, image=None,
-                invalid_slices=processor.invalid_slices, args=chat_args, **OFFICIAL_SETTINGS)
+                invalid_slices=processor.invalid_slices, args=chat_args, **settings)
         del cache
         torch.cuda.synchronize(local_rank)
         elapsed = time.perf_counter()-started
@@ -198,8 +236,16 @@ def main():
         peaks = [torch.zeros_like(memory) for _ in range(world)]
         torch.distributed.all_gather(peaks, memory)
         if rank == 0:
-            meta = {**runtime_settings(), **token_counts,
-                    'generation_settings': OFFICIAL_SETTINGS, 'generation_seconds': elapsed,
+            output_tokens = token_counts['output_tokens']
+            meta = {**runtime_settings(request['max_new_tokens']), **token_counts,
+                    'generation_settings': {**settings, 'max_new_tokens': request['max_new_tokens']},
+                    'generation_seconds': elapsed,
+                    'configured_context_length': configured_context,
+                    'exceeds_configured_context': (settings['max_length'] > int(configured_context)
+                                                   if configured_context else None),
+                    'context_policy': 'dynamic-sat-rotary-no-checkpoint-rescaling',
+                    'generation_stop_reason': completion.reason or ('max_new_tokens' if output_tokens >= request['max_new_tokens'] else 'eos'),
+                    'hit_output_limit': output_tokens >= request['max_new_tokens'],
                     'resolved_revision': options.revision, 'cogvlm_source_sha': source_hash,
                     'runtime_versions': runtime_versions, 'tokenizer_vocab_sha256': tokenizer_sha,
                     'tokenizer_model': 'lmsys/vicuna-7b-v1.5',

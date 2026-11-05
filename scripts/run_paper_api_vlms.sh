@@ -9,7 +9,7 @@ fi
 : "${GEMINI_API_KEY:?Set GEMINI_API_KEY before running}"
 root=$1;output=$2;train=$3
 export RUN_ABLATION=${RUN_ABLATION:-0}
-export MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-16384}
+# The dataset runner selects the same output budget for every method.
 export VLM_SPECS=${VLM_SPECS:-'gpt4o|openai-compatible|gpt-4o|server|https://api.openai.com/v1/chat/completions|OPENAI_API_KEY,gemini35flash|openai-compatible|gemini-3.5-flash|server|https://generativelanguage.googleapis.com/v1beta/openai/chat/completions|GEMINI_API_KEY|low'}
 bash scripts/run_paper_experiments.sh "$root" "$output" "$train"
 

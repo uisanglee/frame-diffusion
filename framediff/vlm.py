@@ -187,16 +187,28 @@ def load_hf_runtime(args):
     return model,processor
 
 def html_generation_options(args, processor, prompt_tokens, qwen=False):
-    from .html_generation import CSSRepeatStop, GeneratedPresencePenalty
+    from .html_generation import CSSRepeatStop, GeneratedPresencePenalty, HTMLCompletionStop
     options = {}
+    if getattr(args, 'task', '').endswith('html'):
+        options['stopping_criteria'] = [HTMLCompletionStop(processor, prompt_tokens)]
     if qwen:
         if getattr(args, 'temperature', 0.) > 0:
             # Qwen3-VL official evaluation settings; preserve the model's EOS IDs.
             options.update(top_p=0.8, top_k=20, repetition_penalty=1.0)
             options['logits_processor'] = [GeneratedPresencePenalty(prompt_tokens)]
         if getattr(args, 'task', '').endswith('html'):
-            options['stopping_criteria'] = [CSSRepeatStop(processor, prompt_tokens)]
+            options['stopping_criteria'].append(CSSRepeatStop(processor, prompt_tokens))
     return options
+
+
+def html_stop_metadata(generation, output_tokens, max_new_tokens):
+    from .html_generation import CSSRepeatStop, HTMLCompletionStop
+    guards = generation.get('stopping_criteria', [])
+    reason = next((g.reason for g in guards if getattr(g, 'reason', None)), None)
+    return dict(html_completion_stop=any(isinstance(g, HTMLCompletionStop) for g in guards),
+                css_repeat_check=any(isinstance(g, CSSRepeatStop) for g in guards),
+                generation_stop_reason=reason or ('max_new_tokens' if output_tokens >= max_new_tokens else 'eos'),
+                hit_output_limit=output_tokens >= max_new_tokens)
 
 
 def image_inputs_to_device(inputs, device):
@@ -245,11 +257,9 @@ def qwen_generate(args,prompt,images,runtime=None):
     with torch.inference_mode():outputs=model.generate(**inputs,max_new_tokens=args.max_new_tokens,**generation)
     memory=finish_cuda_measurement(model)
     answer=processor.batch_decode(outputs[:,inputs['input_ids'].shape[1]:],skip_special_tokens=True)[0]
-    repeat_guard = generation.get('stopping_criteria', [None])[0]
     return answer,{**getattr(model,'_framediff_placement',{}),'generation_settings':generation_metadata(model,generation,args.max_new_tokens),
                    'presence_penalty':1.5 if 'logits_processor' in generation else 0.,
-                   'css_repeat_check':repeat_guard is not None,
-                   'generation_stop_reason':repeat_guard.reason if repeat_guard is not None else None,
+                   **html_stop_metadata(generation,outputs.shape[1]-inputs['input_ids'].shape[1],args.max_new_tokens),
                    'generation_seconds':time.perf_counter()-start,**memory,
                    'resolved_revision':getattr(model.config,'_commit_hash',None),'input_tokens':inputs['input_ids'].shape[1],
                    'output_tokens':outputs.shape[1]-inputs['input_ids'].shape[1],
@@ -298,7 +308,8 @@ def hf_generate(args,prompt,images,runtime=None):
     answer=decode_hf_answer(processor,outputs[:,input_tokens:])
     return answer,{**getattr(model,'_framediff_placement',{}),'generation_settings':generation_metadata(model,generation,args.max_new_tokens),
                    'presence_penalty':1.5 if 'logits_processor' in generation else 0.,
-                   'css_repeat_check':False,'generation_seconds':time.perf_counter()-start,**memory,
+                   **html_stop_metadata(generation,outputs.shape[1]-input_tokens,args.max_new_tokens),
+                   'generation_seconds':time.perf_counter()-start,**memory,
                    'resolved_revision':getattr(model.config,'_commit_hash',None),'input_tokens':input_tokens,
                    'output_tokens':outputs.shape[1]-input_tokens,
                    'weight_precision':'nf4-4bit' if args.four_bit else 'bf16'}

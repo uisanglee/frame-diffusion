@@ -19,10 +19,11 @@ from framediff.app_browser import freeze_application, CONTRACT as APPLICATION_CO
 from framediff.vlm_devices import (deployment_settings, input_device,
     start_cuda_measurement, finish_cuda_measurement)
 from framediff.vlm import generation_metadata
+from framediff.html_generation import HTMLCompletionStop
 from framediff.ui2code_asset_prompt import CONTRACT as ASSET_PROMPT_CONTRACT, image_asset_instruction
 
 MODEL = 'zai-org/UI2Code_N'
-GENERATION_CONTRACT = 'ui2coden-official-generation-config-v1'
+GENERATION_CONTRACT = 'ui2coden-official-sampling-html-completion-v2'
 PROMPT = '''The first image is the target UI design. The second image is the current
 rendering of the HTML below. Update the HTML to match the target UI.
 Return a complete, runnable HTML document.
@@ -154,6 +155,7 @@ class Runtime:
                          precision='nf4-4bit' if args.precision == '4bit' else 'bf16',
                          **self.model._framediff_placement,
                          context_limit=self.context_limit, max_new_tokens=args.max_new_tokens,
+                         html_completion_stop=True,
                          generation_contract=GENERATION_CONTRACT,
                          generation_settings=generation_metadata(self.model, {}, args.max_new_tokens),
                          torch=torch.__version__, transformers=transformers.__version__, cuda=torch.version.cuda)
@@ -179,10 +181,12 @@ class Runtime:
         inputs = inputs.to(input_device(self.model))
         start_cuda_measurement(self.model)
         started = time.perf_counter()
+        completion = HTMLCompletionStop(self.processor, n)
         with torch.inference_mode():
-            # Match the official README: only set the output budget; inherit all
-            # sampling/EOS/cache settings from the pinned official checkpoint.
-            ids = self.model.generate(**inputs, max_new_tokens=self.args.max_new_tokens)
+            # Keep official sampling/EOS/cache settings. End early once a full
+            # generated document closes, without waiting for trailing prose/EOS.
+            ids = self.model.generate(**inputs, max_new_tokens=self.args.max_new_tokens,
+                                      stopping_criteria=[completion])
         memory = finish_cuda_measurement(self.model)
         generation_seconds = time.perf_counter() - started
         answer = self.processor.decode(ids[0, n:], skip_special_tokens=True)
@@ -190,6 +194,9 @@ class Runtime:
                      generation_contract=GENERATION_CONTRACT,
                      generation_settings=generation_metadata(self.model, {}, self.args.max_new_tokens),
                      max_new_tokens=self.args.max_new_tokens, context_limit=self.context_limit,
+                     html_completion_stop=True,
+                     generation_stop_reason=completion.reason or (
+                         'max_new_tokens' if ids.shape[1]-n >= self.args.max_new_tokens else 'eos'),
                      hit_output_limit=ids.shape[1]-n >= self.args.max_new_tokens,
                      generation_seconds=generation_seconds, **memory)
         del inputs, ids

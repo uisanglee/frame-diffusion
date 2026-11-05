@@ -57,6 +57,7 @@ def test_official_initial_pipeline_empty_prompt_reuse_and_worker_close(tmp_path,
     def generate(args, prompt, images, loaded):
         assert loaded is runtime and prompt == '' and len(images) == 1
         assert args.task == 'generate-html' and args.current is None
+        assert args.max_new_tokens == 16384
         calls.append('generate')
         return html, {'input_tokens':66, 'output_tokens':30}
     monkeypatch.setattr(vlm, 'generate', generate)
@@ -71,6 +72,14 @@ def test_official_initial_pipeline_empty_prompt_reuse_and_worker_close(tmp_path,
     assert calls == ['generate', 'close']
     prompt_file = next((tmp_path/'prepared/pages').glob('*/initial.prompt.json'))
     assert json.loads(prompt_file.read_text())['prompt'] == ''
+    settings = json.loads((tmp_path/'prepared/config.json').read_text())['settings']
+    assert settings['max_new_tokens'] == 16384
+    assert settings['initial_protocol'] == 'image-only-output-budget-v2'
+    assert 'official_max_length' not in settings
     args.resume = True
     assert prepare(args) == rows
+    assert calls == ['generate', 'close']
+    args.max_new_tokens = 8192
+    with pytest.raises(ValueError, match='Resume configuration/input changed'):
+        prepare(args)
     assert calls == ['generate', 'close']

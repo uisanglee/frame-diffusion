@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from framediff.design2code_sat import (OFFICIAL_SETTINGS, design2code_generate,
-                                      runtime_settings, validate_request)
+                                      runtime_settings, validate_request, generation_settings)
 
 
 def test_official_contract_and_generation_settings():
@@ -13,6 +13,51 @@ def test_official_contract_and_generation_settings():
     settings = runtime_settings()
     assert settings['query'] == '' and settings['text_processor_length'] == 2048
     assert settings['model_parallel_size'] == 2 and settings['weight_precision'] == 'bf16'
+    assert settings['max_new_tokens'] == 16384
+    assert settings['html_completion_stop'] is True
+
+
+def test_sat_total_length_includes_full_output_budget():
+    settings = generation_settings(257, 16384)
+    assert settings['max_length'] == 257 + 16384
+    assert settings['temperature'] == OFFICIAL_SETTINGS['temperature']
+    assert 'max_new_tokens' not in settings  # SAT chat's API only accepts max_length.
+    with pytest.raises(ValueError, match='positive'):
+        generation_settings(257, 0)
+
+
+def test_sat_strategy_stops_after_html_completion_and_preserves_eos():
+    import torch
+    from framediff.design2code_sat_worker import HTMLStopStrategy
+    from framediff.html_generation import HTMLCompletionStop
+    class Tokenizer:
+        def decode(self, ids, **kwargs):
+            return ''.join(chr(i) for i in ids)
+    class Base:
+        is_done = False
+        def forward(self, logits, tokens, mems):
+            return torch.cat([tokens, torch.tensor([[logits]])], dim=1), mems
+        def finalize(self, tokens, mems):
+            return tokens, mems
+    prompt = '<html><body>Old</body></html>'
+    body = '<html><body>New</body></html>'
+    tokens = torch.tensor([[ord(c) for c in prompt]])
+    base = Base()
+    stop = HTMLCompletionStop(Tokenizer(), len(prompt))
+    strategy = HTMLStopStrategy(base, stop)
+    generated = ''
+    for char in body + 'Unwanted explanation':
+        tokens, _ = strategy.forward(ord(char), tokens, None)
+        generated += char
+        if strategy.is_done:
+            break
+    assert generated == body
+    assert stop.reason == 'html_complete'
+    assert strategy.finalize(tokens, None)[0] is tokens
+    # Original SAT EOS completion is preserved even without a complete HTML doc.
+    base.is_done = True
+    eos = HTMLStopStrategy(base, HTMLCompletionStop(Tokenizer(), len(prompt)))
+    assert eos.is_done
 
 
 def test_does_not_mislabel_repair_as_generation():

@@ -31,11 +31,27 @@ Use exactly two visible CUDA GPUs, e.g. `CUDA_VISIBLE_DEVICES=0,1`. A persistent
 Loading also needs substantial host RAM: SAT loads the full checkpoint on CPU to
 partition it. GPU memory is not the only resource constraint.
 
-The official settings are: BF16, empty query, one target screenshot, checkpoint-defined
+The official example uses BF16, empty query, one target screenshot, checkpoint-defined
 EVA and cross-image preprocessing, text-processor length 2048, total sequence
 `max_length=4096`, `temperature=0.5`, `top_p=1.0`, `top_k=1`, and
-`repetition_penalty=1.1`. The generic 16K output setting and generic chat prompts do not
-apply. This model has no official target+current-image self-revision interface; the
+`repetition_penalty=1.1`. This experiment **overrides the length policy**: WebUI
+uses `MAX_NEW_TOKENS=16384`, while Design2Code and Design2Code-Hard use `4096`.
+These are output-only caps, converted to SAT's total
+`max_length=input_tokens+max_new_tokens`. The budget is forwarded per request.
+Standalone inference retains a default output cap of 16,384 unless explicitly set.
+Generation stops earlier on EOS or a completed HTML document;
+closing tags inside reasoning, comments, or scripts are not completion signals.
+Sampling and image preprocessing are unchanged. This is an experiment configuration,
+not a claim that the official example used an output-only cap.
+
+SAT 0.4.10's rotary cache expands with position IDs, so the code is not limited by
+the example's 4096 allocation. Nevertheless, extending generation beyond the published
+example does not establish long-context accuracy or sufficient two-4090 VRAM. No
+RoPE rescaling or checkpoint change is applied. The actual configured context length,
+whether the requested total exceeds it, output budget, and stop reason are logged.
+The input processor's 2048 argument does not truncate inference output.
+
+This model has no official target+current-image self-revision interface; the
 experiment reports that method as unsupported rather than disguising a new initial
 sample as revision. UI2CodeN and TUIDE can repair its saved initial HTML.
 

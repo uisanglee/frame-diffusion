@@ -78,7 +78,9 @@ def test_export_two_datasets_without_tuide(tmp_path, models):
 
 
 @pytest.mark.parametrize('run_tuide',['0','1'])
-def test_shell_wires_own_draft_shared_inputs_and_webui(tmp_path,run_tuide):
+@pytest.mark.parametrize('dataset,output,budget', [('webui','webui','16384'),
+    ('design2code','design2code','4096'), ('design2code','design2code-hard','4096')])
+def test_shell_wires_own_draft_shared_inputs_and_webui(tmp_path,run_tuide,dataset,output,budget):
     import os
     import subprocess
     from pathlib import Path
@@ -102,20 +104,22 @@ printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$1" "$VLM_MODEL" "$WEB_DATASET" "$REVI
     env = dict(os.environ, PATH=str(tools)+os.pathsep+os.environ['PATH'], CALL_LOG=str(tmp_path/'calls'),
         RUN_TUIDE=run_tuide,PY_LOG=str(tmp_path/'python-calls'),PAPER_DIAGNOSTICS='1',
         OFFICIAL_REPO='official', RUN_UI2CODEN='1', RUN_ABLATION='0', INITIAL_SEEDS='11,22',
-        WEB_DATASET='webui', PAGE_MANIFEST='pages.jsonl', MAX_NEW_TOKENS='16384', MAX_CONTEXT='12288',
-        UI2CODEN_MAX_NEW_TOKENS='16384', UI2CODEN_MAX_CONTEXT='0',
+        WEB_DATASET=dataset, PAGE_MANIFEST='pages.jsonl', MAX_NEW_TOKENS='16384', MAX_CONTEXT='12288',
+        UI2CODEN_MAX_NEW_TOKENS='8192', UI2CODEN_MAX_CONTEXT='0',
         VLM_SPECS='q|hf|qwen|4bit,ui2coden|hf|zai-org/UI2Code_N|4bit')
-    result = subprocess.run(['/bin/bash',str(script),'data','out','train'],cwd=tmp_path,env=env,capture_output=True,text=True)
+    result = subprocess.run(['/bin/bash',str(script),'data',output,'train'],cwd=tmp_path,env=env,capture_output=True,text=True)
     assert result.returncode == 0, result.stderr
     calls = [line.split('|') for line in (tmp_path/'calls').read_text().splitlines()]
     drafts = [r for r in calls if r[0]=='scripts/run_visual_web.sh']
     assert [r[3] for r in drafts] == ['3','3','0','0']
-    assert all(r[2]=='webui' and r[7]=='1' for r in drafts)
+    assert all(r[2]==dataset and r[7]=='1' for r in drafts)
+    assert all(r[8] == budget for r in drafts)
     assert drafts[0][4] == ''
-    assert all(r[4]=='out/q/seeds/11/prepare/prepared.jsonl' for r in drafts[1:])
+    assert all(r[4]==f'{output}/q/seeds/11/prepare/prepared.jsonl' for r in drafts[1:])
     polish = [r for r in calls if r[0]=='baselines/ui2coden/run_4090.sh']
     assert len(polish)==4 and all(r[5:7]==['3','pinned-sha'] for r in polish)
-    assert all(r[8:10] == ['16384', '0'] for r in polish)
+    assert all(r[8:10] == [budget, '0'] for r in polish)
+    assert 'overriding inherited token-budget variables' in result.stdout
     py_calls=(tmp_path/'python-calls').read_text()
     assert ('--skip-tuide' in py_calls)==(run_tuide=='0')
     assert ('framediff.repair_diagnostics' in py_calls)==(run_tuide=='1')
@@ -140,12 +144,14 @@ printf '%s|%s|%s|%s|%s|%s\\n' "$VLM_SPECS" "$CUDA_VISIBLE_DEVICES" "$MAX_NEW_TOK
     bash.chmod(0o755)
     env = dict(os.environ, PATH=str(tools)+os.pathsep+os.environ['PATH'],
                CALL_LOG=str(tmp_path/'calls'), CUDA_VISIBLE_DEVICES='0')
+    env.pop('MAX_NEW_TOKENS', None)
     result = subprocess.run(['/bin/bash', str(script), 'qwen'], env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     calls = (tmp_path/'calls').read_text().splitlines()
     assert len(calls) == 3
     for line, dataset in zip(calls, ('webui', 'design2code', 'design2code-hard')):
-        assert line == ('qwen3vl8b|qwen|Qwen/Qwen3-VL-8B-Instruct|bf16|0|16384|42|auto|'
+        # The multi-dataset wrapper delegates its budget to the central runner.
+        assert line == ('qwen3vl8b|qwen|Qwen/Qwen3-VL-8B-Instruct|bf16|0||42|auto|'
                         'runs/paper-qwen3vl8b-bf16-seed42-16k-gpu-kv/' + dataset)
 
 
@@ -169,7 +175,7 @@ def test_image_only_drafters_select_direct_generation_without_self_revision(tmp_
     py.write_text('#!/bin/sh\nif [ "$1" = "-" ]; then cat >/dev/null; echo pinned-sha; fi\n')
     py.chmod(0o755)
     bash = tools/'bash'
-    bash.write_text('#!/bin/sh\nprintf "%s|%s|%s\\n" "$VLM_BACKEND" "$SELF_REVISION_PROTOCOL" "$REVISION_ROUNDS" >> "$CALL_LOG"\n')
+    bash.write_text('#!/bin/sh\nprintf "%s|%s|%s|%s\\n" "$VLM_BACKEND" "$SELF_REVISION_PROTOCOL" "$REVISION_ROUNDS" "$MAX_NEW_TOKENS" >> "$CALL_LOG"\n')
     bash.chmod(0o755)
     env = dict(os.environ, PATH=str(tools)+os.pathsep+os.environ['PATH'],
         CALL_LOG=str(tmp_path/'calls'), OFFICIAL_REPO='official', RUN_UI2CODEN='0', RUN_TUIDE='0',
@@ -178,9 +184,20 @@ def test_image_only_drafters_select_direct_generation_without_self_revision(tmp_
         VLM_SPECS='websight-8b|websight|HuggingFaceM4/VLM_WebSight_finetuned|bf16,design2code-18b|design2code-sat|SALT-NLP/Design2Code-18B-v0|bf16')
     result = subprocess.run(['/bin/bash',str(script),'data','out','unused'],cwd=tmp_path,env=env,capture_output=True,text=True)
     assert result.returncode == 0, result.stderr
-    assert (tmp_path/'calls').read_text().splitlines() == ['websight|none|0', 'design2code-sat|none|0']
+    assert (tmp_path/'calls').read_text().splitlines() == ['websight|none|0|4096', 'design2code-sat|none|0|4096']
     (tmp_path/'calls').unlink()
     env['CUDA_VISIBLE_DEVICES'] = '0'
     result = subprocess.run(['/bin/bash',str(script),'data','out','unused'],cwd=tmp_path,env=env,capture_output=True,text=True)
     assert result.returncode == 2 and 'requires two distinct GPUs' in result.stderr
     assert not (tmp_path/'calls').exists()
+
+
+def test_paper_run_rejects_unknown_dataset_budget(tmp_path):
+    import os
+    import subprocess
+    env = dict(os.environ, WEB_DATASET='unknown')
+    result = subprocess.run(['/bin/bash', 'scripts/run_paper_experiments.sh', 'data', str(tmp_path/'out'), 'train'],
+                            env=env, capture_output=True, text=True)
+    assert result.returncode == 2
+    assert 'WEB_DATASET must be' in result.stderr
+    assert not (tmp_path/'out').exists()

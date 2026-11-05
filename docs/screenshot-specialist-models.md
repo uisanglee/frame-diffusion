@@ -6,7 +6,7 @@ runners remain available. New model combinations should use a new output root.
 Existing source datasets, trained TUIDE weights, reference renders and prior
 model outputs are not deleted.
 
-## Official inference protocols
+## Input protocols and shared output budget
 
 | Model | Input / preprocessing | Published generation settings |
 |---|---|---|
@@ -18,11 +18,25 @@ Sources:
 - https://huggingface.co/SALT-NLP/Design2Code-18B-v0
 - https://github.com/NoviScl/Design2Code/tree/main/CogVLM
 
-4096 is the **total sequence limit**, not a 4096-token output budget. The common
-`MAX_NEW_TOKENS=16384` does not override these model-specific protocols. Actual
-settings, checkpoint revision, token counts, inference time and memory are
-stored with every generation. Generic image downscaling is bypassed so each
-model receives its official preprocessing exactly once.
+The table above records the **published examples**, whose 4096 cap counts the
+entire sequence. Our comparison instead uses dataset-specific output budgets:
+WebUI uses **16,384**, while Design2Code and Design2Code-Hard use **4,096**.
+Within a dataset, every model and method uses the same output budget, including
+Initial, supported Self Revision, and UI2CodeN polishing. The central paper runner
+sets both `MAX_NEW_TOKENS` and `UI2CODEN_MAX_NEW_TOKENS` from the dataset;
+older global values in the launching shell do not override this policy.
+This is an explicit adaptation of those examples: 4,096 **output** tokens are
+different from a 4,096-token total sequence cap. HTML
+completion or the model's EOS can stop generation before the cap. Context
+limits still apply to input plus output; raising the output budget does not
+extend a checkpoint's supported context or guarantee that it fits GPU memory.
+
+Actual settings, checkpoint revision, token counts, inference time and memory
+are stored with every generation. Generic image downscaling is bypassed so each
+model receives its official preprocessing exactly once. The new output-budget
+configuration prevents reuse of drafts generated under a different budget or
+the old total-4096 setting; use a new output root for the revised experiment. Reference-render and
+model-download caches remain reusable.
 
 Neither official example supplies a two-image/current-HTML Self Revision
 protocol. These two groups therefore contain Initial, UI2CodeN polishing, and
@@ -56,7 +70,7 @@ vendored CogVLM (not the generic CogVLM checkout).
 mkdir -p log
 nohup env CUDA_VISIBLE_DEVICES=0,1 PYTHONUNBUFFERED=1 \
   D2C_PILOT_PAGES=3 \
-  D2C_PILOT_OUTPUT=runs/d2c-pilot3-seed42-n2-official5-v1 \
+  D2C_PILOT_OUTPUT=runs/d2c-pilot3-seed42-n2-official5-output4k-v1 \
   bash scripts/run_d2c_pilot10_bf16_2gpu.sh \
   > log/d2c-pilot3-seed42-n2-official5-v1.log 2>&1 < /dev/null &
 ```

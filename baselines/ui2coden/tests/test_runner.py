@@ -266,7 +266,8 @@ def test_long_html_keeps_full_output_budget():
         runner.context_limit(SimpleNamespace())
 
 
-def test_polishing_dispatch_keeps_long_input_and_bf16_metadata(record, tmp_path, monkeypatch):
+@pytest.mark.parametrize('produced_tokens', [1, 16384])
+def test_polishing_dispatch_keeps_long_input_and_bf16_metadata(record, tmp_path, monkeypatch, produced_tokens):
     from types import SimpleNamespace
     import torch
     seen = {}
@@ -288,7 +289,9 @@ def test_polishing_dispatch_keeps_long_input_and_bf16_metadata(record, tmp_path,
         def forward(self, input_ids, logits_to_keep=0): pass
         def generate(self, **kwargs):
             seen['generation'] = kwargs
-            return torch.zeros((1, 17001), dtype=torch.long)
+            ids = torch.zeros((1, 17000 + produced_tokens), dtype=torch.long)
+            if produced_tokens < kwargs['max_new_tokens']: ids[0, -1] = 151329
+            return ids
     runtime = runner.Runtime.__new__(runner.Runtime)
     runtime.args = SimpleNamespace(max_pixels=262144, max_new_tokens=16384, protocol='layout')
     runtime.context_limit = 65536
@@ -300,16 +303,60 @@ def test_polishing_dispatch_keeps_long_input_and_bf16_metadata(record, tmp_path,
     assert answer == HTML and seen['device'] == 'cuda:1'
     assert seen['generation']['input_ids'].shape[1] == 17000
     assert seen['generation']['max_new_tokens'] == 16384
-    assert set(seen['generation']) == {'input_ids','max_new_tokens'}
+    assert set(seen['generation']) == {'input_ids','max_new_tokens','stopping_criteria'}
+    assert len(seen['generation']['stopping_criteria']) == 1
+    assert isinstance(seen['generation']['stopping_criteria'][0], runner.HTMLCompletionStop)
+    assert stats['html_completion_stop'] is True
     settings=stats['generation_settings']
     assert settings['do_sample'] is True and settings['sampling_active'] is True
     assert (settings['temperature'],settings['top_p'],settings['top_k']) == (.8,.6,2)
     assert settings['eos_token_id']==[151329,151336,151338,151348]
     assert stats['generation_contract']==runner.GENERATION_CONTRACT
-    assert stats['input_tokens'] == 17000 and stats['output_tokens'] == 1
-    assert not stats['hit_output_limit']
+    assert stats['input_tokens'] == 17000 and stats['output_tokens'] == produced_tokens
+    assert stats['hit_output_limit'] is (produced_tokens == 16384)
+    assert stats['generation_stop_reason'] == ('max_new_tokens' if produced_tokens == 16384 else 'eos')
     result = runner.run_page(record, tmp_path/'bf16-page', 1, Runtime([HTML]), Browser(), precision='bf16')
     assert result['vlm_weight_precision'] == 'bf16'
+
+
+@pytest.mark.parametrize('document', [
+    HTML,
+    '<think>The answer might contain <html><body>draft</body></html>.</think>' + HTML,
+    '<html><body><!-- </html> -->visible<script>const end="</html>";</script></body></html>',
+])
+def test_polishing_stops_at_completed_html_before_trailing_explanation(record, monkeypatch, document):
+    """Exercise the actual runner criterion through incremental mocked decoding."""
+    import torch
+    from types import SimpleNamespace
+    class Inputs(dict):
+        def to(self, device): return self
+    class Processor:
+        def apply_chat_template(self, messages, **kwargs):
+            # An existing document in the input must not trigger output stopping.
+            return Inputs(input_ids=torch.tensor([[ord(c) for c in HTML]]))
+        def decode(self, ids, **kwargs): return ''.join(chr(int(i)) for i in ids)
+        def batch_decode(self, ids, **kwargs): return [self.decode(row, **kwargs) for row in ids]
+    class Model:
+        device = torch.device('cpu')
+        generation_config = SimpleNamespace(to_dict=lambda: dict(do_sample=True,temperature=.8))
+        def generate(self, input_ids, max_new_tokens, stopping_criteria):
+            assert max_new_tokens == 16384
+            ids = input_ids
+            for c in document + '\nUnwanted explanation after the HTML.':
+                ids = torch.cat((ids, torch.tensor([[ord(c)]])), dim=1)
+                if any(stop(ids, None) for stop in stopping_criteria): break
+            return ids
+    runtime = runner.Runtime.__new__(runner.Runtime)
+    runtime.args = SimpleNamespace(max_pixels=262144, max_new_tokens=16384)
+    runtime.context_limit = 65536
+    runtime.model, runtime.processor = Model(), Processor()
+    monkeypatch.setattr(runner, 'start_cuda_measurement', lambda model: None)
+    monkeypatch.setattr(runner, 'finish_cuda_measurement', lambda model: {})
+    answer, stats = runtime.generate(record['screenshot'], record['screenshot'], HTML)
+    assert answer == document
+    assert stats['generation_stop_reason'] == 'html_complete'
+    assert stats['output_tokens'] == len(document)
+    assert not stats['hit_output_limit']
 
 
 def test_failed_initial_never_polished_even_with_old_round_cache(record, tmp_path, capsys):

@@ -1,8 +1,9 @@
 """Compact HTML instructions and bounded guards for generated HTML."""
 import re
 from collections import Counter
+from html.parser import HTMLParser
 
-CONTRACT = 'static-html-css-visible-content-v4'
+CONTRACT = 'html-completion-stop-v5'
 STATIC_HTML_PROMPT = (
     'The renderer disables JavaScript and external network requests. '
     'Put all visible page content directly in the HTML body and all CSS in a <style> block or inline styles. '
@@ -24,6 +25,89 @@ def viewport_instruction(viewport):
         raise ValueError('Viewport dimensions must be positive')
     return (f'The target webpage is evaluated at a viewport of {width} by {height} '
             'CSS pixels. Match the reference layout at this viewport.\n')
+
+
+class _DocumentCompletionParser(HTMLParser):
+    # Closing-tag text in JS, CSS, comments and text-only elements is not a
+    # document terminator. HTMLParser keeps these contents out of tag callbacks.
+    CDATA_CONTENT_ELEMENTS = ('script', 'style', 'textarea', 'title', 'xmp',
+                              'iframe', 'noembed', 'noframes')
+
+    def __init__(self):
+        super().__init__(convert_charrefs=False)
+        self.thinking = False
+        self.document = False
+        self.complete = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag == 'think':
+            self.thinking = True
+        elif tag == 'html' and not self.thinking:
+            self.document = True
+
+    def handle_endtag(self, tag):
+        if tag == 'think':
+            self.thinking = False
+        elif tag == 'html' and self.document and not self.thinking:
+            self.complete = True
+
+
+class HTMLCompletionStop:
+    """Batch-one generation stops at a real closing HTML tag, before EOS.
+
+    Decode bounded incremental chunks, not the entire growing answer each step.
+    Retain special tokens so a draft inside <think> cannot trigger early stop.
+    This detects document closure; downstream validation still checks content.
+    """
+    def __init__(self, processor, prompt_tokens):
+        self.processor = processor
+        self.prompt_tokens = prompt_tokens
+        self.parser = _DocumentCompletionParser()
+        self.reason = None
+        self.decode_start = prompt_tokens
+        self.decoded = ''
+        self.seen_tokens = prompt_tokens
+        self.initialized = False
+
+    def _decode(self, ids):
+        options = dict(skip_special_tokens=False, clean_up_tokenization_spaces=False)
+        decoder = getattr(self.processor, 'decode', None)
+        if decoder is None:
+            decoder = getattr(getattr(self.processor, 'tokenizer', None), 'decode', None)
+        if decoder is not None:
+            return decoder(ids, **options)
+        return self.processor.batch_decode([ids], **options)[0]
+
+    def __call__(self, input_ids, scores=None, **kwargs):
+        if input_ids.shape[0] != 1:
+            raise ValueError('HTMLCompletionStop requires batch size 1')
+        if self.reason:
+            return True
+        if not self.initialized:
+            # Some chat templates open the reasoning span in the assistant prefix.
+            prefix = self._decode(input_ids[0, max(0, self.prompt_tokens-32):self.prompt_tokens].tolist())
+            self.parser.thinking = prefix.rstrip().endswith('<think>')
+            self.initialized = True
+        end = input_ids.shape[1]
+        if end <= self.seen_tokens:
+            return False
+        text = self._decode(input_ids[0, self.decode_start:end].tolist())
+        # A partial UTF-8 token can decode as U+FFFD and change on the next step.
+        # Defer that suffix until it is stable rather than feeding it twice.
+        stable = text.rstrip('\ufffd')
+        if not stable.startswith(self.decoded):
+            raise ValueError('Tokenizer changed an already decoded HTML prefix')
+        self.parser.feed(stable[len(self.decoded):])
+        self.decoded = stable
+        self.seen_tokens = end
+        if stable == text and end - self.decode_start >= 64:
+            # Retain token overlap: SentencePiece can omit the leading space
+            # when a new decoding chunk starts with a word token.
+            self.decode_start = end - 16
+            self.decoded = self._decode(input_ids[0, self.decode_start:end].tolist())
+        if self.parser.complete:
+            self.reason = 'html_complete'
+        return self.reason is not None
 
 
 def repeated_css(text):

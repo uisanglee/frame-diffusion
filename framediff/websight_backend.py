@@ -1,8 +1,8 @@
 """Official image-only WebSight inference, isolated from modern VLM dependencies.
 
 Source: https://huggingface.co/HuggingFaceM4/VLM_WebSight_finetuned
-The published protocol has no instruction/chat or self-revision input. In
-particular, its 4096 limit counts prompt AND output, unlike max_new_tokens.
+The published protocol has no instruction/chat or self-revision input. The
+experiment overrides the example's total 4096 limit with a shared output budget.
 """
 import atexit
 import json
@@ -15,9 +15,25 @@ import tempfile
 import time
 
 MODEL_ID = 'HuggingFaceM4/VLM_WebSight_finetuned'
-CONTRACT = 'websight-official-image-only-960-bilinear-maxlength4096-v1'
+CONTRACT = 'websight-image-only-960-bilinear-output-budget-html-stop-v2'
 SOURCE = 'https://huggingface.co/HuggingFaceM4/VLM_WebSight_finetuned'
-MAX_LENGTH = 4096
+DEFAULT_MAX_NEW_TOKENS = 16384
+OFFICIAL_EXAMPLE_MAX_LENGTH = 4096
+
+
+def output_budget(args):
+    budget = int(getattr(args, 'max_new_tokens', DEFAULT_MAX_NEW_TOKENS))
+    if budget <= 0:
+        raise ValueError('max_new_tokens must be positive')
+    return budget
+
+
+def generation_options(model, prompt_tokens, max_new_tokens):
+    limit = getattr(model.config, 'max_position_embeddings', None)
+    if limit and prompt_tokens + max_new_tokens > int(limit):
+        raise ValueError(f'WebSight input ({prompt_tokens}) + output budget ({max_new_tokens}) '
+                         f'exceeds its configured context length ({limit}); budget is not silently reduced')
+    return {'max_new_tokens': max_new_tokens}
 
 
 def convert_to_rgb(image):
@@ -50,6 +66,7 @@ def official_inputs(processor, model, image):
 
 
 def validate_request(args, images):
+    output_budget(args)
     if args.model != MODEL_ID:
         raise ValueError(f'WebSight backend requires {MODEL_ID}')
     if getattr(args, 'four_bit', False):
@@ -104,7 +121,8 @@ class WebSightRuntime:
         request = self.root/f'request-{self.counter}.json'
         response = self.root/f'response-{self.counter}.json'
         image.save(image_path)
-        _write_json(request, {'image': str(image_path), 'seed': args.seed})
+        _write_json(request, {'image': str(image_path), 'seed': args.seed,
+                              'max_new_tokens': output_budget(args)})
         try:
             result = self._wait(response)
             return result['text'], result['metadata']
@@ -173,6 +191,10 @@ def worker(root):
     import transformers
     from PIL import Image
     from transformers import AutoModelForCausalLM, AutoProcessor
+    # Only this dependency-free helper is shared with the modern environment.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from framediff.html_generation import HTMLCompletionStop
+    from transformers import StoppingCriteriaList
     if not torch.cuda.is_available():
         raise RuntimeError('WebSight requires a CUDA GPU')
     device = torch.device('cuda:0')
@@ -198,17 +220,20 @@ def worker(root):
             inputs = official_inputs(processor, model, image)
             inputs = {k: v.to(device) for k, v in inputs.items()}
             prompt_tokens = inputs['input_ids'].shape[1]
+            options = generation_options(model, prompt_tokens, request['max_new_tokens'])
+            html_stop = HTMLCompletionStop(processor, prompt_tokens)
             torch.manual_seed(request['seed'])
             torch.cuda.synchronize(device)
             torch.cuda.reset_peak_memory_stats(device)
             start = time.perf_counter()
             with torch.inference_mode():
-                outputs = model.generate(**inputs, bad_words_ids=bad_words, max_length=MAX_LENGTH)
+                outputs = model.generate(**inputs, bad_words_ids=bad_words, **options,
+                                         stopping_criteria=StoppingCriteriaList([html_stop]))
             torch.cuda.synchronize(device)
             duration = time.perf_counter() - start
             text = processor.batch_decode(outputs[:, prompt_tokens:], skip_special_tokens=True)[0]
             generation = model.generation_config.to_dict()
-            generation.update(max_length=MAX_LENGTH, bad_words_ids=bad_words)
+            generation.update(**options, max_length=prompt_tokens + request['max_new_tokens'], bad_words_ids=bad_words)
             metadata = dict(generation_contract=CONTRACT, official_source=SOURCE,
                 effective_prompt=official_prefix(processor, model), prompt_protocol='image-only',
                 image_preprocessing={'size':[960,960], 'interpolation':'bilinear', 'alpha_background':'white'},
@@ -219,7 +244,12 @@ def worker(root):
                 transformers_version=transformers.__version__, torch_version=torch.__version__,
                 peak_cuda_bytes=torch.cuda.max_memory_allocated(device),
                 placement_contract='websight-single-cuda-no-offload-v1',
-                requested_max_new_tokens_ignored=True)
+                official_example_max_length=OFFICIAL_EXAMPLE_MAX_LENGTH,
+                max_new_tokens=request['max_new_tokens'],
+                context_limit=getattr(model.config, 'max_position_embeddings', None),
+                html_completion_stop=True,
+                generation_stop_reason=html_stop.reason or ('max_new_tokens' if outputs.shape[1]-prompt_tokens >= request['max_new_tokens'] else 'eos'),
+                hit_output_limit=outputs.shape[1]-prompt_tokens >= request['max_new_tokens'])
             result = {'text': text, 'metadata': metadata}
             del inputs, outputs
         except Exception as error:

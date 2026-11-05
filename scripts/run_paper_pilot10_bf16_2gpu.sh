@@ -10,7 +10,8 @@ IFS=',' read -ra selected_gpus <<< "$CUDA_VISIBLE_DEVICES"
 export VLM_DEVICE_MAP=balanced
 export VLM_GPU_MEMORY_GIB=${VLM_GPU_MEMORY_GIB:-20}
 export UI2CODEN_PRECISION=bf16
-export UI2CODEN_MAX_NEW_TOKENS=16384 UI2CODEN_MAX_CONTEXT=0
+export UI2CODEN_MAX_CONTEXT=0
+# The dataset runner gives polishing the same budget as Initial/Self Revision.
 export PILOT_OUTPUT=${PILOT_OUTPUT:-runs/paper-pilot10-seed42-n2-bf16-2gpu-v1}
 export VLM_SPECS=${VLM_SPECS:-'llava-next-7b|hf|llava-hf/llava-v1.6-mistral-7b-hf|bf16,glm4v-9b-thinking|hf|zai-org/GLM-4.1V-9B-Thinking|bf16,websight-8b|websight|HuggingFaceM4/VLM_WebSight_finetuned|bf16,design2code-18b|design2code-sat|SALT-NLP/Design2Code-18B-v0|bf16,ui2coden|hf|zai-org/UI2Code_N|bf16'}
 echo "BF16 two-GPU pilot: GPUs=$CUDA_VISIBLE_DEVICES, weight budget=$VLM_GPU_MEMORY_GIB GiB/GPU, output=$PILOT_OUTPUT"

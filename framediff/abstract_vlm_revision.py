@@ -26,7 +26,7 @@ def add_parsers(sub):
     p.add_argument('--endpoint',default='http://localhost:8000/v1/chat/completions');p.add_argument('--api-key-env',default='VLM_API_KEY')
     p.add_argument('--reasoning-effort',choices=['none','minimal','low','medium','high'])
     p.add_argument('--four-bit',action='store_true');p.add_argument('--resume',action='store_true')
-    p.add_argument('--max-new-tokens',type=int,default=4096);p.add_argument('--max-pixels',type=int,default=1048576)
+    p.add_argument('--max-new-tokens',type=int,default=16384);p.add_argument('--max-pixels',type=int,default=1048576)
     p.add_argument('--seed',type=int,default=2024);p.add_argument('--vlm-retries',type=int,default=0)
 
 

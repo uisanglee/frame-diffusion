@@ -9,7 +9,8 @@ train=${TRAIN_RUN:-$PWD/runs/webui-full-dom-screened-7k-v1/7000}
 export DETECTOR_CHECKPOINT=${DETECTOR_CHECKPOINT:-$train/detector/best.pt}
 export ABSTRACT_CHECKPOINT=${ABSTRACT_CHECKPOINT:-$train/tuide-s-abstract/replacement/abstract-stage2/best.pt}
 export PAPER_REFERENCE_CACHE=${PAPER_REFERENCE_CACHE:-$PWD/.cache/paper-reference-renders}
-export INITIAL_SEEDS=42 INITIAL_TEMPERATURE=auto MAX_NEW_TOKENS=16384
+export INITIAL_SEEDS=42 INITIAL_TEMPERATURE=auto
+# run_paper_experiments.sh selects the output budget for each dataset.
 export PAGE_LIMIT=0 REPAIR_STEPS=20 REVISION_ROUNDS=2 REPEATS=1 RUN_UI2CODEN=1 RUN_ABLATION=0
 output=${PILOT_OUTPUT:-runs/paper-pilot10-seed42-n2-v1}
 webui=${WEBUI_TEST:-$PWD/data/webui-full-dom-screened-7k-v1/7000/css/pages-test.jsonl}

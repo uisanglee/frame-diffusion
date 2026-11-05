@@ -129,8 +129,15 @@ they are no longer part of the official matrix.
 See [specialist setup and protocol details](screenshot-specialist-models.md) for
 the separate environments and SAT LoRA partitioning adaptation.
 
-WebSight and Design2Code follow their official image-only drafting interfaces,
-including a total `max_length=4096`. They do not implement the generic two-image,
+WebSight and Design2Code follow their official image-only drafting interfaces.
+Within each dataset all five models use the same output budget, including polishing:
+WebUI uses `MAX_NEW_TOKENS=16384`; Design2Code and Design2Code-Hard use `4096`.
+The paper runner selects both the initial/self-revision and polishing budget from
+the dataset, overriding stale global budget variables. These are output-only caps,
+which intentionally replace the specialist examples' total `max_length=4096`.
+HTML completion or EOS stops generation early. This budget change must be
+reported, and does not extend the model's supported context length.
+They do not implement the generic two-image,
 current-HTML Self Revision interface, so that row is omitted. Their saved drafts
 are still repaired by UI2CodeN and TUIDE. Other VLMs retain Self Revision.
 Refinement rounds are selected by `REVISION_ROUNDS`; the pilot scripts use two.
@@ -139,7 +146,7 @@ Use seed 42 and `INITIAL_TEMPERATURE=auto` for the official model defaults.
 WebSight's greedy decoding does not produce an independent sampling experiment
 by changing the seed; the combined official matrix therefore uses one seed.
 Do not override its temperature to manufacture seed variance. Model profiles,
-image preprocessing, and output-length differences must be reported with results.
+image preprocessing, and the shared output-budget adaptation must be reported with results.
 The first model renders each reference; later models reuse that same target PNG
 and DOM observation. Each model stores its own `seeds/42/prepare`, `repair`,
 `ui2coden`, and `evaluation` outputs. Checkpoint hashes are checked at aggregation.
@@ -313,7 +320,7 @@ The main quality table reports Position, CLIP, Box IoU, and Improved (%). CLIP u
 
 ## Ten-page pilot per dataset
 
-Run `bash scripts/run_paper_pilot10.sh` from the repository virtual environment (the wrapper activates `.venv`). Default output: `runs/paper-pilot10-seed42-n2-v1`. It uses fixed seed 42, automatic model decoding settings, up to 16,384 generated tokens, two VLM refinement rounds, and 20 TUIDE steps. All five initial VLMs run sequentially on `CUDA_VISIBLE_DEVICES`; checkpoints are reused without training. The official metrics dependencies, Hugging Face model access, and UI2CodeN environment must already be installed.
+Run `bash scripts/run_paper_pilot10.sh` from the repository virtual environment (the wrapper activates `.venv`). Default output: `runs/paper-pilot10-seed42-n2-v1`. For a changed generation budget, set `PILOT_OUTPUT` to a new output directory. It uses fixed seed 42, automatic model decoding settings, output caps of 16,384 for WebUI and 4,096 for Design2Code/Hard, two VLM refinement rounds, and 20 TUIDE steps. All five initial VLMs run sequentially on `CUDA_VISIBLE_DEVICES`; checkpoints are reused without training. The official metrics dependencies, Hugging Face model access, and UI2CodeN environment must already be installed.
 
 Each dataset contributes ten fixed inputs. WebUI selects ten unique pages, preferring the 1280x720 view for each; the other benchmarks select ten image/HTML pairs. These are deterministic smoke-test samples, not a representative accuracy estimate. Input manifests are saved under `inputs/` and checked on resume. WebUI's external asset limitation remains; inspect pilot renderings before scaling up.
 

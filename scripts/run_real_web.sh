@@ -16,7 +16,7 @@ case "$self_revision" in
   *) echo 'SELF_REVISION_PROTOCOL must be none, shared, or design2code' >&2; exit 2 ;;
 esac
 if [[ "$self_revision" == design2code ]]; then
-  seed=${SEED:-2024}; max_new_tokens=${MAX_NEW_TOKENS:-4096}; vlm_retries=${VLM_RETRIES:-0}
+  seed=${SEED:-2024}; max_new_tokens=${MAX_NEW_TOKENS:-16384}; vlm_retries=${VLM_RETRIES:-0}
 else
   seed=${SEED:-42}; max_new_tokens=${MAX_NEW_TOKENS:-16384}; vlm_retries=${VLM_RETRIES:-2}
 fi

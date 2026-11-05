@@ -6,6 +6,19 @@ if [[ $# -ne 3 ]]; then
   exit 2
 fi
 root=$1;output=$2;train=$3
+# Dataset protocol takes precedence over old shell exports. The Hard dataset
+# also uses WEB_DATASET=design2code and is distinguished by its input/output root.
+case "${WEB_DATASET:-design2code}" in
+  webui) output_budget=16384 ;;
+  design2code) output_budget=4096 ;;
+  *) echo 'WEB_DATASET must be webui or design2code (including Design2Code-Hard)' >&2; exit 2 ;;
+esac
+if [[ "${MAX_NEW_TOKENS:-$output_budget}" != "$output_budget" || "${UI2CODEN_MAX_NEW_TOKENS:-$output_budget}" != "$output_budget" ]]; then
+  echo "Using dataset output budget=$output_budget; overriding inherited token-budget variables."
+fi
+export MAX_NEW_TOKENS=$output_budget
+export UI2CODEN_MAX_NEW_TOKENS=$MAX_NEW_TOKENS
+echo "Dataset=${WEB_DATASET:-design2code}, Initial/Self Revision/UI2CodeN max_new_tokens=$MAX_NEW_TOKENS"
 specs=${VLM_SPECS:-'llava-next-7b|hf|llava-hf/llava-v1.6-mistral-7b-hf|bf16,glm4v-9b-thinking|hf|zai-org/GLM-4.1V-9B-Thinking|bf16,websight-8b|websight|HuggingFaceM4/VLM_WebSight_finetuned|bf16,design2code-18b|design2code-sat|SALT-NLP/Design2Code-18B-v0|bf16,ui2coden|hf|zai-org/UI2Code_N|bf16'}
 IFS=',' read -ra entries <<< "$specs"
 # Fail before generating any pages if a selected legacy runtime is missing.
@@ -120,7 +133,7 @@ PYREV
     seed_output="$output/$alias/seeds/$seed"
     abstract=0
     [[ "$run_ablation" == 1 && "$alias" == "$representative" && "$seed" == "${seed_entries[0]}" ]] && abstract=1
-    echo "Running $alias initial seed=$seed temperature=$initial_temperature ($backend, $model, $precision), abstract ablation=$abstract"
+    echo "Running $alias initial seed=$seed temperature=$initial_temperature ($backend, $model, $precision), max_new_tokens=$MAX_NEW_TOKENS, abstract ablation=$abstract"
     CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} WEB_DATASET="${WEB_DATASET:-design2code}" SELF_REVISION_PROTOCOL="$self_revision_protocol" REVISION_ROUNDS="$rounds" VLM_RETRIES="${VLM_RETRIES:-0}" \
       TARGET_IMAGE_SOURCE="${TARGET_IMAGE_SOURCE:-reference-render}" REFERENCE_MANIFEST="$shared_target_manifest" \
       INITIAL_TEMPERATURE="$initial_temperature" SEED="$seed" \
@@ -130,7 +143,7 @@ PYREV
       bash scripts/run_visual_web.sh "$root" "$seed_output" "$train"
     [[ -n "$shared_target_manifest" ]] || shared_target_manifest="$seed_output/prepare/prepared.jsonl"
     if [[ "$run_ui2coden" == 1 ]]; then
-      MAX_NEW_TOKENS="${UI2CODEN_MAX_NEW_TOKENS:-16384}" MAX_CONTEXT="${UI2CODEN_MAX_CONTEXT:-0}" \
+      MAX_NEW_TOKENS="$MAX_NEW_TOKENS" MAX_CONTEXT="${UI2CODEN_MAX_CONTEXT:-0}" \
       GPU=${CUDA_VISIBLE_DEVICES:-0} ROUNDS="$revision_rounds" LIMIT=0 MODEL_REVISION="$ui_revision" EVALUATION_PYTHON="$evaluation_python" \
         bash baselines/ui2coden/run_4090.sh "$seed_output/prepare/prepared.jsonl" "$seed_output/ui2coden"
     fi
