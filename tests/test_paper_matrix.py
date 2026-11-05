@@ -28,9 +28,9 @@ def test_matrix_has_all_groups_and_rejects_missing_scores(tmp_path):
     assert 'Success / Improved' in table
     assert '80.000' in table
     assert 'Block $' not in table
-    assert table.count(' & Initial & ') == 5
+    assert table.count(' & Initial & ') == 4
     assert table.count(' & Self Revision & ') == 3
-    assert table.count(' & TUIDE & ') == 5
+    assert table.count(' & TUIDE & ') == 4
     assert 'last available implementation' in table
     assert r'\multirow{3}{*}{UI2Code$^{n}$}' in table
     for line in table.splitlines():
@@ -88,6 +88,7 @@ def test_shell_wires_own_draft_shared_inputs_and_webui(tmp_path,run_tuide,datase
     script = tmp_path/'scripts/run_paper_experiments.sh'
     script.parent.mkdir()
     script.write_text((repo/'scripts/run_paper_experiments.sh').read_text())
+    (script.parent/'experiment_log.sh').write_text((repo/'scripts/experiment_log.sh').read_text())
     baseline = tmp_path/'baselines/ui2coden/.venv/bin/python'
     baseline.parent.mkdir(parents=True)
     baseline.write_text('#!/bin/sh\nexit 0\n')
@@ -157,7 +158,7 @@ printf '%s|%s|%s|%s|%s|%s\\n' "$VLM_SPECS" "$CUDA_VISIBLE_DEVICES" "$MAX_NEW_TOK
 
 def test_official_roster_contains_only_requested_models():
     from pathlib import Path
-    expected = ['llava-next-7b', 'glm4v-9b-thinking', 'websight-8b', 'design2code-18b', 'ui2coden']
+    expected = ['llava-next-7b', 'glm4v-9b-thinking', 'design2code-18b', 'ui2coden']
     assert [alias for alias, _ in MODELS] == expected
     for script in ('run_paper_4090_vlms.sh', 'run_paper_pilot10_bf16_2gpu.sh', 'run_d2c_pilot10_bf16_2gpu.sh'):
         line = next(s for s in (Path('scripts')/script).read_text().splitlines() if s.startswith('export VLM_SPECS='))

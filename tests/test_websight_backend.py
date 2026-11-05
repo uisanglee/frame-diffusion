@@ -130,3 +130,30 @@ def test_official_processor_receives_bilinear_960_transform(monkeypatch):
     assert calls == [((960,960), Image.Resampling.BILINEAR)]
     assert inputs['pixel_values'].shape == (1,3,960,960)
     assert torch.all(inputs['pixel_values'] == 1)  # Transparent input became white.
+
+
+def test_startup_wait_has_separate_deadline(monkeypatch, tmp_path):
+    import framediff.websight_backend as backend
+    runtime = object.__new__(backend.WebSightRuntime)
+    runtime.timeout = 1800
+    runtime.process = SimpleNamespace(poll=lambda: None)
+    closed = []
+    runtime.close = lambda: closed.append(True)
+    ticks = iter([0, 1801, 7201])
+    monkeypatch.setattr(backend.time, 'monotonic', lambda: next(ticks))
+    monkeypatch.setattr(backend.time, 'sleep', lambda _: None)
+    with pytest.raises(TimeoutError, match='startup.*7200'):
+        runtime._wait(tmp_path/'ready.json', timeout=7200, phase='startup')
+    assert closed == [True]
+
+
+def test_generation_retains_existing_timeout(monkeypatch, tmp_path):
+    import framediff.websight_backend as backend
+    runtime = object.__new__(backend.WebSightRuntime)
+    runtime.timeout = 1800
+    runtime.process = SimpleNamespace(poll=lambda: None)
+    runtime.close = lambda: None
+    ticks = iter([0, 1801])
+    monkeypatch.setattr(backend.time, 'monotonic', lambda: next(ticks))
+    with pytest.raises(TimeoutError, match='generation.*1800'):
+        runtime._wait(tmp_path/'response.json')

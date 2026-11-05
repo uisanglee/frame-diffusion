@@ -130,3 +130,5 @@ This preserves the learned update mathematically, but BF16 rounding can differ
 from the unmerged single-GPU path. This adaptation is recorded in metadata;
 it is not claimed to be a bitwise-identical reproduction. See
 `baselines/design2code/README.md` for CPU RAM and checkpoint storage requirements.
+
+WebSight startup (including first weight download) has a separate `WEBSIGHT_STARTUP_TIMEOUT=7200` second limit. `WEBSIGHT_TIMEOUT=1800` continues to limit each generation request. Increase the startup limit for slow downloads; resuming preserves the Hugging Face download cache and completed experiment results.

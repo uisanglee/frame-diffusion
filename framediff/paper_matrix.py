@@ -1,4 +1,4 @@
-"""Preflight and export the three-dataset, five-initial-model paper comparison."""
+"""Preflight and export the three-dataset, four-initial-model paper comparison."""
 import argparse
 from collections import Counter
 import json
@@ -11,7 +11,7 @@ from .ir import read_jsonl
 
 DATASETS = [('webui', 'WebUI'), ('design2code', 'Design2Code'), ('design2code-hard', 'Design2Code-Hard')]
 MODELS = [('llava-next-7b', 'LLaVA-NeXT-7B'), ('glm4v-9b-thinking', 'GLM-4.1V-9B'),
-          ('websight-8b', 'WebSight VLM-8B'), ('design2code-18b', 'Design2Code-18B-v0'),
+          ('design2code-18b', 'Design2Code-18B-v0'),
           ('ui2coden', r'UI2Code$^{n}$')]
 # These public checkpoints have an image-only drafting protocol, not a chat
 # protocol taking current HTML and two images for self-revision.
@@ -20,7 +20,7 @@ NO_SELF_REVISION_ALIASES = frozenset({'websight-8b', 'design2code-18b'})
 LEGACY_MODELS = [('qwen3vl8b', 'Qwen3-VL-8B'), ('glm4v-9b-thinking', 'GLM-4.1V-9B'),
                  ('gemma3-12b', 'Gemma-3-12B'), ('llava-next-7b', 'LLaVA-NeXT-7B'),
                  ('pixtral-12b', 'Pixtral-12B'), ('ui2coden', r'UI2Code$^{n}$')]
-MODEL_LABELS = dict([*LEGACY_MODELS, *MODELS])
+MODEL_LABELS = dict([*LEGACY_MODELS, ('websight-8b', 'WebSight VLM-8B'), *MODELS])
 
 METRICS = ('official_position', 'official_clip', 'dom_box_iou', 'improved_page_rate')
 
@@ -178,7 +178,7 @@ def main():
     pre.add_argument('--official-repo',required=True)
     export=sub.add_parser('export'); export.add_argument('--root',required=True); export.add_argument('--out',required=True)
     export.add_argument('--datasets',nargs='+',choices=[key for key,_ in DATASETS])
-    export.add_argument('--models', nargs='+', choices=list(MODEL_LABELS), help='Defaults to the current official five-model roster; use explicit aliases for legacy reports')
+    export.add_argument('--models', nargs='+', choices=list(MODEL_LABELS), help='Defaults to the current official four-model roster; use explicit aliases for legacy reports')
     export.add_argument('--skip-tuide',action='store_true')
     export.add_argument('--revision-rounds',type=int,choices=range(1,101),default=3)
     args=parser.parse_args()

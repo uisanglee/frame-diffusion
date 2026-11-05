@@ -87,13 +87,16 @@ def validate_request(args, images):
 class WebSightRuntime:
     """One long-lived model process; WEBSIGHT_PYTHON may select a legacy venv."""
     def __init__(self, args):
+        self.timeout = float(os.environ.get('WEBSIGHT_TIMEOUT', '1800'))
+        self.startup_timeout = float(os.environ.get('WEBSIGHT_STARTUP_TIMEOUT', '7200'))
+        import math
+        for name, value in [('WEBSIGHT_TIMEOUT', self.timeout), ('WEBSIGHT_STARTUP_TIMEOUT', self.startup_timeout)]:
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f'{name} must be finite and positive')
         self.work = tempfile.TemporaryDirectory(prefix='framediff-websight-')
         self.root = Path(self.work.name)
         self.process = None
         self.counter = 0
-        self.timeout = float(os.environ.get('WEBSIGHT_TIMEOUT', '1800'))
-        if self.timeout <= 0:
-            raise ValueError('WEBSIGHT_TIMEOUT must be positive')
         settings = dict(model=args.model, revision=args.revision, seed=args.seed, parent_pid=os.getpid())
         (self.root/'settings.json').write_text(json.dumps(settings))
         python = os.environ.get('WEBSIGHT_PYTHON', str(Path(__file__).resolve().parents[1]/'baselines/websight/.venv/bin/python'))
@@ -103,21 +106,25 @@ class WebSightRuntime:
         try:
             self.process = subprocess.Popen([python, str(Path(__file__).resolve()), '--worker', str(self.root)],
                                             start_new_session=True)
-            self._wait(self.root/'ready.json')
+            print(json.dumps({'websight_startup': 'download_and_load', 'timeout_s': self.startup_timeout}), flush=True)
+            self._wait(self.root/'ready.json', timeout=self.startup_timeout, phase='startup (download/model load)')
             atexit.register(self.close)
         except BaseException:
             self.close()
             raise
 
-    def _wait(self, path):
-        deadline = time.monotonic() + self.timeout
+    def _wait(self, path, *, timeout=None, phase='generation'):
+        timeout = self.timeout if timeout is None else timeout
+        deadline = time.monotonic() + timeout
         while not path.exists():
             if self.process.poll() is not None:
                 raise RuntimeError(f'WebSight worker exited ({self.process.returncode}); see worker stderr. '
                                    'Set WEBSIGHT_PYTHON to the dedicated WebSight environment.')
             if time.monotonic() >= deadline:
                 self.close()
-                raise TimeoutError(f'WebSight worker exceeded {self.timeout}s')
+                raise TimeoutError(f'WebSight {phase} exceeded {timeout}s; '
+                                   + ('increase WEBSIGHT_STARTUP_TIMEOUT and resume; downloaded HF cache is retained'
+                                      if phase.startswith('startup') else 'adjust WEBSIGHT_TIMEOUT if needed'))
             time.sleep(.1)
         response = json.loads(path.read_text())
         if response.get('error'):
