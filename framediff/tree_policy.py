@@ -4,6 +4,7 @@ Ordinary token CE, no set loss, no learned STOP, no box oracle at inference.
 Optional normalization corruption restores recorded original declarations.
 """
 import contextlib
+import os
 import json
 import random
 import time
@@ -499,7 +500,8 @@ def train(args):
         if min(args.online_workers,args.online_prefetch,args.online_max_noise,args.online_attempts,args.online_timeout)<1:
             raise ValueError('Online worker, queue, retry and noise settings must be positive')
         cache_root=Path(args.online_targets or args.train).resolve().parent/'.online-target-cache'
-        targets=target_pool(training,args.online_targets,cache_dir=cache_root,observation_size=cfg.size)
+        targets=target_pool(training,args.online_targets,cache_dir=cache_root,observation_size=cfg.size,
+                            workers=int(os.environ.get("TUIDE_INSPECTION_WORKERS", min(args.online_workers,4))))
         expected_corruption=cfg.action_contract if cfg.fields==('x','y','width','height') else ONLINE_CONTRACT
         sampling_contract='box-site-uniform-px-v1' if cfg.fields==('x','y','width','height') else SAMPLING_CONTRACT
         signatures['online']={'contract':expected_corruption,'sampling':sampling_contract,'assets':asset_signatures(targets)}

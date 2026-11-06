@@ -32,7 +32,7 @@ def _inspection_log(payload):
     failed=any(stats.get(k,0) for k in ('excluded_no_editable_css',
                'excluded_no_visible_candidate','excluded_inspection_error'))
     if (os.environ.get('TUIDE_VERBOSE_INSPECTION','0')=='1' or failed
-        or stats.get('pages',0)>1 or stats.get('online_target_inspection',0)>1):
+        or stats.get('total',0)>1 or stats.get('pages',0)>1 or stats.get('online_target_inspection',0)>1):
         print(payload,flush=True)
 
 ONLINE_CONTRACT = 'online-css-visible-values-v6-size-margin'
@@ -188,7 +188,89 @@ def inspect_candidates(browser,target,html,diagnostics=None):
                      inspection_diagnostics=diagnostics)
 
 
-def target_pool(rows, manifest=None, cache_dir=None, observation_size=384, diagnostics=None):
+def _inspect_target(target, cache_dir, fingerprint, detailed, browser):
+    """One validated cache read or probe, under the existing per-entry lock."""
+    html = Path(target['target_html']).read_text()
+    with inspection_cache_entry(target.get('inspection_cache_dir',cache_dir), target, html, fingerprint) as entry:
+        state = None; error = None; cached = False;metadata={}
+        if entry is not None and entry.exists():
+            try:
+                from .inspection_storage import read_inspection
+                saved = read_inspection(entry, detailed=detailed)
+                state, error = saved.get('state'), saved.get('error')
+                if error is not None:
+                    if not isinstance(error,str) or state is not None: raise ValueError('Invalid cached error')
+                else:
+                    if not isinstance(state,list): raise ValueError('Invalid cached state')
+                    mutation_sites(state)
+                    metadata={k:saved[k] for k in ('visible_candidates','target_elements','visual_classes')}
+                    if detailed:
+                        metadata['inspection_diagnostics']=saved.get('inspection_diagnostics',{})
+                    if not isinstance(metadata['visible_candidates'],list):raise ValueError('Invalid candidate cache')
+                cached = True
+            except (ValueError, KeyError, TypeError):
+                state = None; error = None; metadata = {}
+        if not cached:
+            try:
+                if browser[0] is None: browser[0] = HtmlBrowser().__enter__()
+                else: browser[0].reset_context()
+                detail={}
+                metadata['inspection_diagnostics']=detail
+                state,metadata=inspect_candidates(browser[0],target,html,detail)
+            except Exception as exc:
+                error = f'{type(exc).__name__}: {exc}'
+            # Transient browser failures must be retried next run, not
+            # persisted as permanently unusable source pages.
+            if error is None:save_inspection(entry,state,**metadata)
+    return state, error, cached, metadata
+
+
+def _inspection_results(targets, cache_dir, fingerprint, detailed, workers):
+    # Each thread owns its Playwright instance; never move a browser across threads.
+    # A bounded result queue prevents completed observations accumulating in memory.
+    from concurrent.futures import ThreadPoolExecutor
+    from queue import Queue, Empty, Full
+    from threading import Event
+    jobs = Queue()
+    results = Queue(maxsize=workers * 2)
+    stop = Event()
+    for item in targets.items(): jobs.put(item)
+
+    def run():
+        browser = [None]
+        try:
+            while not stop.is_set():
+                try: page_id, target = jobs.get_nowait()
+                except Empty: break
+                try:
+                    result = (page_id, _inspect_target(target, cache_dir, fingerprint, detailed, browser), None)
+                except Exception as exc:
+                    result = (page_id, None, exc)
+                while not stop.is_set():
+                    try:
+                        results.put(result, timeout=.1)
+                        break
+                    except Full: pass
+        finally:
+            if browser[0] is not None: browser[0].__exit__(None, None, None)
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(run) for _ in range(workers)]
+        try:
+            for _ in range(len(targets)):
+                while True:
+                    try: page_id, result, error = results.get(timeout=.2); break
+                    except Empty:
+                        for future in futures:
+                            if future.done(): future.result()
+                if error is not None: raise error
+                yield page_id, result
+        finally:
+            stop.set()
+
+
+def target_pool(rows, manifest=None, cache_dir=None, observation_size=384, diagnostics=None, workers=1):
+    if not isinstance(workers, int) or workers < 1: raise ValueError("Inspection workers must be positive")
     if observation_size<1:raise ValueError('Invalid corruption observation size')
     for row in rows:
         settings=row.get('lazy_settings',{})
@@ -248,47 +330,20 @@ def target_pool(rows, manifest=None, cache_dir=None, observation_size=384, diagn
         targets[page_id] = target
     # Even preparsed declarations need execution probes. Cache accepted and
     # excluded pages, including witnessed edits, independently of model scale.
-    browser = None
     inspected = 0
     cache_hits = 0
     fingerprint = inspection_fingerprint() if cache_dir is not None or any(
         t.get('inspection_cache_dir') for t in targets.values()) else None
-    try:
-        for page_id, target in list(targets.items()):
-            html = Path(target['target_html']).read_text()
-            with inspection_cache_entry(target.get('inspection_cache_dir',cache_dir), target, html, fingerprint) as entry:
-                state = None; error = None; cached = False;metadata={}
-                if entry is not None and entry.exists():
-                    try:
-                        from .inspection_storage import read_inspection
-                        saved = read_inspection(entry, detailed=diagnostics is not None)
-                        state, error = saved.get('state'), saved.get('error')
-                        if error is not None:
-                            if not isinstance(error,str) or state is not None: raise ValueError('Invalid cached error')
-                        else:
-                            if not isinstance(state,list): raise ValueError('Invalid cached state')
-                            mutation_sites(state)
-                            metadata={k:saved[k] for k in ('visible_candidates','target_elements','visual_classes')}
-                            if diagnostics is not None:
-                                metadata['inspection_diagnostics']=saved.get('inspection_diagnostics',{})
-                            if not isinstance(metadata['visible_candidates'],list):raise ValueError('Invalid candidate cache')
-                        cached = True
-                    except (ValueError, KeyError, TypeError): state = None
-                if cached:
-                    cache_hits += 1
-                else:
-                    inspected += 1
-                    try:
-                        if browser is None: browser = HtmlBrowser().__enter__()
-                        else: browser.reset_context()
-                        detail={}
-                        metadata['inspection_diagnostics']=detail
-                        state,metadata=inspect_candidates(browser,target,html,detail)
-                    except Exception as exc:
-                        error = f'{type(exc).__name__}: {exc}'
-                    # Transient browser failures must be retried next run, not
-                    # persisted as permanently unusable source pages.
-                    if error is None:save_inspection(entry,state,**metadata)
+    import time
+    started = time.monotonic()
+    total = len(targets)
+    print({'online_inspection_start': total, 'workers': workers}, flush=True)
+    with contextlib.closing(_inspection_results(dict(targets), cache_dir, fingerprint,
+                                                diagnostics is not None, workers)) as results:
+        for page_id, (state, error, cached, metadata) in results:
+            target = targets[page_id]
+            cache_hits += int(cached)
+            inspected += int(not cached)
             if error is not None:
                 print({'online_target_inspection_error':page_id,'error':error},flush=True)
                 del targets[page_id]
@@ -309,13 +364,13 @@ def target_pool(rows, manifest=None, cache_dir=None, observation_size=384, diagn
             record(dict(id=page_id,status='kept' if reason=='usable' else 'excluded',reason=reason,
                         error=error,cache_hit=cached,**metadata.get('inspection_diagnostics',{})))
             processed = inspected + cache_hits
-            if processed == 1 or processed % 100 == 0:
+            if processed == 1 or processed % 100 == 0 or processed == total:
                 _inspection_log({'online_target_inspection': inspected, 'cache_hits': cache_hits,
                        'excluded_no_editable_css': no_editable,
                        'excluded_no_visible_candidate':no_visible,
-                       'excluded_inspection_error': inspection_errors})
-    finally:
-        if browser is not None: browser.__exit__(None,None,None)
+                       'excluded_inspection_error': inspection_errors,
+                       'processed': processed, 'total': total, 'workers': workers,
+                       'elapsed_s': round(time.monotonic()-started, 1)})
     _inspection_log({'online_target_filter': {'pages': len(seen), 'kept': len(targets),
           'visible_candidates':sum(len(t['visible_candidates']) for t in targets.values()),
           'excluded_no_editable_css': no_editable,
