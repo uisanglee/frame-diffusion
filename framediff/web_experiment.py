@@ -675,6 +675,7 @@ def repair_pages(args):
 
 
 def evaluate_pages(args):
+    from .evaluation_recovery import render_with_retry, reusable_metric
     from .evaluation_timing import EvaluationTiming
     import numpy as np
     records = list(read_jsonl(args.data))
@@ -703,12 +704,16 @@ def evaluate_pages(args):
             cache = work/'metrics.json'
             initial_failed = bool(record.get('methods', {}).get('initial', {}).get('failed') or
                                   record.get('errors', {}).get('initial'))
+            saved_methods = {}
             if args.resume and cache.exists():
                 saved = read_json(cache)
-                # Upgrade old failed-Initial evaluations without recomputing scores.
-                if not initial_failed or all(r.get('evaluation_skipped') == 'initial_generation_failed' for r in saved):
+                saved_methods = {r['method']: r for r in saved
+                    if reusable_metric(r, initial_failed, official is not None,
+                                       record.get('reference_kind') == 'webui_recorded_boxes')}
+                if set(saved_methods) == set(methods):
                     EvaluationTiming(id=record['id']).event('page', 'cache_hit')
-                    rows.extend(saved); write_jsonl(out/'metrics.jsonl',rows); continue
+                    rows.extend(saved_methods[m] for m in methods)
+                    write_jsonl(out/'metrics.jsonl',rows); continue
             viewport = record['viewport']
             placeholder = Path(record['html']).parent/'rick.jpg' if record.get('html') else None
             placeholder = placeholder if placeholder and placeholder.exists() else None
@@ -732,11 +737,17 @@ def evaluate_pages(args):
                             if reference['max_nodes'] != args.max_nodes:
                                 raise ValueError('Evaluation --max-nodes must match saved target DOM max_nodes')
                         else:
-                            reference = browser.snapshot(ref_html,viewport,work/'reference.png',args.max_nodes)
+                            reference = render_with_retry(browser,
+                                lambda: browser.snapshot(ref_html,viewport,work/'reference.png',args.max_nodes),
+                                EvaluationTiming(id=record['id'], method='reference'))
                     except Exception as error: reference_error = str(error)
             page_rows = []
             score_cache = {}  # One fixed target/viewport/settings; bounded by method count.
             for method in methods:
+                if method in saved_methods:
+                    EvaluationTiming(id=record['id'], method=method).event('method', 'cache_hit')
+                    page_rows.append(saved_methods[method])
+                    continue
                 data = record['methods'][method]; started = time.perf_counter(); before = browser.executions
                 row = {'id':record['id'],'method':method,'failed':data['failed'],
                        'page_id':record.get('page_id',record['id']),
@@ -800,7 +811,8 @@ def evaluate_pages(args):
                     metadata_keys = set(row)
                     png = work/f'{method}.png'
                     with timing.stage('render_dom_snapshot'):
-                        observed = browser.snapshot(html,viewport,png,args.max_nodes)
+                        observed = render_with_retry(browser,
+                            lambda: browser.snapshot(html,viewport,png,args.max_nodes), timing)
                     with timing.stage('pixel_comparison'):
                         with Image.open(record['screenshot']) as a, Image.open(png) as b:
                             if a.size != b.size: raise ValueError('Screenshot dimensions differ')

@@ -455,7 +455,7 @@ def test_self_revision_keeps_success_before_later_failure(tmp_path,monkeypatch,b
 
 
 @pytest.mark.browser
-def test_evaluation_skips_failed_initial_and_reuses_identical_html(tmp_path):
+def test_evaluation_skips_failed_initial_and_reuses_identical_html(tmp_path, monkeypatch):
     html = tmp_path/'page.html'; html.write_text(HTML)
     png = tmp_path/'target.png'; Image.new('RGB',(320,240),'white').save(png)
     base = dict(html=str(html), failed=False, seconds=1., browser_executions=0, vlm_calls=1)
@@ -485,6 +485,26 @@ def test_evaluation_skips_failed_initial_and_reuses_identical_html(tmp_path):
     args.resume = True
     resumed = evaluate_pages(args)
     assert all('dom_box_iou' not in r for r in resumed if r['id'] == 'failed')
+    # One failed evaluation must not invalidate another method's valid scores.
+    cache = tmp_path/'eval/pages'/signature('ok')[:20]/'metrics.json'
+    saved = json.loads(cache.read_text())
+    preserved = saved[1].copy()
+    saved[0]['evaluation_error'] = 'Page.captureScreenshot: Unable to capture screenshot'
+    saved[0].pop('dom_box_iou')
+    cache.write_text(json.dumps(saved))
+    original = HtmlBrowser.snapshot
+    calls = []
+    def flaky(self, *a, **kw):
+        calls.append(1)
+        if len(calls) == 2:  # reference succeeds; first prediction capture fails
+            raise RuntimeError('Page.captureScreenshot: Unable to capture screenshot')
+        return original(self, *a, **kw)
+    monkeypatch.setattr(HtmlBrowser, 'snapshot', flaky)
+    retried = evaluate_pages(args)
+    assert len(calls) == 3
+    assert retried[0]['evaluation_error'] is None
+    assert retried[0]['dom_box_iou'] == initial['dom_box_iou']
+    assert retried[1] == preserved
 
 
 @pytest.mark.browser

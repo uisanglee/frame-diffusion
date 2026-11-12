@@ -121,9 +121,12 @@ class OfficialMetrics:
                     png.write_bytes(found)
                     timing.event('official_render', 'cache_hit')
                     return
-                browser.load(content,viewport)
-                browser.page.screenshot(path=str(png),animations='disabled')
-                browser.screenshots += 1
+                from .evaluation_recovery import render_with_retry
+                def capture():
+                    browser.load(content,viewport)
+                    browser.page.screenshot(path=str(png),animations='disabled')
+                    browser.screenshots += 1
+                render_with_retry(browser, capture, timing)
                 if png.is_file():
                     raw = png.read_bytes()
                     self._render_cache.put(key, raw, len(raw))
