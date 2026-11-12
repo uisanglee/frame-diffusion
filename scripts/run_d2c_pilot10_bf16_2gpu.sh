@@ -20,8 +20,8 @@ export OFFICIAL_REPO=${OFFICIAL_REPO:-$PWD/external/design2code-official}
 export PAPER_REFERENCE_CACHE=${PAPER_REFERENCE_CACHE:-$PWD/.cache/paper-reference-renders}
 export VLM_SPECS=${VLM_SPECS:-'llava-next-7b|hf|llava-hf/llava-v1.6-mistral-7b-hf|bf16,glm4v-9b-thinking|hf|zai-org/GLM-4.1V-9B-Thinking|bf16,websight-8b|websight|HuggingFaceM4/VLM_WebSight_finetuned|bf16,ui2coden|hf|zai-org/UI2Code_N|bf16'}
 pilot_pages=${D2C_PILOT_PAGES:-10}
-[[ "$pilot_pages" =~ ^[1-9][0-9]*$ ]] || {
-  echo 'D2C_PILOT_PAGES must be a positive integer' >&2; exit 2;
+[[ "$pilot_pages" =~ ^(0|[1-9][0-9]*)$ ]] || {
+  echo 'D2C_PILOT_PAGES must be a nonnegative integer (0 = all pages)' >&2; exit 2;
 }
 output=${D2C_PILOT_OUTPUT:-runs/d2c-pilot${pilot_pages}-seed42-n2-bf16-2gpu-v1}
 d2c=${D2C_ROOT:-$PWD/data/raw/design2code/testset_final}
@@ -37,13 +37,15 @@ count=int(sys.argv[4])
 for name,root in [('design2code',sys.argv[1]),('design2code-hard',sys.argv[2])]:
     root=Path(root).resolve()
     if not (root/'rick.jpg').is_file():raise ValueError(f'Missing placeholder: {root}/rick.jpg')
-    rows=sorted(check_sources(root=root),key=lambda r:str(r['id']))[:count]
-    if len(rows)!=count:raise ValueError(f'{name}: need {count} pages')
+    rows=sorted(check_sources(root=root),key=lambda r:str(r['id']))
+    if count:
+        rows=rows[:count]
+        if len(rows)!=count:raise ValueError(f'{name}: need {count} pages')
     content=''.join(json.dumps(r,ensure_ascii=False)+'\n' for r in rows)
     path=folder/f'{name}.jsonl'
     if path.exists() and path.read_text()!=content:
         raise ValueError(f'Pilot inputs changed: {path}; use a new D2C_PILOT_OUTPUT')
-    path.write_text(content)
+    if not path.exists():path.write_text(content)
     print(f'{name}: {len(rows)} fixed pages -> {path}',flush=True)
 PY
 echo "VLM-only pilot: GPUs=$CUDA_VISIBLE_DEVICES, pages/dataset=$pilot_pages, BF16, seed=42, N=2, output=$output"
@@ -51,6 +53,9 @@ for dataset in design2code design2code-hard; do
   WEB_DATASET=design2code PAGE_MANIFEST="$output/inputs/$dataset.jsonl" \
     bash scripts/run_paper_experiments.sh . "$output/$dataset" unused-no-checkpoints
 done
+IFS=',' read -ra model_specs <<< "$VLM_SPECS"
+model_aliases=()
+for spec in "${model_specs[@]}"; do model_aliases+=("${spec%%|*}"); done
 python -m framediff.paper_matrix export --root "$output" --out "$output/table" \
-  --datasets design2code design2code-hard --skip-tuide --revision-rounds 2
+  --datasets design2code design2code-hard --models "${model_aliases[@]}" --skip-tuide --revision-rounds 2
 echo "Completed. Combined table: $output/table/vlm-quality.tex"

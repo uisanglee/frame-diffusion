@@ -33,12 +33,29 @@ def test_ui2coden_rerun_aggregates_previous_methods(tmp_path,with_tuide):
     assert ('--skip-tuide' in calls)==(with_tuide=='0')
     assert (out/'design2code/llava-next-7b/seeds/42/evaluation').is_symlink()
     bashcalls=(tmp_path/'bash.log').read_text().splitlines()
-    assert len(bashcalls)==5
+    # Three external Initial models plus UI2CodeN's own Initial group.
+    assert len(bashcalls)==4
+    assert not any('/design2code-18b/' in line for line in bashcalls)
     assert all(line.startswith(with_tuide+'|') for line in bashcalls)
     assert 'run_paper_experiments.sh' in bashcalls[-1]
 
 
-@pytest.mark.parametrize('count', [3, 10])
+@pytest.mark.parametrize('pages', ['0', '3'])
+def test_full_baseline_wrapper_forwards_fixed_output_and_page_count(tmp_path, pages):
+    import os, subprocess
+    scripts=tmp_path/'scripts';scripts.mkdir()
+    script=scripts/'run_d2c_vlm_baselines.sh'
+    script.write_text(Path('scripts/run_d2c_vlm_baselines.sh').read_text())
+    (scripts/'run_d2c_pilot10_bf16_2gpu.sh').write_text(
+        'printf "%s|%s|%s" "$D2C_PILOT_PAGES" "$D2C_PILOT_OUTPUT" "$CUDA_VISIBLE_DEVICES"\n')
+    env=dict(os.environ, D2C_BASELINE_PAGES=pages, D2C_BASELINE_OUTPUT='runs/saved',
+             CUDA_VISIBLE_DEVICES='2,4')
+    result=subprocess.run(['/bin/bash',str(script)],env=env,capture_output=True,text=True)
+    assert result.returncode==0,result.stderr
+    assert result.stdout.endswith(f'{pages}|runs/saved|2,4')
+
+
+@pytest.mark.parametrize('count', [0, 3, 10])
 def test_d2c_only_pilot_freezes_inputs(tmp_path, monkeypatch, count):
     script=Path('scripts/run_d2c_pilot10_bf16_2gpu.sh').read_text()
     selection=script.split("<<'PY'\n",1)[1].split('\nPY\n',1)[0]
@@ -52,7 +69,7 @@ def test_d2c_only_pilot_freezes_inputs(tmp_path, monkeypatch, count):
     exec(selection,{})
     for name in ('design2code','design2code-hard'):
         path=tmp_path/'out/inputs'/f'{name}.jsonl'
-        assert [json.loads(line)['id'] for line in path.read_text().splitlines()]==[f'{i:03d}' for i in range(count)]
+        assert [json.loads(line)['id'] for line in path.read_text().splitlines()]==[f'{i:03d}' for i in range(count or 12)]
     assert not (tmp_path/'out/inputs/webui.jsonl').exists()
     exec(selection,{})
     rows[-1]['changed']=True
