@@ -241,7 +241,11 @@ def main():
         try:
             seeds=copy.deepcopy(rows)
             for r in seeds:r['inspection_cache_dir']=str(out/'inspection-cache')
-            targets=target_pool(seeds,cache_dir=out/'inspection-cache',workers=1)
+            splits={r.get('split') for r in seeds}
+            if len(splits)!=1 or not splits.issubset({'val','test'}):
+                raise ValueError('Audit online samples require a single held-out split (val or test)')
+            targets=target_pool(seeds,cache_dir=out/'inspection-cache',workers=1,
+                                diagnostic_split=next(iter(splits)))
             sampler=OnlineSampler(targets,'abstract',args.seed,export_html=True)
             try:
                 for i in range(args.online_samples):

@@ -149,3 +149,27 @@ def test_every_sample_and_teacher_change_abstraction_in_both_modes(tmp_path):
             states.append(local)
         finally:sampler.close()
     assert states[0]==states[1]
+
+
+@pytest.mark.browser
+def test_heldout_diagnostic_pool_preserves_split_and_training_guard(tmp_path, monkeypatch):
+    monkeypatch.setenv('TUIDE_SHARED_CACHE',str(tmp_path/'shared'))
+    rows=make_rows(tmp_path)
+    for row in rows:row['split']='val'
+    with pytest.raises(ValueError,match='only accepts training pages'):
+        target_pool(rows,cache_dir=tmp_path/'cache')
+    with pytest.raises(ValueError,match='only accepts test pages'):
+        target_pool(rows,cache_dir=tmp_path/'cache',diagnostic_split='test')
+    pool=target_pool(rows,cache_dir=tmp_path/'cache',observation_size=64,diagnostic_split='val')
+    assert all(r['split']=='val' for r in pool)
+    sampler=OnlineSampler(pool,'abstract',seed=19,export_html=True)
+    try:
+        result=sampler.generate(0)
+        assert result['split']=='val'
+        assert result['current_html_text']
+        assert result['replacement_edit']
+    finally:sampler.close()
+    assert all(r['split']=='val' for r in rows)
+    # Previously cached diagnostics cannot bypass the default training guard.
+    with pytest.raises(ValueError,match='only accepts training pages'):
+        target_pool(rows,cache_dir=tmp_path/'cache')

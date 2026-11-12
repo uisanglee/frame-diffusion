@@ -269,7 +269,13 @@ def _inspection_results(targets, cache_dir, fingerprint, detailed, workers):
             stop.set()
 
 
-def target_pool(rows, manifest=None, cache_dir=None, observation_size=384, diagnostics=None, workers=1):
+def target_pool(rows, manifest=None, cache_dir=None, observation_size=384, diagnostics=None, workers=1,
+                diagnostic_split=None):
+    # Training remains train-only. Held-out corruption is an explicit diagnostic
+    # operation; never relabel held-out records as training data.
+    if diagnostic_split not in (None,'val','test'):
+        raise ValueError('diagnostic_split must be val or test')
+    expected_split=diagnostic_split or 'train'
     if not isinstance(workers, int) or workers < 1: raise ValueError("Inspection workers must be positive")
     if observation_size<1:raise ValueError('Invalid corruption observation size')
     for row in rows:
@@ -277,6 +283,8 @@ def target_pool(rows, manifest=None, cache_dir=None, observation_size=384, diagn
         if row.get('recovery_contract') or row.get('box_layout_contract') or settings.get('box_layout') or settings.get('recover_normalization'):
             raise ValueError('Retired normalization-recovery/xywh data; prepare safe size/margin labels')
     if any(r.get('lazy_contract') for r in rows):
+        if diagnostic_split is not None:
+            raise ValueError('Diagnostic corruption requires materialized held-out pages')
         if not all(r.get('lazy_contract') and r['split']=='train' for r in rows):
             raise ValueError('Lazy train descriptors cannot be mixed with eager or held-out rows')
         lazy_cache=str(Path(cache_dir).resolve()/'lazy-train-views') if cache_dir is not None else None
@@ -298,15 +306,17 @@ def target_pool(rows, manifest=None, cache_dir=None, observation_size=384, diagn
             records.append({k:v for k,v in detail.items() if k!='sites'})
     for row in rows:
         if row.get('hierarchy'):raise ValueError('Flat targets are retired; use original parent-preserving HTML')
-        if row['split'] != 'train': raise ValueError('Online corruption only accepts training pages')
+        if row['split'] != expected_split:
+            raise ValueError('Online corruption only accepts training pages' if diagnostic_split is None
+                             else f'Diagnostic corruption only accepts {expected_split} pages')
         page_id = row['id'].rsplit('/',1)[0]
         if page_id in seen: continue
         seen.add(page_id)
         html = row.get('target_html') or pages.get(page_id,{}).get('html')
         if not html:
             raise ValueError(f'Missing clean HTML for {page_id}; pass --online-targets pages-train.jsonl')
-        if pages.get(page_id,{}).get('split','train') != 'train':
-            raise ValueError('Online target manifest contains a non-training page')
+        if pages.get(page_id,{}).get('split',expected_split) != expected_split:
+            raise ValueError(f'Online target manifest contains a page outside {expected_split}')
         for key in ('group','source_sha'):
             if key in pages.get(page_id,{}) and pages[page_id][key]!=row[key]:
                 raise ValueError(f'Online target identity mismatch: {page_id} {key}')
