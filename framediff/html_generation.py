@@ -68,6 +68,7 @@ class HTMLCompletionStop:
         self.decoded = ''
         self.seen_tokens = prompt_tokens
         self.initialized = False
+        self.initial_thinking = False
 
     def _decode(self, ids):
         options = dict(skip_special_tokens=False, clean_up_tokenization_spaces=False)
@@ -87,6 +88,7 @@ class HTMLCompletionStop:
             # Some chat templates open the reasoning span in the assistant prefix.
             prefix = self._decode(input_ids[0, max(0, self.prompt_tokens-32):self.prompt_tokens].tolist())
             self.parser.thinking = prefix.rstrip().endswith('<think>')
+            self.initial_thinking = self.parser.thinking
             self.initialized = True
         end = input_ids.shape[1]
         if end <= self.seen_tokens:
@@ -96,7 +98,16 @@ class HTMLCompletionStop:
         # Defer that suffix until it is stable rather than feeding it twice.
         stable = text.rstrip('\ufffd')
         if not stable.startswith(self.decoded):
-            raise ValueError('Tokenizer changed an already decoded HTML prefix')
+            # Token decoding need not be prefix-monotonic (byte fallback,
+            # whitespace handling, or a chunk starting inside a character).
+            # Rebuild from the authoritative full generated text only on this
+            # exceptional path; do not retain stale parser/CDATA/think state.
+            self.decode_start = self.prompt_tokens
+            text = self._decode(input_ids[0, self.prompt_tokens:end].tolist())
+            stable = text.rstrip('\ufffd')
+            self.parser = _DocumentCompletionParser()
+            self.parser.thinking = self.initial_thinking
+            self.decoded = ''
         self.parser.feed(stable[len(self.decoded):])
         self.decoded = stable
         self.seen_tokens = end

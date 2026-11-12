@@ -91,3 +91,31 @@ def test_incomplete_document_does_not_stop_and_decoding_stays_bounded():
         assert not guard(torch.tensor([[ord(c) for c in body[:index]]]))
     assert guard.reason is None
     assert max(decoded_lengths) <= 64
+
+
+@pytest.mark.parametrize('prompt', ['', '<|assistant|><think>\n'])
+def test_non_monotonic_decoder_rebuilds_parser_without_premature_stop(prompt):
+    class RevisingDecoder(CharDecoder):
+        def decode(self, ids, **kwargs):
+            text = super().decode(ids, **kwargs)
+            # Simulate a tokenizer revising the previously decoded suffix.
+            if text.endswith('AB'):
+                return text[:-2] + 'Z'
+            return text
+    reasoning = 'draft <html></html></think>' if prompt else ''
+    body = reasoning + '<html><body>' + 'x'*90 + 'ABCD<script>"</html>"</script></body></html>'
+    guard = HTMLCompletionStop(RevisingDecoder(), len(prompt))
+    for index in range(1, len(body)+1):
+        ids = torch.tensor([[ord(c) for c in prompt + body[:index]]])
+        assert guard(ids) == (index == len(body))
+    assert guard.reason == 'html_complete'
+
+
+def test_revised_prefix_does_not_invent_document_opening():
+    class Decoder:
+        def decode(self, ids, **kwargs):
+            return {0: '', 1: '<html>', 2: 'plain text', 3: 'plain text</html>'}[len(ids)]
+    guard = HTMLCompletionStop(Decoder(), 0)
+    for n in range(1, 4):
+        assert not guard(torch.zeros((1, n), dtype=torch.long))
+    assert not guard.parser.document
