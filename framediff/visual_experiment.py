@@ -36,13 +36,15 @@ def pixel_match_fraction(target,current,tolerance=.005):
 
 def rollout(browser,html,tree,viewport,target_path,policy,parser=None,threshold=.4,
             steps=10,time_budget=0,oracle_elements=None,diagnostic_target_boxes=None,goal_threshold=-1,
-            pixel_goal_fraction=.99,pixel_goal_tolerance=.005,preserve_matched_regions=False):
+            pixel_goal_fraction=.99,pixel_goal_tolerance=.005,preserve_matched_regions=False,
+            preserve_matched_geometry=False,geometry_tolerance_px=2.,geometry_tolerance_fraction=.002):
     """Keep partial work and costs even when an execution/verification fails."""
     stats={};started=time.perf_counter();before=browser.executions;shots=browser.screenshots
     try:
         return _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,steps,time_budget,
                         oracle_elements,diagnostic_target_boxes,goal_threshold,
-                        pixel_goal_fraction,pixel_goal_tolerance,preserve_matched_regions,stats)
+                        pixel_goal_fraction,pixel_goal_tolerance,preserve_matched_regions,
+                        preserve_matched_geometry,geometry_tolerance_px,geometry_tolerance_fraction,stats)
     except Exception as exc:
         raise_if_fatal(exc)
         # The browser may be dead or contain a partially applied failed edit.
@@ -59,7 +61,8 @@ def rollout(browser,html,tree,viewport,target_path,policy,parser=None,threshold=
 
 def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
              steps,time_budget,oracle_elements,diagnostic_target_boxes,goal_threshold,
-             pixel_goal_fraction,pixel_goal_tolerance,preserve_matched_regions,stats):
+             pixel_goal_fraction,pixel_goal_tolerance,preserve_matched_regions,
+             preserve_matched_geometry,geometry_tolerance_px,geometry_tolerance_fraction,stats):
     """Only the explicitly enabled oracle ablation accepts target elements.
 
     Autoregressive policies have no learned STOP. Both modalities apply one
@@ -68,8 +71,17 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
     Wall-clock budgets are soft and checked between operations.
     """
     device=next(policy.parameters()).device;cfg=policy.cfg
-    if preserve_matched_regions and (cfg.policy_head!='replacement' or not getattr(cfg,'stylesheets',False)):
+    protection=preserve_matched_regions or preserve_matched_geometry
+    if protection and (cfg.policy_head!='replacement' or not getattr(cfg,'stylesheets',False)):
         raise ValueError('Matched-region preservation requires a CSS-owner replacement policy')
+    if preserve_matched_regions and preserve_matched_geometry:
+        raise ValueError('Choose pixel OR geometry protection, not both')
+    if preserve_matched_geometry:
+        from .visual import VISUAL_GEOMETRY_CONTRACT
+        if cfg.mode!='abstract' or getattr(cfg,'visual_geometry_contract',None)!=VISUAL_GEOMETRY_CONTRACT:
+            raise ValueError('Geometry protection requires the abstract full-visible DOM policy')
+        # Geometry mode never uses RGB equality for protection or termination.
+        pixel_goal_fraction=-1
     if cfg.mode=='abstract' and goal_threshold!=-1:
         raise ValueError('TUIDE uses the pixel goal; abstract MAE goal_threshold must be -1')
     if pixel_goal_fraction!=-1 and not 0<=pixel_goal_fraction<=1:
@@ -91,7 +103,10 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
                  rolled_back_actions=0,best_state_restored=False)
     stats.update(preserve_matched_regions=preserve_matched_regions,
                  preservation_seconds=0.,preservation_rollbacks=0,noop_skips=0)
-    blocked_owners=set()
+    stats.update(preserve_matched_geometry=preserve_matched_geometry,
+                 geometry_tolerance_px=geometry_tolerance_px,geometry_tolerance_fraction=geometry_tolerance_fraction,
+                 geometry_goal_reached=False)
+    blocked_owners=set();geometry_anchors={};geometry_report=None
     source_target=None
     if cfg.mode=='screenshot' or pixel_goal_fraction>=0 or preserve_matched_regions:
         with Image.open(target_path) as image:source_target=image.convert('RGB')
@@ -201,13 +216,28 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
                     stats['stop_reason']='no_editable_declarations'
                     break
                 allowed_owners=None;protected={}
-                if preserve_matched_regions:
+                if protection:
                     from .edit_preservation import matching_regions,editable_owners
                     guard_start=time.perf_counter()
-                    protected=matching_regions(goal_target,current_rgb,{id:box for id,box in boxes.items() if id!=root},pixel_goal_tolerance)
+                    if preserve_matched_geometry:
+                        from .geometry_preservation import match_geometry
+                        geometry_items=elements(current_tree,boxes,viewport,feedback.get('current_clip_boxes'))
+                        geometry_report=match_geometry(items,geometry_items,boxes,viewport,
+                                                       geometry_tolerance_px,geometry_tolerance_fraction)
+                        for id in geometry_report['protected_ids']:
+                            geometry_anchors.setdefault(id,list(boxes[id]))
+                        protected=geometry_anchors
+                        stats['geometry_last_match']=geometry_report
+                        if geometry_report['goal']:
+                            stats['preservation_seconds']+=time.perf_counter()-guard_start
+                            stats['history'].append(dict(step=step,action=None,geometry_match=geometry_report))
+                            stats.update(stop_reason='geometry_goal',goal_reached=True,geometry_goal_reached=True)
+                            break
+                    else:
+                        protected=matching_regions(goal_target,current_rgb,{id:box for id,box in boxes.items() if id!=root},pixel_goal_tolerance)
                     allowed_owners=editable_owners(owner_state['owners'],protected,blocked_owners)
                     valid_tokens=set(policy.tokenizer.allowed([],len(state),state=state))
-                    allowed_owners=[i for i in allowed_owners if policy.tokenizer.ids[f'N{i}'] in valid_tokens]
+                    allowed_owners=[i for i in allowed_owners if policy.tokenizer.ids.get(f'N{i}') in valid_tokens]
                     stats['preservation_seconds']+=time.perf_counter()-guard_start
                     if not allowed_owners:
                         stats['history'].append(dict(step=step,action=None,protected_ids=list(protected)))
@@ -217,7 +247,7 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
                 sync(device);pair_elapsed=time.perf_counter()-pair_start
                 stats['pair_encoding_seconds']+=pair_elapsed
                 action=(policy.predict(batch,target_tensor,current_tensor,[state],pair,allowed_owners=allowed_owners)
-                        if preserve_matched_regions else policy.predict(batch,target_tensor,current_tensor,[state],pair))
+                        if protection else policy.predict(batch,target_tensor,current_tensor,[state],pair))
                 stats['pair_image_encodings']+=1;stats['target_image_encodings']+=1
             elif cfg.policy_head=='autoregressive':
                 sync(device);pair_start=time.perf_counter()
@@ -246,7 +276,8 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
             history['css_owner']=owner_state['owners'][action[0]]
         stats['history'].append(history)
         if action is None:stats['stop_reason']='policy_stop';break
-        if preserve_matched_regions:
+        if protection:
+            if preserve_matched_geometry:history['geometry_match']=geometry_report
             history['protected_ids']=list(protected)
             if action[0] not in allowed_owners:
                 raise ValueError('Policy ignored the protected-owner mask')
@@ -274,17 +305,22 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
             stats.update(failed=True,error=str(exc),stop_reason='invalid_action')
             break
         candidate_html=browser.page.content();stats['layout_seconds']+=time.perf_counter()-t
-        if preserve_matched_regions:
-            from .edit_preservation import violated_regions
-            from .explicit_html import feedback_screenshot
+        if protection:
             guard_start=time.perf_counter()
-            png=feedback_screenshot(browser,animations='disabled');browser.screenshots+=1
-            with Image.open(io.BytesIO(png)) as image:
-                violations=violated_regions(goal_target,image.convert('RGB'),protected,pixel_goal_tolerance)
+            if preserve_matched_geometry:
+                from .geometry_preservation import violated_boxes
+                candidate_boxes=browser.tagged_boxes(ids);stats['dom_queries']+=1
+                violations=violated_boxes(geometry_anchors,candidate_boxes)
+            else:
+                from .edit_preservation import violated_regions
+                from .explicit_html import feedback_screenshot
+                png=feedback_screenshot(browser,animations='disabled');browser.screenshots+=1
+                with Image.open(io.BytesIO(png)) as image:
+                    violations=violated_regions(goal_target,image.convert('RGB'),protected,pixel_goal_tolerance)
             if violations:
                 browser.load(current_html,viewport)
                 blocked_owners.add(action[0])
-                history.update(accepted=False,rejection='changed_matching_region',violated_ids=violations)
+                history.update(accepted=False,rejection='changed_matching_geometry' if preserve_matched_geometry else 'changed_matching_region',violated_ids=violations)
                 stats['preservation_rollbacks']+=1;stats['rolled_back_actions']+=1
                 stats['preservation_seconds']+=time.perf_counter()-guard_start
                 continue
@@ -292,6 +328,18 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
             stats['preservation_seconds']+=time.perf_counter()-guard_start
         history['accepted']=True;current_html=candidate_html;stats['actions']+=1
         stats['_last_success_html']=current_html
+    if preserve_matched_geometry and stats['stop_reason']=='steps' and stats['actions']:
+        from .geometry_preservation import match_geometry
+        guard_start=time.perf_counter()
+        final_boxes=browser.tagged_boxes(ids);final_boxes[root]=[0,0,*viewport];stats['dom_queries']+=1
+        current_tree=refresh_geometry(current_tree,final_boxes)
+        final_feedback=feedback_metadata(browser,current_tree)
+        final_items=elements(current_tree,final_boxes,viewport,final_feedback.get('current_clip_boxes'))
+        stats['geometry_last_match']=match_geometry(items,final_items,final_boxes,viewport,
+                                                   geometry_tolerance_px,geometry_tolerance_fraction)
+        if stats['geometry_last_match']['goal']:
+            stats.update(stop_reason='geometry_goal',goal_reached=True,geometry_goal_reached=True)
+        stats['preservation_seconds']+=time.perf_counter()-guard_start
     if pixel_goal_fraction>=0 and stats['stop_reason']=='steps' and stats['actions']:
         from .explicit_html import feedback_screenshot
         t=time.perf_counter();png=feedback_screenshot(browser,animations='disabled');browser.screenshots+=1
@@ -314,6 +362,7 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
         stats['actions']=0
         stats['best_state_restored']=False
         stats['goal_reached']=False
+        stats['geometry_goal_reached']=False
     else:stats['scroll_guard_rolled_back']=False
     stats['scroll_guard_seconds']+=time.perf_counter()-t
     stats.pop('_scroll_verification_pending',None)
@@ -370,7 +419,8 @@ def evaluate(args):
                    **({'application_html':digest(r['methods']['initial']['application_html'])}
                       if r.get('methods',{}).get('initial',{}).get('application_html') else {})} for r in rows],
         'settings':{k:v for k,v in vars(args).items() if k not in ('out','resume') and
-                    not (k in ('reference_dom_ablation','preserve_matched_regions') and not v)}},args.resume)
+                    not (k in ('reference_dom_ablation','preserve_matched_regions','preserve_matched_geometry') and not v) and
+                    not (k in ('geometry_tolerance_px','geometry_tolerance_fraction') and not getattr(args,'preserve_matched_geometry',False))}},args.resume)
     # Startup and warmup are excluded equally. No real target is parsed in warmup.
     if args.warmup:
         with torch.inference_mode():
@@ -418,7 +468,10 @@ def evaluate(args):
                             oracle,record.get('evaluation_target_boxes'),
                             getattr(args,'abstract_goal_threshold',-1) if methods[method].cfg.semantic else args.goal_threshold,
                             getattr(args,'pixel_goal_fraction',.99),getattr(args,'pixel_goal_tolerance',.005),
-                            preserve_matched_regions=getattr(args,'preserve_matched_regions',False))
+                            preserve_matched_regions=getattr(args,'preserve_matched_regions',False),
+                            preserve_matched_geometry=getattr(args,'preserve_matched_geometry',False),
+                            geometry_tolerance_px=getattr(args,'geometry_tolerance_px',2.),
+                            geometry_tolerance_fraction=getattr(args,'geometry_tolerance_fraction',.002))
                         if stats.get('failed'):error=stats.get('error') or 'Rollout failed'
                         if initial.get('application_html'):
                             from .application_repair import restore_application

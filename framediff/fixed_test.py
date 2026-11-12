@@ -160,7 +160,10 @@ def evaluate_page(args,row,page,out,browser,methods,parser):
                     goal_threshold=(args.abstract_goal_threshold if policy.cfg.mode=='abstract' else args.goal_threshold),
                     pixel_goal_fraction=getattr(args,'pixel_goal_fraction',.99),
                     pixel_goal_tolerance=getattr(args,'pixel_goal_tolerance',.005),
-                    preserve_matched_regions=getattr(args,'preserve_matched_regions',False))
+                    preserve_matched_regions=getattr(args,'preserve_matched_regions',False),
+                    preserve_matched_geometry=getattr(args,'preserve_matched_geometry',False),
+                    geometry_tolerance_px=getattr(args,'geometry_tolerance_px',2.),
+                    geometry_tolerance_fraction=getattr(args,'geometry_tolerance_fraction',.002))
                 if stats.get('failed'):error=stats.get('error') or 'Rollout failed'
             except Exception as exc:error=str(exc)
             html_path=work/f'{method}-r{repeat}.html';html_path.write_text(html)
@@ -191,7 +194,8 @@ def evaluate_page(args,row,page,out,browser,methods,parser):
                 pixel_goal_seconds=stats.get('pixel_goal_seconds',0.),
                 preservation_seconds=stats.get('preservation_seconds',0.),
                 preservation_rollbacks=stats.get('preservation_rollbacks',0),
-                noop_skips=stats.get('noop_skips',0))
+                noop_skips=stats.get('noop_skips',0),
+                geometry_goal_reached=stats.get('geometry_goal_reached',False))
             record={'id':row['id'],'page_id':page_id,
                 'logical_page_id':row.get('page_id',page_id),'view':row.get('view','legacy'),
                 'method':method,'repeat':repeat,
@@ -280,6 +284,8 @@ def evaluate(args):
     out=Path(args.out).resolve()
     settings={k:v for k,v in vars(args).items() if k not in ('out','resume','workers','inference_batch_size','batch_wait_ms')}
     if not settings.get('preserve_matched_regions'):settings.pop('preserve_matched_regions',None)
+    if not settings.get('preserve_matched_geometry'):
+        for key in ('preserve_matched_geometry','geometry_tolerance_px','geometry_tolerance_fraction'):settings.pop(key,None)
     if not settings.get('oracle_ablation'):settings.pop('oracle_ablation',None)
     paths=[args.data,args.pages,args.raw_checkpoint,args.abstract_checkpoint,args.detector_checkpoint]
     guard_run(out,{'kind':KIND,'inputs':{p:digest(p) for p in paths if p},'settings':settings},args.resume)
@@ -319,7 +325,8 @@ def evaluate(args):
                     'seconds','browser_executions','browser_screenshots'):
             item[key]=statistics.mean(r[key] for r in selected)
         item['geometry_improvement_rate']=statistics.mean(r['final_box_iou']>r['initial_box_iou'] for r in selected)
-        item['pixel_goal_rate']=statistics.mean(r.get('goal_reached',False) for r in selected)
+        item['pixel_goal_rate']=statistics.mean(r.get('stop_reason')=='pixel_goal' for r in selected)
+        item['geometry_goal_rate']=statistics.mean(r.get('geometry_goal_reached',False) for r in selected)
         checked=[r['pixel_match_fraction'] for r in selected if r.get('pixel_match_fraction') is not None]
         item['mean_pixel_match_fraction']=statistics.mean(checked) if checked else None
         item['scroll_rollback_rate']=statistics.mean(r.get('scroll_guard_rolled_back',False) for r in selected)
