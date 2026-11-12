@@ -131,6 +131,7 @@ def add_parsers(sub):
                    help='Maximum normalized difference allowed in every RGB channel of a matching pixel')
     p.add_argument('--time-budget',type=float,default=0.,help='Per-method seconds including target preprocessing; soft operation-boundary limit')
     p.add_argument('--oracle-ablation',action='store_true',help='Controlled visual-build-data pages ONLY')
+    p.add_argument('--reference-dom-ablation',action='store_true',help='Diagnostic: compare the same policy using verified reference DOM target labels')
     p.add_argument('--resume',action='store_true')
     for k,v in [('steps',20),('repeats',3),('warmup',1),('limit',0),('seed',42),('cpu-threads',4)]:p.add_argument('--'+k,type=int,default=v)
     p=sub.add_parser('visual-test-rollout',help='Evaluate frozen held-out WebUI CSS corruptions and export repaired HTML/PNG')

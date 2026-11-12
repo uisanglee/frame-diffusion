@@ -322,9 +322,11 @@ def evaluate(args):
                            'visual-comparison-v3-dom-boundary'),'data':digest(args.data),
         'checkpoints':[digest(p) for p in (args.raw_checkpoint if not abstract_only else None,args.abstract_checkpoint,args.detector_checkpoint) if p],
         'assets':[{**{k:digest(r[k]) for k in ('screenshot','tagged_html') if r.get(k)},
+                   **({'oracle_reference_html':digest(r['html'])} if getattr(args,'reference_dom_ablation',False) else {}),
                    **({'application_html':digest(r['methods']['initial']['application_html'])}
                       if r.get('methods',{}).get('initial',{}).get('application_html') else {})} for r in rows],
-        'settings':{k:v for k,v in vars(args).items() if k not in ('out','resume')}},args.resume)
+        'settings':{k:v for k,v in vars(args).items() if k not in ('out','resume') and
+                    not (k=='reference_dom_ablation' and not v)}},args.resume)
     # Startup and warmup are excluded equally. No real target is parsed in warmup.
     if args.warmup:
         with torch.inference_mode():
@@ -338,6 +340,7 @@ def evaluate(args):
         sync(device)
     methods={'abstract-policy':abstract} if abstract_only else {'screenshot-policy':raw,'abstract-policy':abstract}
     if args.oracle_ablation:methods['abstract-oracle']=abstract
+    if getattr(args,'reference_dom_ablation',False):methods['abstract-oracle']=abstract
     results=[];timings=[];rng=random.Random(args.seed)
     with HtmlBrowser() as browser:
         for index,source in enumerate(rows):
@@ -360,9 +363,12 @@ def evaluate(args):
                             raise ValueError('Run web-prepare --repair-conditioning visual with the v3 no-padding/gap action contract')
                         oracle=None
                         if method=='abstract-oracle':
-                            if not str(record.get('construction','')).startswith('controlled') or 'evaluation_target_boxes' not in record:
+                            if getattr(args,'reference_dom_ablation',False):
+                                from .repair_budget_diagnosis import reference_elements
+                                oracle=reference_elements(record,browser,out.parent/'reference-label-cache')
+                            elif not str(record.get('construction','')).startswith('controlled') or 'evaluation_target_boxes' not in record:
                                 raise ValueError('Oracle ablation only supports visual-build-data controlled pages')
-                            oracle=elements(record['current'],record['evaluation_target_boxes'],record['viewport'])
+                            else:oracle=elements(record['current'],record['evaluation_target_boxes'],record['viewport'])
                         html,stats,target=rollout(browser,Path(record['tagged_html']).read_text(),record['current'],
                             record['viewport'],record['screenshot'],methods[method],parser,args.threshold,args.steps,args.time_budget,
                             oracle,record.get('evaluation_target_boxes'),
@@ -412,7 +418,7 @@ def evaluate(args):
                         'repair_seconds':trial['seconds'],
                         'input_tokens':initial.get('input_tokens',0),'output_tokens':initial.get('output_tokens',0),
                         'feedback_browser_screenshots':trial.get('browser_screenshots',0),
-                        'feedback_mode':method,'target_source':'image','visual_timing':numeric}
+                        'feedback_mode':method,'target_source':('reference-dom-oracle' if method=='abstract-oracle' else 'image'),'visual_timing':numeric}
                     for key in ('application_html','application_capture','application_patch_verification'):
                         if key in trial:trial_record['methods'][method][key]=trial[key]
                 page_results.append(trial_record)
