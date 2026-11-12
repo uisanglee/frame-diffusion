@@ -36,13 +36,13 @@ def pixel_match_fraction(target,current,tolerance=.005):
 
 def rollout(browser,html,tree,viewport,target_path,policy,parser=None,threshold=.4,
             steps=10,time_budget=0,oracle_elements=None,diagnostic_target_boxes=None,goal_threshold=-1,
-            pixel_goal_fraction=.99,pixel_goal_tolerance=.005):
+            pixel_goal_fraction=.99,pixel_goal_tolerance=.005,preserve_matched_regions=False):
     """Keep partial work and costs even when an execution/verification fails."""
     stats={};started=time.perf_counter();before=browser.executions;shots=browser.screenshots
     try:
         return _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,steps,time_budget,
                         oracle_elements,diagnostic_target_boxes,goal_threshold,
-                        pixel_goal_fraction,pixel_goal_tolerance,stats)
+                        pixel_goal_fraction,pixel_goal_tolerance,preserve_matched_regions,stats)
     except Exception as exc:
         raise_if_fatal(exc)
         # The browser may be dead or contain a partially applied failed edit.
@@ -59,14 +59,17 @@ def rollout(browser,html,tree,viewport,target_path,policy,parser=None,threshold=
 
 def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
              steps,time_budget,oracle_elements,diagnostic_target_boxes,goal_threshold,
-             pixel_goal_fraction,pixel_goal_tolerance,stats):
+             pixel_goal_fraction,pixel_goal_tolerance,preserve_matched_regions,stats):
     """Only the explicitly enabled oracle ablation accepts target elements.
 
     Autoregressive policies have no learned STOP. Both modalities apply one
-    predicted CSS action per step without an image-error rollback.
+    predicted CSS action per step; optional matched-region protection masks owners
+    and rolls back edits that disturb already matching screenshot regions.
     Wall-clock budgets are soft and checked between operations.
     """
     device=next(policy.parameters()).device;cfg=policy.cfg
+    if preserve_matched_regions and (cfg.policy_head!='replacement' or not getattr(cfg,'stylesheets',False)):
+        raise ValueError('Matched-region preservation requires a CSS-owner replacement policy')
     if cfg.mode=='abstract' and goal_threshold!=-1:
         raise ValueError('TUIDE uses the pixel goal; abstract MAE goal_threshold must be -1')
     if pixel_goal_fraction!=-1 and not 0<=pixel_goal_fraction<=1:
@@ -86,10 +89,13 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
                  acceptance_metric='semantic_mae' if cfg.semantic else 'image_mae')
     stats.update(monotonic_abstract_mae=False,attempted_actions=0,
                  rolled_back_actions=0,best_state_restored=False)
+    stats.update(preserve_matched_regions=preserve_matched_regions,
+                 preservation_seconds=0.,preservation_rollbacks=0,noop_skips=0)
+    blocked_owners=set()
     source_target=None
-    if cfg.mode=='screenshot' or pixel_goal_fraction>=0:
+    if cfg.mode=='screenshot' or pixel_goal_fraction>=0 or preserve_matched_regions:
         with Image.open(target_path) as image:source_target=image.convert('RGB')
-    goal_target=np.asarray(source_target,dtype=np.int16) if pixel_goal_fraction>=0 else None
+    goal_target=np.asarray(source_target,dtype=np.int16) if pixel_goal_fraction>=0 or preserve_matched_regions else None
     t=time.perf_counter()
     if cfg.mode=='abstract':
         if oracle_elements is None:
@@ -147,7 +153,7 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
         feedback=feedback_metadata(browser,current_tree)
         t=time.perf_counter()
         current_rgb=None
-        if cfg.mode=='screenshot' or pixel_goal_fraction>=0:
+        if cfg.mode=='screenshot' or pixel_goal_fraction>=0 or preserve_matched_regions:
             from .explicit_html import feedback_screenshot
             png=feedback_screenshot(browser,animations='disabled');browser.screenshots+=1
             with Image.open(io.BytesIO(png)) as image:current_rgb=image.convert('RGB')
@@ -194,11 +200,24 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
                 if getattr(cfg,'existing_values_only',False) and not policy.tokenizer.allowed([],len(state),state=state):
                     stats['stop_reason']='no_editable_declarations'
                     break
+                allowed_owners=None;protected={}
+                if preserve_matched_regions:
+                    from .edit_preservation import matching_regions,editable_owners
+                    guard_start=time.perf_counter()
+                    protected=matching_regions(goal_target,current_rgb,{id:box for id,box in boxes.items() if id!=root},pixel_goal_tolerance)
+                    allowed_owners=editable_owners(owner_state['owners'],protected,blocked_owners)
+                    valid_tokens=set(policy.tokenizer.allowed([],len(state),state=state))
+                    allowed_owners=[i for i in allowed_owners if policy.tokenizer.ids[f'N{i}'] in valid_tokens]
+                    stats['preservation_seconds']+=time.perf_counter()-guard_start
+                    if not allowed_owners:
+                        stats['history'].append(dict(step=step,action=None,protected_ids=list(protected)))
+                        stats['stop_reason']='no_unprotected_editable_owners';break
                 sync(device);pair_start=time.perf_counter()
                 pair=policy.encode_pair(target_tensor,current_tensor)
                 sync(device);pair_elapsed=time.perf_counter()-pair_start
                 stats['pair_encoding_seconds']+=pair_elapsed
-                action=policy.predict(batch,target_tensor,current_tensor,[state],pair)
+                action=(policy.predict(batch,target_tensor,current_tensor,[state],pair,allowed_owners=allowed_owners)
+                        if preserve_matched_regions else policy.predict(batch,target_tensor,current_tensor,[state],pair))
                 stats['pair_image_encodings']+=1;stats['target_image_encodings']+=1
             elif cfg.policy_head=='autoregressive':
                 sync(device);pair_start=time.perf_counter()
@@ -227,6 +246,15 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
             history['css_owner']=owner_state['owners'][action[0]]
         stats['history'].append(history)
         if action is None:stats['stop_reason']='policy_stop';break
+        if preserve_matched_regions:
+            history['protected_ids']=list(protected)
+            if action[0] not in allowed_owners:
+                raise ValueError('Policy ignored the protected-owner mask')
+            from .tree_edits import FIELDS
+            if list(action[2:])==list(state[action[0]][FIELDS.index(action[1])]):
+                history.update(accepted=False,rejection='unchanged_declaration')
+                blocked_owners.add(action[0]);stats['noop_skips']+=1
+                continue
         if time_budget and time.perf_counter()-start>=time_budget:stats['stop_reason']='time_budget';break
         t=time.perf_counter()
         stats['attempted_actions']+=1
@@ -246,6 +274,22 @@ def _rollout(browser,html,tree,viewport,target_path,policy,parser,threshold,
             stats.update(failed=True,error=str(exc),stop_reason='invalid_action')
             break
         candidate_html=browser.page.content();stats['layout_seconds']+=time.perf_counter()-t
+        if preserve_matched_regions:
+            from .edit_preservation import violated_regions
+            from .explicit_html import feedback_screenshot
+            guard_start=time.perf_counter()
+            png=feedback_screenshot(browser,animations='disabled');browser.screenshots+=1
+            with Image.open(io.BytesIO(png)) as image:
+                violations=violated_regions(goal_target,image.convert('RGB'),protected,pixel_goal_tolerance)
+            if violations:
+                browser.load(current_html,viewport)
+                blocked_owners.add(action[0])
+                history.update(accepted=False,rejection='changed_matching_region',violated_ids=violations)
+                stats['preservation_rollbacks']+=1;stats['rolled_back_actions']+=1
+                stats['preservation_seconds']+=time.perf_counter()-guard_start
+                continue
+            blocked_owners.clear()
+            stats['preservation_seconds']+=time.perf_counter()-guard_start
         history['accepted']=True;current_html=candidate_html;stats['actions']+=1
         stats['_last_success_html']=current_html
     if pixel_goal_fraction>=0 and stats['stop_reason']=='steps' and stats['actions']:
@@ -326,7 +370,7 @@ def evaluate(args):
                    **({'application_html':digest(r['methods']['initial']['application_html'])}
                       if r.get('methods',{}).get('initial',{}).get('application_html') else {})} for r in rows],
         'settings':{k:v for k,v in vars(args).items() if k not in ('out','resume') and
-                    not (k=='reference_dom_ablation' and not v)}},args.resume)
+                    not (k in ('reference_dom_ablation','preserve_matched_regions') and not v)}},args.resume)
     # Startup and warmup are excluded equally. No real target is parsed in warmup.
     if args.warmup:
         with torch.inference_mode():
@@ -373,7 +417,8 @@ def evaluate(args):
                             record['viewport'],record['screenshot'],methods[method],parser,args.threshold,args.steps,args.time_budget,
                             oracle,record.get('evaluation_target_boxes'),
                             getattr(args,'abstract_goal_threshold',-1) if methods[method].cfg.semantic else args.goal_threshold,
-                            getattr(args,'pixel_goal_fraction',.99),getattr(args,'pixel_goal_tolerance',.005))
+                            getattr(args,'pixel_goal_fraction',.99),getattr(args,'pixel_goal_tolerance',.005),
+                            preserve_matched_regions=getattr(args,'preserve_matched_regions',False))
                         if stats.get('failed'):error=stats.get('error') or 'Rollout failed'
                         if initial.get('application_html'):
                             from .application_repair import restore_application

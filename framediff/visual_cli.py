@@ -125,6 +125,7 @@ def add_parsers(sub):
                    help='Legacy RGB MAE stop, used only when --pixel-goal-fraction -1')
     p.add_argument('--abstract-goal-threshold',type=float,default=-1,
                    help='Reserved for compatibility; use the pixel goal for TUIDE')
+    p.add_argument('--preserve-matched-regions',action='store_true',help='Protect screenshot-matching DOM regions and roll back edits that disturb them (CSS-owner replacement policies)')
     p.add_argument('--pixel-goal-fraction',type=float,default=.99,
                    help='Stop when this fraction of full-resolution RGB pixels matches; -1 disables')
     p.add_argument('--pixel-goal-tolerance',type=float,default=.005,
@@ -147,6 +148,7 @@ def add_parsers(sub):
     p.add_argument('--goal-threshold',type=float,default=-1)
     p.add_argument('--abstract-goal-threshold',type=float,default=-1,
                    help='Reserved for compatibility; use the pixel goal for TUIDE')
+    p.add_argument('--preserve-matched-regions',action='store_true',help='Protect screenshot-matching DOM regions and roll back edits that disturb them (CSS-owner replacement policies)')
     p.add_argument('--pixel-goal-fraction',type=float,default=.99,
                    help='Stop when this fraction of full-resolution RGB pixels matches; -1 disables')
     p.add_argument('--pixel-goal-tolerance',type=float,default=.005,

@@ -178,8 +178,10 @@ def prepare(args):
 
 
 def report(args):
-    out=Path(args.out).resolve(); measurements=list(read_jsonl(out/'inputs/severity.jsonl'))
-    coverage=json.loads((out/'inputs/coverage.json').read_text())
+    out=Path(args.out).resolve();out.mkdir(parents=True,exist_ok=True)
+    inputs=Path(getattr(args,'inputs',None) or out/'inputs').resolve()
+    measurements=list(read_jsonl(inputs/'severity.jsonl'))
+    coverage=json.loads((inputs/'coverage.json').read_text())
     lines=['# Same-DOM severity diagnosis', '', f'Coverage: {coverage}', '',
         'Same pages, editable sites and directions; only CSS magnitudes vary. All corruptions have a verified pixel-exact teacher restoration.',
         'Aligned Box IoU uses known same-DOM correspondences; it is not the cross-DOM VLM benchmark IoU.', '',
@@ -225,6 +227,7 @@ def report(args):
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('stage',choices=['prepare','report']);p.add_argument('--out',required=True)
+    p.add_argument('--inputs',help='Report only: reuse an existing severity input directory')
     p.add_argument('--data',default='data/new/7000/css/policy-test.jsonl')
     p.add_argument('--samples',type=int,default=20);p.add_argument('--sites',type=int,default=4)
     p.add_argument('--seed',type=int,default=42)
