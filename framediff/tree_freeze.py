@@ -3,6 +3,7 @@ import hashlib
 from collections import Counter
 from pathlib import Path
 
+from .corruption_mix import CONTRACT as MIX_CONTRACT, summary
 from .css_owners import CONTRACT
 from .ir import read_json,read_jsonl
 from .tree_online import ONLINE_CONTRACT,OnlineSampler,target_pool,asset_signatures
@@ -26,9 +27,14 @@ def _freeze_page(task):
     args,out,split,index,target = task
     page_dir=out/split/hashlib.sha256(target['id'].encode()).hexdigest()
     cached=page_dir/'record.json';signature=asset_signatures([target])
+    policy=getattr(args,'corruption_policy','legacy')
+    recipe=dict(policy=policy,contract=MIX_CONTRACT,seed=args.seed,max_noise=args.max_noise,samples=args.samples_per_page)
+    if policy=='mixed' and (args.samples_per_page%5 or args.max_noise<2):
+        raise ValueError('Mixed frozen sets need samples-per-page divisible by 5 and max-noise >= 2')
     if args.resume and cached.exists():
         saved=read_json(cached)
         if saved['signature']!=signature:raise ValueError('Frozen target assets changed; use a new output directory')
+        if saved.get('recipe')!=recipe:raise ValueError('Frozen corruption recipe changed; use a new output directory')
         new=saved['rows']
         for row in new:
             if row.get('visual_geometry_contract')!=target.get('visual_geometry_contract'):
@@ -36,7 +42,7 @@ def _freeze_page(task):
             if not Path(row['current_html']).is_file() or not Path(row['current_image']).is_file():
                 raise ValueError('Incomplete frozen page assets')
     else:
-        sampler=OnlineSampler([target],'screenshot',seed=args.seed,max_noise=args.max_noise)
+        sampler=OnlineSampler([target],'screenshot',seed=args.seed,max_noise=args.max_noise,corruption_policy=policy)
         new=[]
         try:
             page_dir.mkdir(parents=True,exist_ok=True)
@@ -46,7 +52,7 @@ def _freeze_page(task):
                 html.write_text(row.pop('current_html_text'));png.write_bytes(row['current_image'])
                 row.update(split=split,current_html=str(html),current_image=str(png))
                 new.append(row)
-            write_json(cached,{'signature':signature,'rows':new})
+            write_json(cached,{'signature':signature,'recipe':recipe,'rows':new})
         except Exception as exc:
             return [], {'id':target['id'],'error':str(exc)}
         finally:sampler.close()
@@ -66,6 +72,7 @@ def freeze(args):
         raise ValueError('Prepare nonempty, matching action-contract labels first')
     corruption_contract=ONLINE_CONTRACT
     guard_run(out,{'kind':CONTRACT+'-fixed-v1','corruption_contract':corruption_contract,
+        'corruption_policy':getattr(args,'corruption_policy','legacy'),'mixture_contract':MIX_CONTRACT,
         'data':{str(p):digest(p) for p in files},
         'seed':args.seed,'max_noise':args.max_noise,'samples':args.samples_per_page,
         'observation_size':getattr(args,'observation_size',384)},args.resume)
@@ -102,12 +109,13 @@ def freeze(args):
                 counts['property/'+edit[1]]+=1
             if (index+1)%50==0 or index==len(pool)-1:
                 print(f'{split} fixed CSS corruption [{index+1}/{len(pool)}], kept={len(kept)}, failures={len(errors)}',flush=True)
+        write_jsonl(out/f'corruption-{split}.jsonl',[dict(id=r['id'],**r['corruption_geometry']) for r in kept if 'corruption_geometry' in r])
         write_jsonl(out/f'policy-{split}.jsonl',kept);write_jsonl(out/f'pages-{split}.jsonl',selected)
         write_jsonl(out/f'rejections-{split}.jsonl',errors)
         input_pages={r.get('page_id',r['id']) for r in pages.values()}
         kept_pages={r.get('page_id',r['id']) for r in selected}
         report[split]={'corruption_contract':corruption_contract,'pages':len(kept_pages),
             'page_views':len(selected),'rows':len(kept),'failed_pages':len(input_pages-kept_pages),
-            'failed_page_views':len(pages)-len(selected),'teachers':dict(counts)}
+            'failed_page_views':len(pages)-len(selected),'teachers':dict(counts),'geometry':summary(kept)}
         if not kept:raise ValueError(f'Empty frozen {split}; inspect rejection report')
     write_json(out/'freeze-report.json',report)

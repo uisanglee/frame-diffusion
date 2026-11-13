@@ -32,7 +32,7 @@ case "${CSS_STYLESHEETS:-0}" in
   *) echo 'CSS_STYLESHEETS must be 0 or 1' >&2; exit 2 ;;
 esac
 case "${ONLINE_CORRUPTION:-1}" in
-  1) online=(--online-corruption --online-targets "$rendered/pages-train.jsonl"
+  1) online=(--online-corruption --corruption-policy "${CORRUPTION_POLICY:-mixed}" --online-targets "$rendered/pages-train.jsonl"
         --online-workers "${ONLINE_WORKERS:-2}" --online-prefetch "${ONLINE_PREFETCH:-4}"
         --online-max-noise "${ONLINE_MAX_NOISE:-4}" --online-timeout "${ONLINE_TIMEOUT:-180}") ;;
   0) ;;
@@ -57,7 +57,7 @@ done
 if [[ "$needs_predicted_targets" == 1 ]]; then
   [[ -f "$detector" ]] || { echo "Missing detector: $detector" >&2; exit 2; }
   if [[ "$prepare" == 1 ]]; then
-    echo 'Run scripts/prepare_numeric_policy_tree.sh once, then set PREPARE_DATA=0.' >&2
+    echo 'Use the published CSS-first data and visual-cache-targets for train/val, then set PREPARE_DATA=0. See docs/numeric-policy.md.' >&2
     exit 2
   fi
   for required in predicted-train/data.jsonl predicted-val/data.jsonl; do

@@ -439,9 +439,11 @@ def sample_mutation(state, viewport, rng, explicit=False, sites=None):
 
 
 class OnlineSampler:
-    def __init__(self, targets, mode, seed=42, max_noise=4, attempts=8, stop=None, parent_first=False, export_html=True):
+    def __init__(self, targets, mode, seed=42, max_noise=4, attempts=8, stop=None, parent_first=False, export_html=True, corruption_policy="legacy"):
         if mode not in ('abstract','screenshot') or min(max_noise,attempts)<1: raise ValueError('Invalid online configuration')
         self.targets=targets;self.mode=mode;self.seed=seed;self.max_noise=max_noise;self.attempts=attempts;self.stop=stop
+        if corruption_policy not in ("legacy", "mixed"):raise ValueError("Unknown corruption policy")
+        self.corruption_policy=corruption_policy
         self.by_id={t['id']:t for t in targets}
         self.by_page={}
         for target in targets:self.by_page.setdefault(target.get('page_id',target['id']),[]).append(target)
@@ -481,6 +483,8 @@ class OnlineSampler:
 
     def generate(self,index):
         rng=random.Random(task_seed(self.seed,index));errors=[]
+        from .corruption_mix import PROFILES, RANGES, CONTRACT as MIX_CONTRACT, geometry_errors
+        profile=PROFILES[index % len(PROFILES)] if self.corruption_policy=="mixed" else "legacy"
         available=self.by_page
         page_ids=self.page_ids
         preparation_failures=Counter()
@@ -543,15 +547,32 @@ class OnlineSampler:
                 state=parsed['state'] if owner_mode else state_now()
                 noise=[];probe_rejections=0
                 eligible={(e[0],e[1]) for e in target['visible_candidates']}
-                for _ in range(rng.randint(1,self.max_noise)):
+                count=(0 if profile=='clean' else min(self.max_noise,4) if profile=='multi'
+                       else 1 if profile!='legacy' else rng.randint(1,self.max_noise))
+                for _ in range(count):
                     if self.stop is not None and self.stop.is_set(): raise RuntimeError('Online producer stopped')
                     sites=[s for s in mutation_sites(state) if (s[0],s[1]) in eligible]
+                    if profile=='multi':
+                        used={m[0] for m in noise}
+                        sites=[site for site in sites if site[0] not in used]
+                    if not sites:break
                     for trial in range(24):
                         mutation=sample_mutation(state,viewport,rng,explicit='data-tuide-explicit-id' in html,sites=sites)
                         # Witness edits ensure even a narrow responsive range
                         # gets tried; their effect is rechecked in this state.
-                        if trial>=12:
+                        if trial>=12 and profile=="legacy":
                             mutation=list(choose_mutation_site(target['visible_candidates'],rng))
+                        if profile in RANGES:
+                            import re
+                            value=state[mutation[0]][FIELDS.index(mutation[1])][0]
+                            match=re.fullmatch(r'([+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))(px|%)?',value)
+                            if not match or (not match[2] and float(match[1])!=0):continue
+                            axis=viewport[0 if mutation[1] in ('width','margin-left','margin-right') else 1]
+                            base=float(match[1]);unit=match[2] or 'px'
+                            delta=rng.uniform(*RANGES[profile])*(100 if unit=='%' else axis)*rng.choice((-1,1))
+                            new=base+delta
+                            if mutation[1] in ('width','height'):new=max(.1,new)
+                            mutation[2]=f'{new:.3f}{unit}'
                         old=state[mutation[0]][FIELDS.index(mutation[1])]
                         if owner_mode:
                             # Preserve cascade priority when mutating an existing
@@ -568,18 +589,18 @@ class OnlineSampler:
                             apply([mutation[0],mutation[1],*old]);probe_rejections+=1;continue
                         frame=after_mask;frame_boxes=after_boxes;state=state_now();noise.append(mutation);break
                 path=repair_path(state,clean,rng.getrandbits(64))
-                if not path: raise ValueError('Corruption returned to clean program')
+                if not path and profile!='clean': raise ValueError('Corruption returned to clean program')
                 # Select an intermediate reverse-path state, not only the
                 # fully corrupted endpoint and not history in reverse order.
-                depth=rng.randrange(len(path)) if path else 0
+                depth=rng.randrange(len(path)) if path and profile=="legacy" else 0
                 for edit in path[:depth]: apply(edit)
                 state=state_now()
                 remaining=path[depth:]
                 if sorted(remaining)!=sorted(repair_path(state,clean)):
                     raise ValueError('CSS execution changed the symbolic repair path')
-                if not remaining: raise ValueError('Sampled clean state has no next edit')
+                if not remaining and profile!='clean': raise ValueError('Sampled clean state has no next edit')
                 frame,boxes,_=abstraction(browser,tree,viewport,size)
-                if not changed(frame,clean_mask):raise ValueError('Remaining CSS differences have no abstraction effect')
+                if profile!='clean' and not changed(frame,clean_mask):raise ValueError('Remaining CSS differences have no abstraction effect')
                 # Reversing other edits can make a formerly active declaration
                 # invisible. Do not emit an unobservable next-action label.
                 teacher=None
@@ -590,8 +611,8 @@ class OnlineSampler:
                     apply([teacher[0],teacher[1],*old])
                     if changed(frame,next_frame):break
                 else:
-                    raise ValueError('No abstraction-changing reverse label')
-                if self.parent_first:
+                    if profile!='clean':raise ValueError('No abstraction-changing reverse label')
+                if self.parent_first and profile!='clean':
                     from .parent_first import improving_teacher
                     teacher,gain=improving_teacher(browser,tree,viewport,size,state,remaining,clean_mask,owners)
                     if teacher is None:raise ValueError('No strictly improving parent-first reverse label')
@@ -601,6 +622,16 @@ class OnlineSampler:
                         'replacement_edit':teacher,
                         'teacher_strategy':css_owners.CONTRACT if owner_mode else CONTRACT,'symbolic_distance':len(remaining),
                         'corruption_contract':ONLINE_CONTRACT}
+                result.pop('clean_target_only',None)
+                result['corruption_policy']=self.corruption_policy
+                measured=geometry_errors(clean_boxes,boxes,viewport,tree['nodes'][0]['id'])
+                result['corruption_geometry']={**measured,
+                    'requested_profile':profile,'changed_declarations':len(remaining),
+                    'changed_owners':len({e[0] for e in remaining}),
+                    'multi_requirement_met':profile!='multi' or (len({e[0] for e in remaining})>=2 and measured['changed_elements']>=2),
+                    'contract':MIX_CONTRACT}
+                if profile=='multi' and not result['corruption_geometry']['multi_requirement_met']:
+                    raise ValueError('Multiple-owner corruption needs at least two active owners')
                 from .explicit_html import feedback_metadata
                 result.update(feedback_metadata(browser,result['current']))
                 if owner_mode:
@@ -616,7 +647,7 @@ class OnlineSampler:
                                   'abstraction_max_difference':float((frame-clean_mask).abs().max()),
                                   'corruptions':noise,'reverse_prefix':depth,'path_length':len(path),
                                   'screenshot_captures':int(self.mode=='screenshot')}
-                if self.parent_first:
+                if self.parent_first and profile!='clean':
                     result['online'].update(parent_first=True,parent_first_gain=gain)
                 if owner_mode and teacher is not None:
                     result['online'].update(probe_rejections=probe_rejections,
@@ -629,7 +660,7 @@ class OnlineSampler:
                 return result
             except Exception as exc:
                 errors.append({'page':target['id'],'view':target.get('view','unknown'),
-                               'error_type':type(exc).__name__,'error':str(exc),
+                               'error_type':type(exc).__name__,'error':str(exc),'requested_profile':profile,
                                'stage':'preparation' if preparing else 'online_generation'})
                 if self.browser is not None:
                     try: self.close()
@@ -654,14 +685,14 @@ class OnlineSampler:
 _sampler=None
 
 
-def _initialize(targets,mode,seed,max_noise,attempts,parent_first,stop):
+def _initialize(targets,mode,seed,max_noise,attempts,parent_first,corruption_policy,stop):
     global _sampler
     import torch
     from .browser import enable_worker_browser,close_worker_browser
     torch.set_num_threads(1)  # No CUDA/model/detector in workers.
     enable_worker_browser()
     Finalize(None,close_worker_browser,exitpriority=8)
-    _sampler=OnlineSampler(targets,mode,seed,max_noise,attempts,stop,parent_first,export_html=False)
+    _sampler=OnlineSampler(targets,mode,seed,max_noise,attempts,stop,parent_first,export_html=False,corruption_policy=corruption_policy)
     Finalize(None,_sampler.view_cache.close,exitpriority=9)
     Finalize(None,_sampler.close,exitpriority=10)
 
@@ -671,10 +702,10 @@ def _generate(index): return _sampler.generate(index)
 
 class OnlineStream:
     """Ordered bounded prefetch; cursor counts CONSUMED, not queued examples."""
-    def __init__(self,targets,mode,seed=42,max_noise=4,workers=2,prefetch=4,attempts=8,timeout=180,start=0,parent_first=False):
+    def __init__(self,targets,mode,seed=42,max_noise=4,workers=2,prefetch=4,attempts=8,timeout=180,start=0,parent_first=False,corruption_policy="legacy"):
         if min(workers,prefetch,attempts,max_noise,timeout)<1 or not math.isfinite(timeout) or start<0:
             raise ValueError('Invalid online stream configuration')
-        self.args=(targets,mode,seed,max_noise,attempts,parent_first)
+        self.args=(targets,mode,seed,max_noise,attempts,parent_first,corruption_policy)
         self.workers=workers;self.prefetch=prefetch;self.timeout=timeout;self.cursor=start;self.next_index=start
         self.pending=deque();self.pool=None;self.timeout_skips=0;self.generation_skips=0
         self.consecutive_generation_skips=0

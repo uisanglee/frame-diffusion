@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Official five-model matrix; BF16 execution requires two GPUs.
+# Official four-model matrix; BF16 execution requires two GPUs.
 set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"

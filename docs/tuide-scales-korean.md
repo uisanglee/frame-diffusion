@@ -1,421 +1,111 @@
-# TUIDE 정책 모델 크기 비교
+# TUIDE S/M/L 학습과 평가
 
-모든 크기의 모델은 고정된 detector, 의미 채널, CSS 문법, 이미지 크기,
-CSS owner 최대 512개, 고정된 val/test 손상 데이터, 준비된 목표 캐시를 공유합니다.
-달라지는 것은 hidden 차원, 트리/디코더 깊이, attention head 수뿐입니다.
+현재 경로는 CSS 우선 적용 WebUI 전처리와 혼합 손상 학습입니다.
+이전 screened 7k/40k·inline-only 실행 안내는 제거했습니다.
+[전처리](webui-css-first-preparation.md), [혼합 손상](mixed-corruption.md),
+[영문 상세 설정](tuide-scales.md)을 함께 참고하세요.
 
-현재 abstract·screenshot 정책 학습은 모두 `visual-tree-train`(`tree_policy.py`)을
-사용합니다. `visual_train.py`는 Detector 학습과 고정 목표 예측만 담당합니다.
-구형 delta-policy 학습(`visual-train-policy`)과 numeric-prefix 전처리
-(`visual-subset-numeric`)는 제거했으며, 과거 정책 체크포인트의 로딩·평가와
-기존 캐시 재사용 기능은 유지합니다.
-
-| 설정 | Hidden | Layers | Heads | Abstract 정책 파라미터 수 |
+| 모델 | Hidden | Layers | Heads | Abstract 정책 파라미터 수 |
 |---|---:|---:|---:|---:|
-| s | 128 | 3 | 4 | 4,766,449 |
-| m | 256 | 6 | 8 | 15,532,325 |
-| l | 512 | 8 | 8 | 67,087,477 |
+| S | 128 | 3 | 4 | 4,766,449 |
+| M | 256 | 6 | 8 | 15,532,325 |
+| L | 512 | 8 | 8 | 67,087,477 |
 
-이 수치에는 정책 모델의 공간 이미지 인코더가 포함됩니다. 고정된 detector의
-파라미터 41,314,536개는 별도입니다. 현재 스타일시트 문법과 owner 512개를
-가정한 수치입니다. 모델을 크게 해도 지원되는 CSS 액션이 늘어나지는 않습니다.
+스타일시트 문법과 CSS owner 최대 512개 기준이며 정책 이미지 인코더를 포함합니다.
+고정 Detector의 41,314,536개 파라미터는 별도입니다. 모든 크기는 동일한 편집
+문법·데이터·Detector·고정 Validation/Test를 사용합니다.
 
-## 물리 GPU 1, 3, 4에서 실행
-
-저장소 루트에서 Python 환경을 활성화한 뒤 실행합니다. 다음 명령어는 기존 v3
-데이터와 detector 캐시를 사용하므로 별도의 전처리 명령어가 필요하지 않습니다.
-다만 학습 중 새로운 online corruption 상태는 계속 렌더링합니다.
-
-온라인 CPU worker는 페이지를 독립적으로 준비합니다. 샘플 하나가 타임아웃되면
-해당 worker와 그 브라우저 자식만 재시작하며, 다른 worker의 대기·완성 결과는
-유지합니다. 학습에는 기존 샘플 인덱스 순서대로 전달합니다. `ONLINE_TIMEOUT`
-(`run_webui_scale.sh` 기본 180초)은 worker 시작을 포함한 실제 작업 시간에
-적용됩니다. 다른 프로세스가 생성하는 공유 캐시의 잠금 대기는 별도의
-`TUIDE_CACHE_LOCK_TIMEOUT`(기본 3600초)으로 제한합니다. 타임아웃 로그의
-`stage`로 `working`과 `cache_wait`를 구분할 수 있습니다. CPU·메모리 여유가
-있을 때 `ONLINE_WORKERS`를 늘리고, `ONLINE_PREFETCH`로 대기 결과 수를 제한하세요.
-
-한 샘플을 재시도해도 동일 페이지·viewport에서 `working` 타임아웃이 반복되면
-`online_timeout_skip`에 `page`, `excluded_view: true`를 기록합니다. 제외 기록은
-공유 캐시의 `online-timeout-exclusions/`에 저장되어 abstract·screenshot 및
-학습 재개에서 재사용됩니다. 이후 선택은 브라우저 준비 전에 건너뛰며, 이미
-진행 중인 작업은 중단하지 않습니다. 다른 viewport는 유지하고 소스·전처리
-기준이 바뀌면 다시 시도합니다. 잠금 대기, 페이지가 확인되지 않은 worker 시작
-실패, 서로 다른 페이지에서 발생한 두 timeout은 페이지 제외로 처리하지 않습니다.
-특정 제외를 취소하려면 해당 JSON 기록을 삭제하세요. 기존 로그만으로는 페이지를
-식별할 수 없으므로 과거 timeout은 자동 등록되지 않습니다.
-
-기존 성공 공유 캐시는 그대로 재사용합니다. 수정 가능한 CSS가 없거나 고정된
-후보 검사에서 시각적 효과를 찾지 못한 확정 실패는 같은 소스·설정 키에
-캐시하여 반복 준비를 막습니다. 일시적인 브라우저·검사 오류는 다시 시도합니다.
-소스나 전처리 기준이 바뀌면 실패 캐시도 무효화됩니다. full-DOM 측정은 브라우저
-질의 한 번으로 묶었으며 박스·후보 판정·teacher 기준은 같습니다. Train 전체
-사전 생성이나 val/test 재생성은 필요하지 않습니다.
-진단 저장을 끄면 새 train 캐시에는 정상 상태와 검사된 수정 후보를 저장하고,
-버려지는 seed 손상 샘플은 생성하지 않습니다. 실제 online corruption은 학습
-샘플마다 계속 생성합니다. 기존 seed가 포함된 캐시도 재사용합니다. 같은 프로세스에서
-이미 검증한 파일은 파일 식별자·크기·수정 시각·변경 시각이 같으면 해시를 재사용합니다.
-DOM 좌표와 조상의 잘림 영역은 한 관측 안에서 재사용하며 CSS 수정 후에는 다시 측정합니다.
-수정 코드는 학습 프로세스를 재시작해야 적용됩니다. 기존 데이터·공유 캐시·run 경로로
-재개하면 되며 추가 학습 옵션은 없습니다.
-
-### Timeout 페이지를 제외한 새 7,000개 실험
-
-기존 master의 도메인별 train/val/test 경계 안에서 새로 5,600/700/700페이지를
-선별합니다. 페이지의 모든 원본 뷰가 통과해야 채택하며, 부족한 수는 같은 split의
-다음 후보로 채웁니다. 기존 HTML·PNG·정상 캐시와 고정 val/test 손상·정답을 재사용합니다.
-새 원본 스캔이나 전체 재렌더링은 하지 않지만, 아직 없는 train 캐시는 생성합니다.
-
-기본 검사는 뷰당 detector 준비, policy 준비, 온라인 screenshot 손상 3회이며
-이 전체 작업에 180초 제한을 적용합니다. screenshot 경로는 abstract 관측도 수행합니다.
-따라서 이 제한은 학습의 샘플 하나당 180초보다 엄격합니다. 기존 timeout 제외 기록도
-반영합니다. 잠금 대기는 페이지 실패로 판정하지 않고 중단 후 재개하도록 합니다.
-이 검사는 모든 가능한 손상에서 timeout이 없음을 보장하지 않으므로 학습 watchdog은 유지합니다.
-
-시간 기준에 서버 부하가 영향을 주므로 기존 학습을 중단한 같은 서버에서 실행하세요.
-
-```bash
-mkdir -p log
-nohup setsid env PYTHONUNBUFFERED=1 PREPARE_WORKERS=4 \
-  SCREEN_TIMEOUT=180 SCREEN_SAMPLES=3 \
-  SCREEN_PID_FILE="$PWD/log/prepare-screened-7k.pid" \
-  bash scripts/prepare_screened_webui_7k.sh \
-  > log/prepare-screened-7k.log 2>&1 < /dev/null &
-```
-
-같은 명령으로 재개하면 성공·실패 검사 기록을 재사용합니다. 기본 출력은
-`data/webui-full-dom-screened-7k-v1/7000`이며, 전체 완료 시 상위 폴더에 `READY.json`이
-생깁니다. 후보가 부족하면 개수를 줄이지 않고 오류를 냅니다. `screening-report.json`과
-`screening/{train,val,test}/*.json`에 제외 수와 사유가 남습니다. 시간 기준으로 선별된
-데이터셋이라는 점과 탈락 수를 논문에 기록하세요.
-
-중단 시 실제 Python PID를 저장한 파일을 사용합니다. SIGTERM 처리에서 해당 worker와
-브라우저 자식들을 정리합니다.
-
-```bash
-if [[ -s log/prepare-screened-7k.pid ]]; then
-  pid=$(cat log/prepare-screened-7k.pid)
-  if [[ "$(ps -p "$pid" -o args=)" == *framediff.webui_screen* ]]; then
-    kill -TERM "$pid"
-  fi
-fi
-```
-
-새 데이터의 train/val/test가 달라지므로 기존 체크포인트를 `--resume`하지 마세요.
-새 run 경로(예: `runs/webui-full-dom-screened-7k-v1`)에서 detector와 두 policy를
-학습하고, abstract와 screenshot 모두 새 데이터의 같은 고정 val/test를 사용합니다.
-
-```bash
-mkdir -p log
-CUDA_VISIBLE_DEVICES=1 nohup bash scripts/train_tuide_scale.sh s > log/tuide-s.log 2>&1 &
-CUDA_VISIBLE_DEVICES=3 nohup bash scripts/train_tuide_scale.sh m > log/tuide-m.log 2>&1 &
-CUDA_VISIBLE_DEVICES=4 nohup bash scripts/train_tuide_scale.sh l > log/tuide-l.log 2>&1 &
-```
-
-기본값은 배치 크기 2, gradient accumulation 4, seed 42입니다. Stage 1은
-학습률 1e-4로 최대 30,000 step, stage 2는 학습률 1e-5로 최대 15,000 step
-진행합니다. 500 step마다 validation 샘플 2,000개를 평가하며, early-stop
-patience는 10입니다. 각 stage에 `last.pt`가 있으면 이를 불러옵니다. Stage
-2에 `last.pt`가 없으면 해당 크기 모델의 stage 1 `best.pt`에서 시작합니다.
-모델 크기나 실행 설정을 바꿀 때는 출력 디렉터리를 새로 사용하세요. 여기서의
-학습 조기 종료는 validation loss 기준이며, 아래의 **추론 중 픽셀 조기 종료와
-별개**입니다.
-
-Validation의 최적 체크포인트 선택과 학습 조기 종료에는 기존 token CE를 계속
-사용합니다. 기존 고정 128개 진단 샘플에서는 `action_target_accuracy`(예측한
-owner·속성이 실제 손상 위치 중 하나인 비율)와 `exact_repair_action_rate`(한
-액션으로 CSS 오류 개수를 줄인 비율)를 함께 기록합니다. 같은 예측을 재사용하므로
-추가 렌더링이나 detector 실행은 없습니다. `480px`와 `480.0px`처럼 같은 단위의
-숫자 표기는 동등하게 처리하며, 단위 없는 길이 0도 `0px`와 같습니다. 단위·퍼센트·
-키워드·`important` 차이는 유지합니다. 정답 teacher 하나뿐 아니라 현재 손상된
-모든 owner·속성을 올바른 수정 대상으로 인정합니다.
-
-`action_metric_contract=css-action-diagnostics-numeric-v1`으로 새 비교 기준을
-표시합니다. 기존 `symbolic_*`도 이 정규화를 적용하므로 문자열 그대로 비교하던
-이전 로그와 구분해야 합니다. `symbolic_error_count_unchanged_rate`는 기존
-`symbolic_no_change_action_rate`의 의미를 명확하게 나타낸 이름입니다. 오류 개수가
-그대로여도 CSS 값이나 화면은 부분 개선될 수 있습니다. 속성별 `n`은 모델의 예측
-횟수이며 손상 데이터 개수가 아닙니다. `target_accuracy`와 `exact_repair_rate`도
-각 속성의 예측 횟수를 분모로 씁니다. 실행할 수 없는 값은 정확 복구로 인정하지
-않지만, 유효한 손상 위치를 골랐다면 대상 선택은 맞을 수 있습니다. 기존 캐시와
-체크포인트를 사용해 재개할 수 있고 추가 전처리는 필요하지 않습니다.
-
-필요하면 경로를 명시적으로 지정할 수 있습니다.
-
-```bash
-CUDA_VISIBLE_DEVICES=3 bash scripts/train_tuide_scale.sh m \
-  data/webui-css-owners-v3 \
-  runs/webui-10k-v3-nospacing-fresh-webui/detector/best.pt \
-  runs/css-owners-v3-shared \
-  runs/tuide-m-abstract
-```
-
-최종 체크포인트 경로는 다음과 같습니다.
-
-```text
-runs/tuide-s-abstract/replacement/abstract-stage2/best.pt
-runs/tuide-m-abstract/replacement/abstract-stage2/best.pt
-runs/tuide-l-abstract/replacement/abstract-stage2/best.pt
-```
-
-기본 유효 배치 크기는 8입니다. L 모델이 GPU 메모리를 초과하면 새 실행에서
-`BATCH_SIZE=1 ACCUMULATION=8`을 사용하세요. 크기별로 유효 배치와 학습
-예제 예산을 비슷하게 유지하고 실제 step 수와 시간을 보고해야 합니다. 최대
-step 수가 같더라도 조기 종료가 발생하면 학습 연산량이 같지는 않습니다. 주
-모델 크기는 test가 아니라 validation 성능으로 선택합니다.
-
-## RGB 비교 및 평가
-
-통합 크기 비교 스크립트에는 S screenshot 체크포인트와 S/M/L abstract
-체크포인트가 필요합니다. 초기 HTML을 한 번 준비한 뒤, S는 동일한 크기의 RGB
-baseline과 비교하고 M/L은 별도 프로세스에서 abstract-only로 평가합니다.
-M/L screenshot 학습은 선택 사항입니다.
-
-```bash
-CUDA_VISIBLE_DEVICES=1 TUIDE_SCALES=1 PAGE_LIMIT=20 REPEATS=3 REPAIR_STEPS=20 \
-bash scripts/run_visual_web.sh "$D2C_ROOT" runs/eval-tuide-scales \
-  runs/webui-10k-v3-nospacing-fresh-webui
-```
-
-이미 평가 페이지를 준비했다면 VLM 준비 단계를 생략할 수 있습니다.
-
-```bash
-CUDA_VISIBLE_DEVICES=1 PAGE_LIMIT=0 REPEATS=3 REPAIR_STEPS=20 \
-bash scripts/run_tuide_scales.sh \
-  runs/existing-eval/prepare/prepared.jsonl runs/eval-tuide-scales
-```
-
-통합 보고서는 크기 비교 출력 폴더 아래의 `comparison/paper-report.md`에
-생성됩니다. `run_visual_web.sh`를 거치면 `scales/` 아래에 생성됩니다. 가능한
-경우 initial/self-revision 결과, screenshot-policy(S), TUIDE-S/M/L 결과가
-포함됩니다. `policy-parameters.json`에는 측정된 파라미터 수가 기록됩니다.
-반복 결과는 페이지별로 평균을 냅니다. 필요한 경우 `RAW_CHECKPOINT`,
-`DETECTOR_CHECKPOINT`, `TUIDE_S_CHECKPOINT`, `TUIDE_M_CHECKPOINT`,
-`TUIDE_L_CHECKPOINT`로 경로를 지정합니다. 크기 비교 실행은 동일한 prepared
-JSONL, seed, step 예산, detector를 공유합니다. S RGB와 M/L abstract를
-비교하면 입력 방식과 모델 크기가 동시에 바뀌므로, abstraction만의 효과를
-분리하려면 S RGB와 S abstract를 비교하세요.
-
-### 추론 중 픽셀 목표에 따른 조기 종료
-
-screenshot과 TUIDE abstract 복구는 기본적으로 현재 브라우저 렌더와 목표
-스크린샷을 **원본 해상도**에서 비교합니다. 전체 픽셀의 99% 이상에서 RGB
-각 채널의 정규화된 차이가 모두 0.005 이하면 조기 종료합니다. 첫 액션 전과
-이후 액션 후에 검사하며, `REPAIR_STEPS`가 허용한 마지막 액션 직후에도
-검사합니다. 따라서 `REPAIR_STEPS`의 기본값 20은 **최대 step 수**이지
-반드시 실행하는 수정 횟수가 아닙니다. 이미지 오차가 악화되었다는 이유로
-액션을 되돌리지는 않습니다. 스크롤 보존을 위한 별도의 guard는 유지됩니다.
-평가 결과에는 `goal_reached`, `stop_reason`, `pixel_match_fraction`, 픽셀
-목표 검사 횟수와 시간이 기록됩니다. 이는 공개 TinySVG 코드의 Gaussian 점수
-판정과 달리, 허용 오차를 만족한 픽셀의 비율을 세는 방식입니다.
-
-일반 평가 경로(`TUIDE_SCALES=1`을 지정하지 않은 경우)의
-`run_visual_web.sh`에서는 `PIXEL_GOAL_FRACTION`의 기본값이 `0.99`,
-`PIXEL_GOAL_TOLERANCE`의 기본값이 `0.005`입니다. 예를 들어 99.5% 일치를
-요구하려면 실행 명령어의 환경변수에 `PIXEL_GOAL_FRACTION=0.995`를 추가합니다.
-고정 step 비교가 필요하면 `PIXEL_GOAL_FRACTION=-1`로 픽셀 조기 종료를
-끕니다. `visual-evaluate`와 `visual-test-rollout`을 직접 실행할 때는 각각
-`--pixel-goal-fraction`, `--pixel-goal-tolerance` 옵션을 사용합니다.
-`run_tuide_scales.sh` 경로(`TUIDE_SCALES=1`일 때도 사용)는 CLI 기본값을
-사용하며 이 환경변수 override를 전달하지 않습니다. 비교 실험에서는 픽셀
-목표 설정을 동일하게 맞추세요.
-설정을 바꾼 뒤 동일한 평가 출력 디렉터리에서 `--resume`하는 것은 지원하지
-않습니다.
-
-동일한 크기의 RGB 정책 모델은 다음처럼 학습합니다.
-
-```bash
-CUDA_VISIBLE_DEVICES=1 POLICY_MODES=screenshot bash scripts/train_tuide_scale.sh m
-```
-
-`visual-evaluate`는 체크포인트에서 모델 차원을 읽습니다. RGB/abstract를
-함께 평가할 때는 차원이 같아야 합니다. `--abstract-only`는 RGB 체크포인트
-없이 단일 크기 모델을 평가합니다. 선택적인 M 크기 비교 예시는 다음과
-같습니다.
-
-```bash
-CUDA_VISIBLE_DEVICES=1 \
-RAW_CHECKPOINT=runs/tuide-m-screenshot/replacement/raw-stage2/best.pt \
-ABSTRACT_CHECKPOINT=runs/tuide-m-abstract/replacement/abstract-stage2/best.pt \
-DETECTOR_CHECKPOINT=runs/webui-10k-v3-nospacing-fresh-webui/detector/best.pt \
-PAGE_LIMIT=20 REPEATS=3 REPAIR_STEPS=20 \
-bash scripts/run_visual_web.sh "$D2C_ROOT" runs/eval-tuide-m \
-  runs/webui-10k-v3-nospacing-fresh-webui
-```
-
-모델 크기별 성능을 통제해 비교하려면 `visual-evaluate --data ...`로 완전히
-동일한 prepared 평가 레코드와 초기 HTML을 재사용하세요. 크기별로 초기 HTML을
-각각 다시 생성하지 마세요. 최종 rollout geometry, 복구 시간, 실패 건수,
-학습 연산량, 정책 모델 파라미터 수를 보고합니다.
-
-## 직접 실행하는 CLI
-
-### 입력 표현 ablation
-
-`train_tuide_scale.sh`의 `ABSTRACTION_REPRESENTATION` 또는
-`visual-tree-train`의 `--abstraction-representation`으로 입력을 선택합니다.
-
-| 값 | 한 번의 관측값 | Target/current/절댓값 차이 입력 |
-|---|---|---|
-| `abstract-rgb` | 고정된 클래스 색상으로 채운 박스, ImageNet 정규화 RGB | 9채널 |
-| `occupancy` | 클래스별 채움 마스크 4개 | 12채널 |
-| `boundary` | 클래스별 박스 경계 마스크 4개 | 12채널 |
-| `occupancy-boundary` (기본값) | 채움 마스크와 경계 마스크 모두 사용 | 24채널 |
-
-`boundary`는 원본 스크린샷의 edge detector가 아닙니다. 감지된 박스 또는
-DOM 박스 각각의 경계를 보존하므로, 같은 클래스 박스가 겹쳐도 내부 경계를
-나타냅니다. `abstract-rgb`는 동일한 박스를 정해진 그리기 순서로 색칠하며,
-웹페이지의 원본 RGB를 사용하지 않습니다. 이 방식은 겹치는 요소를 가릴 수
-있지만, 마스크 방식은 클래스별 점유 영역과 경계를 보존합니다. 네 설정 모두
-입력 convolution을 제외하면 같은 ResNet-18과 복구 디코더를 사용합니다.
-따라서 이는 완전히 다른 인코더 구조가 아니라 **입력 표현의 차이**를
-실험합니다.
-
-동일한 준비된 정책 데이터, detector 체크포인트, 고정된 예측 목표 캐시를
-재사용합니다. 이 ablation을 위해 라벨을 다시 만들거나 이미지를 다시 생성할
-필요는 없습니다. 입력 표현마다 다른 출력 디렉터리를 사용하세요. 예를 들어
-`POLICY_DATA`를 기존 `.../7000/css`, `DETECTOR`를 detector의 `best.pt`,
-`SHARED_RUN`을 `predicted-train/data.jsonl`과 `predicted-val/data.jsonl`이
-있는 기존 디렉터리로 설정한 뒤 다음 명령어로 네 설정을 순차 실행합니다.
-
-```bash
-for rep in abstract-rgb occupancy boundary occupancy-boundary; do
-  env CUDA_VISIBLE_DEVICES=2 POLICY_MODES=abstract \
-    ABSTRACTION_REPRESENTATION="$rep" BATCH_SIZE=4 ACCUMULATION=2 \
-    SEED=42 POLICY_STAGE1_STEPS=30000 POLICY_STAGE2_STEPS=15000 \
-    EARLY_STOP_PATIENCE=0 \
-    bash scripts/train_tuide_scale.sh s "$POLICY_DATA" "$DETECTOR" "$SHARED_RUN" \
-      "runs/tuide-input-ablation/7000/$rep" || break
-done
-```
-
-Stage 2는 같은 입력 표현의 stage 1에서 초기화됩니다. 기존 `last.pt`로는
-설정이 일치할 때만 재개할 수 있습니다. 다른 표현으로 학습된 정책 모델에서
-새 표현의 모델을 초기화하지 마세요. 기존 기본 체크포인트는
-`occupancy-boundary`로 읽을 수 있습니다. 평가 시에는 체크포인트에서 입력
-표현을 자동으로 읽으므로 별도 override가 필요하지 않습니다. 입력 표현별로
-동일한 고정 test 상태, detector threshold, 복구 step 예산, seed를
-사용하세요. 추론 종료 판정에는 모든 표현에서 동일한 원본 해상도의
-목표-현재 RGB 픽셀 기준을 사용하며 teacher action 생성 방식은 변하지
-않습니다. optimizer step 예산이 같아도 FLOPs가 같다는 뜻은 아니므로
-실행 시간과 파라미터 수도 보고하세요. 최종 비교에는 여러 seed를 사용하세요.
-
-`visual-tree-train --policy-scale s|m|l`은 실행 및 체크포인트 검증 전에
-설정값을 결정하며, 명시적으로 지정한 `--hidden`, `--layers`, `--heads` 값보다
-우선합니다. preset을 지정하지 않으면 기존 기본값이나 사용자 지정 차원을
-사용할 수 있습니다. 다른 설정과 입력 서명이 일치한다면 실제 결정된 차원만
-재개 실행의 동일성 판정에 사용하므로 기존 S 실행과의 호환성이 유지됩니다.
-
-### GUAVA: timeout 검사 후 40,000페이지 (8:1:1)
-
-`scripts/prepare_screened_webui_40k.sh`는 기존 master 후보에서 train 32,000,
-val 4,000, test 4,000페이지를 선별합니다. WebUI 전체 40만 개를 다운로드하는
-스크립트가 아닙니다. 원래 도메인별 split을 유지하고, 모든 뷰가 검사를 통과한
-페이지를 선택합니다. split별 통과 후보가 부족하면 완료되지 않으며, 다른 split에서
-가져와 채우지 않습니다. 기존 고정 val/test corruption과 복구 라벨은 재사용합니다.
-
-GUAVA에 기존 원본·master·detector 데이터와 manifest가 참조하는 파일들이 있어야 합니다.
-manifest에 절대 경로가 있으면 GUAVA에서도 해당 경로로 접근 가능해야 합니다.
-공통 캐시가 없으면 생성하므로 첫 실행은 더 느릴 수 있습니다. GPU는 필요 없습니다.
+## 공통 경로
 
 ```bash
 cd /home/uisang/2027/frame-diffusion
 source .venv/bin/activate
 mkdir -p log
-nohup setsid env PYTHONUNBUFFERED=1 PREPARE_WORKERS=4 \
-  SCREEN_TIMEOUT=180 SCREEN_SAMPLES=3 \
-  SOURCE_DATA=data/webui-full-dom-policy-v2 \
-  DETECTOR_RENDERED=data/webui-full-dom-detector-v2/56169/rendered \
-  SCREENED_DATA=data/webui-full-dom-screened-40k-v1 \
-  TUIDE_SHARED_CACHE="$PWD/data/webui-shared-cache" \
-  SCREEN_PID_FILE="$PWD/log/prepare-screened-40k.pid" \
-  bash scripts/prepare_screened_webui_40k.sh \
-  >> log/prepare-screened-40k.log 2>&1 < /dev/null &
+export TRAIN_DATA="$PWD/data/new-css-v1/7000/css"
+export TRAIN_RUN="$PWD/runs/webui-css-mixed-v1/7000"
+export DETECTOR_CHECKPOINT="$TRAIN_RUN/detector/best.pt"
 ```
 
-로그는 `tail -f log/prepare-screened-40k.log`로 확인합니다. 같은 명령으로 재개합니다.
-최종 완료 파일은 `data/webui-full-dom-screened-40k-v1/READY.json`이며,
-학습 입력은 `data/webui-full-dom-screened-40k-v1/40000`입니다.
-기존 master와 공유 캐시는 삭제하지 마세요. 학습은 새 run 디렉터리를 사용합니다.
-안전한 종료는 위 7k 명령에서 PID 파일만 `log/prepare-screened-40k.pid`로 바꿉니다.
+학습 스크립트의 기본 경로도 위와 같습니다. 명령 뒤에 전달하는 데이터·Detector·
+공유 캐시·출력 인자가 우선합니다. 기존 실행을 재개할 때는 원래 사용한 경로를
+명시하세요. CSS 적용으로 Target이 바뀌거나 mixed/STOP 학습으로 전환할 때는
+기존 체크포인트를 이어 학습하지 않고 새 run에서 시작합니다.
 
-### 구버전 분류 차이로 실패한 검사 재개
-
-정규화된 HTML의 저장 박스는 저장 당시 분류 기준으로 검증한 뒤 최신 full-DOM
-라벨로 갱신합니다. 투명 텍스트 등의 분류 변경만으로 geometry 오류를 내지 않으며,
-실제 박스 변화는 계속 거부합니다. 기존 성공 캐시의 키와 라벨 형식은 유지합니다.
-
-이전 버전으로 검사 중이었다면 먼저 PID 파일로 SIGTERM을 보내 종료하고, 종료가
-끝난 뒤 최신 코드를 pull하세요. 다음 명령은 geometry 실패 기록만 백업 폴더로
-옮겨 재검사 대상으로 만듭니다. 성공 기록과 timeout 제외 기록은 유지합니다.
+## Detector 및 Stage1
 
 ```bash
-python scripts/retry_screen_geometry_failures.py --out data/webui-full-dom-screened-40k-v1
+CUDA_VISIBLE_DEVICES=2 STAGE=detector \
+  bash scripts/run_webui_scale.sh 7000 data/new-css-v1 runs/webui-css-mixed-v1
+
+CUDA_VISIBLE_DEVICES=0 POLICY_STAGES=1 bash scripts/train_tuide_scale.sh s
 ```
 
-그다음 기존 40k 실행 명령을 그대로 재실행합니다. 7k는 `--out`을
-`data/webui-full-dom-screened-7k-v1`로 지정하세요. 실행 중인 전처리나 이미
-`READY.json`이 생성된 완성 데이터셋은 이 명령으로 변경할 수 없습니다.
+Stage1은 정답 DOM 추상화를 사용하므로 Detector 없이 시작할 수 있습니다.
+`s`를 `m`, `l`로 바꾸면 각 크기를 학습합니다.
+스크린샷 정책은 `POLICY_MODES=screenshot POLICY_STAGES=1`이며 Stage2가 없습니다.
 
-구버전의 `Only 0 visible abstraction elements` 등도 다시 검사하려면 위 명령에
-`--include-visible`을 추가합니다. 구버전 라벨이 부족했던 clean migration source만
-최신 full-DOM/화면 안 owner 선택으로 한 번 재검사합니다. 요소가 확보되어도 기존
-정규화와 편집 가능성 검사를 통과해야 채택합니다. 재검사에서도 요소가 없으면
-준비 실패를 캐시에 기록하며 같은 샘플에서 8번 반복하지 않습니다.
+## Detector 캐시와 Stage2
+
+같은 데이터 버전의 Detector 학습 후 아래 캐시를 한 번 준비합니다.
+이미 완료한 항목은 재사용합니다.
 
 ```bash
-python scripts/retry_screen_geometry_failures.py --out data/webui-full-dom-screened-40k-v1 --include-visible
+for split in train val; do
+  CUDA_VISIBLE_DEVICES=2 python -m framediff visual-cache-targets \
+    --data "$TRAIN_DATA/policy-$split.jsonl" \
+    --checkpoint "$DETECTOR_CHECKPOINT" \
+    --out "$TRAIN_RUN/shared/predicted-$split" \
+    --device cuda --size 384 --resume
+done
 ```
 
-온라인 샘플 생성 중 lazy 페이지 준비(렌더링·정규화·라벨 갱신)는 같은 뷰에서
-최대 두 번 시도합니다. 두 번 모두 실패하면 해당 샘플 생성에서는 그 뷰를 제외하고,
-다른 뷰가 있으면 남은 시도 예산 안에서 계속합니다. 따라서 `original_reload`의
-세부 진단 수치가 달라져도 같은 준비 작업을 8번 반복하지 않습니다. 일반 준비
-오류는 영구 실패 캐시에 추가하지 않으며 다음 샘플에서는 다시 시도할 수 있습니다.
-무작위 corruption 생성의 최대 시도 횟수는 기존대로 유지합니다. 오류 항목의
-`stage`는 `preparation` 또는 `online_generation`으로 표시됩니다.
-
-### 학습 자원 정리와 안전한 종료
-
-Detector·TUIDE abstract·screenshot 학습은 SIGTERM/SIGINT를 받으면 워커와
-그 하위 브라우저 프로세스를 정리합니다. 실행용 bash만 종료하지 말고,
-아래 목록에서 `--out`이 해당 실험인 **학습 Python PID**를 확인하세요.
+각 크기의 Stage1과 위 캐시가 완료되면:
 
 ```bash
-ps -u "$USER" -o pid,ppid,args | grep -E '[p]ython.*framediff.*visual-(tree-train|train-detector)'
-# 12345를 종료할 학습 Python PID로 바꿉니다.
-kill -TERM 12345
+nohup setsid env CUDA_VISIBLE_DEVICES=0 POLICY_STAGES=2 \
+  bash scripts/train_tuide_scale.sh s > log/tuide-s-stage2.log 2>&1 < /dev/null &
+nohup setsid env CUDA_VISIBLE_DEVICES=1 POLICY_STAGES=2 \
+  bash scripts/train_tuide_scale.sh m > log/tuide-m-stage2.log 2>&1 < /dev/null &
+nohup setsid env CUDA_VISIBLE_DEVICES=2 POLICY_STAGES=2 \
+  bash scripts/train_tuide_scale.sh l > log/tuide-l-stage2.log 2>&1 < /dev/null &
 ```
 
-정리가 끝날 때까지 기다리고 즉시 `kill -9`를 보내지 마세요. 동일 명령으로
-최근 저장된 체크포인트부터 재개합니다. 종료 중인 optimizer step을 별도 저장하지는
-않습니다. SIGKILL·드라이버 멈춤·전원 차단은 이 처리로 정리할 수 없습니다.
-이미 실행 중인 작업은 수정된 코드를 사용하도록 다시 시작해야 합니다.
+Stage2는 같은 크기·표현의 Stage1 `best.pt`에서 시작합니다. 해당 Stage2의
+`last.pt`가 있으면 이를 재개합니다. 결과는
+`$TRAIN_RUN/tuide-{s,m,l}-abstract/replacement/abstract-stage2/best.pt`입니다.
 
-공유 Chromium은 기본 100개 컨텍스트 사용 후 다음 컨텍스트를 열기 전에 재시작합니다.
-`TUIDE_BROWSER_MAX_CONTEXTS=100`으로 조절할 수 있으며 양의 정수를 사용합니다.
-진행 중인 corruption/repair probe는 중단하지 않습니다. 이는 재사용 기간의 제한이며
-RAM 용량 제한은 아니므로, 매우 무거운 단일 페이지의 메모리 사용까지 막지는 않습니다.
-기존 캐시 형식·데이터 서명·모델 설정·체크포인트 형식은 바뀌지 않습니다.
-워커별 학습 대상 목록은 여전히 별도 메모리를 사용하므로 워커 수를 늘리면 RAM 사용도
-늘어납니다. 현재 실험은 `ONLINE_WORKERS=4 ONLINE_PREFETCH=8`을 유지하세요.
+기본 batch 2, accumulation 4, seed 42이며 Stage1 최대 30,000 step,
+Stage2 최대 15,000 step입니다. 500 step마다 최대 2,000 validation 샘플을
+평가하고 token CE로 최적 체크포인트·조기 종료를 결정합니다. 손상 위치 선택·
+정확 복구·손상 강도별 진단은 별도로 기록합니다. 실제 rollout 개선을 CE만으로
+판정하지 마세요.
 
-Stage 2에서 목표 예측 캐시가 없을 때 Detector는 **최대 2개씩 추론**합니다.
-TUIDE의 `BATCH_SIZE`·`ACCUMULATION`과 별개이며, 기존 예측 캐시·체크포인트를
-그대로 읽습니다. Detector의 정밀도와 리사이즈 설정은 유지합니다. 순간 추론
-메모리를 줄이지만 Detector는 여전히 학습 GPU에 상주합니다. 전체 목표를 미리
-추론하거나 다른 GPU로 이동하는 변경은 아닙니다.
+## 캐시와 프로세스
 
-온라인 워커마다 가벼운 감독 프로세스를 추가했습니다. Linux에서는 subreaper를
-설정해 렌더링 워커가 비정상 종료되어도 분리된 브라우저 자식을 회수합니다.
-감독 프로세스에 전체 학습 대상 목록을 복제하지 않습니다. 응답 수신도 제한된
-큐를 사용하는 스레드로 분리해, 메시지가 일부만 도착해도 타임아웃 검사를
-진행합니다. 워커 회수 시 수신 스레드도 종료합니다. Linux 서버에서는 아래로
-전용 고아 프로세스 통합 테스트까지 실행할 수 있습니다.
+HTML·viewport·검사 설정이 같으면 S/M/L과 screenshot/abstract가 완료된 검사
+캐시를 공유합니다. 새 손상 상태는 학습 중 생성하며 고정 Validation/Test는
+재사용합니다. 소스·설정이 바뀐 라벨을 그대로 가져오지는 않습니다.
+
+`ONLINE_WORKERS`와 `ONLINE_PREFETCH`는 CPU/RAM에 맞춰 조정합니다.
+`ONLINE_TIMEOUT`은 실제 작업 시간이며 공유 캐시 잠금 대기는 별도 제한을
+사용합니다. 학습 중단 시 해당 Python PID에 SIGTERM을 보내 worker 정리가
+끝나도록 기다리세요. 재개는 마지막 저장된 체크포인트부터이며 미저장 step은
+복구되지 않습니다.
+
+## 평가와 ablation
 
 ```bash
-python -m pytest -q tests/test_worker_ipc_recovery.py tests/test_training_shutdown.py
+CUDA_VISIBLE_DEVICES=0 REPAIR_STEPS=20 REPEATS=1 \
+  bash scripts/run_tuide_scales.sh \
+    runs/existing-eval/prepare/prepared.jsonl runs/eval-tuide-scales
 ```
 
-수정된 코드를 반영하려면 학습 프로세스를 다시 시작해야 합니다. GPU 하드웨어
-장애나 물리적인 전원 차단의 원인을 확인하거나 해결했다는 뜻은 아닙니다.
+모든 크기는 저장된 동일 Initial HTML을 사용합니다. S screenshot과 S abstract를
+비교해야 표현 방식만 분리할 수 있습니다. M/L까지 비교하면 모델 용량도 바뀝니다.
+체크포인트별 경로 변경 방법과 표현 ablation은 [상세 설정](tuide-scales.md)에 있습니다.
+
+위치·크기 기반 보호는 `--preserve-matched-geometry`로 명시적으로 켭니다.
+기존 scale runner가 이를 자동으로 켜거나 기존 결과를 바꾸지는 않습니다.
+[기하 보호 진단](geometry-preservation.md)에서 별도 출력으로 비교하세요.
+이 보호 기능과 mixed 학습의 STOP 예측, validation 기반 학습 조기 종료는
+서로 다른 기능입니다.

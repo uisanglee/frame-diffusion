@@ -60,3 +60,69 @@ blocks. This cache lives only within the evaluation process. It does not persist
 font-dependent results across machines or change official metric formulas.
 Different predicted HTML still requires fresh scoring (including CLIP); standalone
 target CLIP feature caching is not implemented.
+
+## Evaluation timing diagnostics
+
+`web-evaluate` prints flushed JSON `evaluation_stage` events (`started`,
+`completed`, `failed`, or `cache_hit`) with page ID and method. Each newly
+computed row in `metrics.jsonl` also contains `evaluation_timing`:
+
+- `stage_seconds`: exclusive wall time (nested stages are subtracted).
+- `stage_inclusive_seconds`: wall time including nested work; do not sum these.
+- `stage_calls`: invocation counts.
+
+Stages separate `render_dom_snapshot`, `pixel_comparison`, `dom_box_matching`,
+`official_render`, `block_html_preprocess`, `block_pixel_extraction`,
+`block_matching`, `clip_image_preprocess` (masking/inpainting and resizing), and
+`clip` (remaining CLIP preprocessing, transfer, encoding and similarity).
+The inclusive `clip` duration covers the full CLIP metric. Upstream `.item()`
+waits for the resulting GPU similarity, so this is not only kernel launch time.
+`official_other` accounts for remaining upstream scoring work.
+Reference preparation and official initialization (including CLIP model loading)
+are logged separately from per-method scoring.
+
+Existing evaluation caches remain reusable and are not recomputed to obtain
+historical timings. In-memory score cache hits do not copy the original compute
+timings into the new row. Restart the evaluator with the updated code to profile
+new evaluations; an already running process does not acquire these changes.
+
+Official evaluation also uses bounded process-local caches for rendered PNGs,
+CLIP masking/resizing, CLIP image features, and ordered text-pair similarities.
+PNG/masked-image caches each retain at most 16 entries / 32 MiB; the feature
+cache retains at most 32 entries / 1 MiB. Cache hits are logged. Features are
+cloned before upstream in-place normalization, and feature reuse is disabled
+under autograd, training, or autocast. Mask cache keys include exact image bytes
+and ordered boxes, not just the page ID. Browser changes clear image/block caches.
+
+For recognized upstream OCR-free functions, exact vectorized pixel operations
+replace per-pixel Python loops and repeated PNG decoding; color tolerances,
+integer overflow behavior, coordinate order, and averaging remain unchanged.
+Unknown upstream pixel/text implementations fall back to their original code.
+`official.json` records which fast paths are enabled. Existing on-disk score
+caches and their signatures remain valid; no dataset preparation or VLM
+regeneration is needed. These optimizations do not reduce resolution, truncate
+blocks, change CLIP precision, or cap the official merging search.
+
+To aggregate actual work from a resumed evaluation log (also while it runs):
+
+```bash
+python -m framediff.evaluation_report \
+  --log log/d2c-pilot10-seed42-n2-static-v5-gpu01.log \
+  --out runs/d2c-pilot10-seed42-n2-static-v5/timing-report
+```
+
+The command prints a report and writes `evaluation-timing.json` and
+`evaluation-timing.md`. It ranks exclusive stage time and reports percentages,
+call counts, mean/max duration, failures, and CLIP's combined share. Group totals
+and detailed stage totals describe the same work, not additive totals. Initial
+CLIP/model loading is separate from per-page CLIP scoring. It reads stage events
+only: method-summary totals and historical timings in cached score files are
+never added again. Page-score, identical-HTML method-score, and internal-operation
+cache hits are reported separately as access counts (not unique page counts).
+
+Multiple distinct process logs may follow `--log`; do not supply mirrored copies
+of the same execution. Appended restarts count actual repeated work. Old logs
+without timing events cannot provide past timings. Pending/interrupted calls and
+malformed partial lines are reported; their missing durations cannot be inferred.
+The denominator is measured stage work, not full experiment elapsed time or GPU
+busy time. Report generation does not modify experiment results or caches.

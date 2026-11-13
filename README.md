@@ -1,636 +1,143 @@
-# FrameDiff — 웹 컴포넌트 위치·크기 보정 연구 코드
-
-W/H/X/Y의 15개 손상 조합별 CSS 복구 실험은 [Synthetic Action Composition Benchmark](docs/composition-benchmark.md)를 참고하세요.
+# TUIDE / FrameDiff — 웹 UI 레이아웃 복원
 
 [![CI](https://github.com/uisanglee/frame-diffusion/actions/workflows/ci.yml/badge.svg)](https://github.com/uisanglee/frame-diffusion/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Python 3.11–3.14](https://img.shields.io/badge/python-3.11--3.14-blue.svg)](pyproject.toml)
 
-실행 가능한 레이아웃 트리에 노이즈를 넣고, 목표 frame을 조건으로 속성 편집을 반복하는 **diffusion-inspired tree mutation denoiser**입니다. 데이터 생성 → 학습 → 체크포인트 → 수정 → 비교 실험 → Chromium 검증 → 결과 집계까지 포함합니다.
+목표 UI와 현재 HTML/CSS를 조건으로 수정할 CSS 선언과 값을 예측하고,
+브라우저에서 편집·렌더링을 반복하는 연구 코드입니다.
+현재 주 실험은 **CSS 우선 적용 WebUI 전처리 → Detector 및 TUIDE 학습 →
+저장된 VLM Initial의 레이아웃 복원 → 품질·비용 평가**입니다.
+패키지 및 CLI 이름은 `framediff`를 유지합니다.
 
-> Status: research prototype (`v0.1.0`). API, LayoutIR schema, checkpoint compatibility may change before `v1.0`.
+## 설치
 
-## 최신: 이미지 조건 반복 복구
-
-현재 WebUI 학습은 `scripts/run_webui_scale.sh`를 진입점으로 사용합니다.
-Detector는 `visual-train-detector` → `framediff/visual_train.py`, TUIDE와
-screenshot 정책은 모두 `visual-tree-train` → `framediff/tree_policy.py`에서
-학습합니다. 구형 delta-policy 학습 명령 `visual-train-policy`와 그 전용
-numeric-prefix 전처리 `visual-subset-numeric`는 제거했습니다. 기존 정책의
-체크포인트 로딩·평가 코드는 보존하며, 현재 공유 캐시와 체크포인트 재개는
-그대로 사용할 수 있습니다.
-
-과거 데이터 경로와 GPU 번호가 고정된 `resume_webui_training.sh`는 제거했습니다.
-학습과 재개는 `scripts/run_webui_scale.sh`에서 데이터·출력 경로를 지정해 실행합니다.
-
-Inline과 `<style>` 규칙을 함께 훼손·복구하는 `css-owner-tree-v2` 경로를 추가했습니다.
-[Stylesheet 정책 준비·GPU 1/3 학습·평가](docs/stylesheet-policy.md)를 참고하세요.
-
-기존 학습과 독립적인 수치 CSS diffusion 실험은
-[CSS diffusion 준비·학습·복구 평가](docs/css-diffusion.md)를 참고하세요.
-별도 데이터와 체크포인트를 사용하며, 기존 TUIDE 실행 옵션은 바꾸지 않습니다.
-기존 detector와 목표 이미지 캐시를 재사용하며, 새 정책과 고정 val/test 훼손 상태는 별도 경로에 생성합니다.
-
-현재 학습 경로는 **CSS 선언 교체 → 단일 교사 토큰 CE → 실행 이미지 평가**를 분리한
-declaration-tree policy입니다. [최신 코드 구분·기존 데이터 재사용·GPU 1/3 명령어](docs/numeric-policy.md)를
-참고하세요. detector는 재사용하며, 이전 delta-policy는 새 정책으로 재학습해야 합니다.
-학습 스크립트는 기본적으로 CPU 브라우저 worker의 **online corruption**을 사용합니다.
-목표 이미지·detector는 재사용하고 검증·테스트는 고정합니다. `ONLINE_CORRUPTION=0`으로
-오프라인 비교가 가능하며, 두 실험은 별도 출력 디렉터리를 사용해야 합니다.
-기존 데이터의 누락된 clean CSS 상태는 시작 시 검사하고, 페이지별 상태와 제외 결과를
-`--online-targets` manifest 옆의 `.online-target-cache/`에 저장합니다
-(manifest가 없으면 train JSONL 옆). 동일 데이터의 S/M/L 및 screenshot/abstract 실행이 공유하며,
-동시 실행은 페이지별 파일 잠금으로 중복 검사를 방지합니다. HTML 내용, viewport, DOM ID,
-CSS owner, 검사 코드 또는 Playwright 버전이 바뀌면 해당 캐시를 재사용하지 않습니다.
-`cache_hits`는 재사용 수, `inspected_missing_states`는 새 브라우저 검사 수입니다.
-중단 전 완료된 검사는 다음 실행에서 재사용되며, 캐시는 학습 샘플의 온라인 corruption을 저장하지 않습니다.
-수정 가능한 CSS나 효과가 있는 후보가 없는 확정 실패는 사유와 함께 캐시합니다.
-일시적인 브라우저·검사 오류는 다시 시도하며, `excluded_inspection_error`로 별도 보고합니다.
-
-**목표 screenshot → 전용 검출기로 한 번 추상화 → 현재 DOM 추상화 이미지와 비교해 매 스텝 CSS action 예측**을 지원합니다.
-고정 VLM 계획이나 목표 box residual을 사용하지 않습니다. 매번 실제 screenshot을 사용하는 별도 정책과
-동일 action 예산으로 비교하고 최종 실제 화면 accuracy/시간을 평가합니다.
-[설치·전체 학습·D2C/Hard/WebUI 실행 가이드](docs/visual-policy.md)를 먼저 참고하세요.
-새 이미지 모델은 재학습이 필요하며 기존 체크포인트와 호환되지 않습니다.
-
-아래는 보존된 **기존 계획 기반 복구** 경로: 목표 screenshot + initial HTML 전체 화면 + named-frame을
-최초 한 번 비교해 고정된 위치·크기·정렬·관계 계획을 만들고, 매 수정 후에는 DOM 측정과
-추상화 frame으로 계획 충족도를 계산합니다. 중간 full screenshot은 캡처하지 않습니다.
-기존 box-conditioned 모델과 구분하여 `--conditioning plan`으로 다시 학습합니다.
-[학습·실제 CSS 데이터 생성·Synthetic/D2C/Hard/WebUI 실험 가이드](docs/plan-repair.md)를 참고하세요.
-
-## 저장소 안내
-
-- [GitHub 운영·최초 게시 가이드](docs/GITHUB.md)
-- [기여 및 연구 재현 규칙](CONTRIBUTING.md)
-- [로컬 검증 기록](docs/VALIDATION.md)
-- [변경 이력](CHANGELOG.md)
-- [보안·데이터 취급](SECURITY.md)
-- [실제 HTML Self-Revision vs FrameDiff 전체 실험](docs/REAL_WEB_EXPERIMENT.md)
-- [WebUI 600/200/200 전체 visual fine-tuning 및 D2C/Hard 평가](docs/webui-finetuning.md)
-
-소스와 설정만 Git으로 관리합니다. `data/`, `runs/`, checkpoint, VLM weight, Playwright cache는 의도적으로 제외됩니다. MIT 라이선스이며 실제 저자·기관 정보는 공개 전에 `CITATION.cff`에 보완하세요.
-
-중요: 원 논문 구현을 그대로 재현한 프로젝트나 임의의 React/CSS를 자동 수정하는 완성품은 아닙니다. 첫 실험의 범위는 **동일 컴포넌트 집합·부모 관계에서 위치, 크기, 배치 속성, 형제 순서 수정**입니다. DDPM의 Gaussian noise/timestep 모델도 아닙니다. 연구 가설을 검증할 수 있는 실행 가능한 출발점입니다.
-
-기존 `run_real_web.sh`의 기본값은 `model-feedback`입니다. 한 CSS 속성 수정마다 실제 Chromium layout을
-다시 읽어 줄바꿈·auto height·형제 이동을 다음 입력에 반영합니다. `frames`는 실제 박스를 이름 붙은
-프레임 그림으로 저장하지만, 현재 모델은 이미지 픽셀이 아니라 측정 박스/트리 특징을 입력받습니다.
-기존 `model`은 proxy-only ablation으로 유지합니다. [실행·제약·비용 비교](docs/REAL_WEB_EXPERIMENT.md)를 참고하세요.
-목표 박스를 추정하는 VLM에는 목표 screenshot과 현재 DOM의 정확한 ID·박스를 표시한 named-frame
-이미지를 함께 제공하며, named frame의 현재 좌표와 목표 좌표를 프롬프트에서 명확히 구분합니다.
-같은 정답 DOM을 교란한 뒤 VLM/Oracle 목표 박스와 coordinate/FrameDiff 정책을 교차하는
-2×2 진단은 `scripts/run_oracle_ablation.sh`로 실행합니다.
-
-WebUI 원본 test 아카이브도 `WEB_DATASET=webui`로 같은 실제 HTML 파이프라인에 연결할 수 있습니다.
-저장 screenshot에서 초기 HTML을 생성하며, 평가는 원본 screenshot/AX 박스를 사용합니다.
-자세한 명령과 지표 정의는 [WebUI 실행 가이드](docs/REAL_WEB_EXPERIMENT.md#webui-원본-다운로드로-실행)에 있습니다.
-
-## 1. 바로 실행
-
-Python 3.11–3.14 사용. 이 작업 폴더에는 Python 3.12의 `.venv`가 준비되어 있습니다.
-
-### Conda
-
-저장소 root에서 다음을 실행합니다. `environment.yml`은 정확한 lock file이 아니라 Python과
-프로젝트 의존성을 설치하는 재현 가능한 진입점입니다.
-
-```bash
-conda env create -f environment.yml
-conda activate framediff
-python -m playwright install chromium
-python -m pytest -q
-```
-
-의존성을 변경한 뒤 기존 환경을 맞추려면:
-
-```bash
-conda env update -f environment.yml --prune
-```
-
-### venv
+Python 3.11 이상을 사용합니다. 모델별 별도 환경이 필요한 WebSight와
+Design2Code-18B 설치는 [전용 모델 안내](docs/screenshot-specialist-models.md)를 따릅니다.
 
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
-python -m pip install -e '.[browser,test]'
+python -m pip install -e '.[dev,visual,web,vlm,visual-metrics]'
 python -m playwright install chromium
-python -m framediff generate --out data/smoke --count 150 --seed 42
-python -m framediff suite --config configs/smoke.json
+python -m framediff --help
+```
+
+Design2Code 공식 지표의 추가 의존성과 실행 방법은
+[평가 안내](docs/paper-evaluation.md)에 있습니다.
+
+## 현재 데이터와 전처리
+
+현재 진입점은 `scripts/prepare_webui_css_color_images.sh`입니다.
+기존 `data/new/7000/source/manifest.jsonl`의 페이지 split과 다운로드 캐시를
+재사용하고, 새 결과는 `data/new-css-v1`에 저장합니다.
+
+1. 원본 HTML에 외부 CSS를 먼저 적용하고 로컬에 저장합니다.
+2. CSS 적용 후 이미지 크기를 확인하여 색상별 `rick` 이미지로 치환합니다.
+3. 목표 화면, Detector 라벨, 정규화된 HTML/CSS를 생성합니다.
+4. Train의 정상 상태와 Validation·Test의 고정 혼합 손상 데이터를 게시합니다.
+
+```bash
+bash scripts/prepare_webui_css_color_images.sh
+```
+
+- [전처리 순서·실행·재개·출력 경로](docs/webui-css-first-preparation.md)
+- [손상 없음·약한·중간·강한·여러 요소 손상 및 실제 기하 오차 로그](docs/mixed-corruption.md)
+- [이전 색상 이미지 데이터에서의 이전 안내](docs/webui-color-images.md)
+
+`7000`은 기존 디렉터리 이름입니다. 실제 페이지 수는 `split-report.json`을
+확인해야 합니다. 기존 페이지 split은 유지하며 실패한 페이지를 다른 페이지로
+보충하지 않습니다. CSS 적용으로 목표가 바뀐 경우 이전 렌더링·라벨을 새 정답으로
+재사용하지 않습니다. 다운로드와 동일한 소스·설정의 검사 캐시는 재사용합니다.
+
+## 학습
+
+현재 학습 경로는 `visual-train-detector`와 `visual-tree-train`입니다.
+주 설정은 stylesheet CSS 선언 교체, online mixed corruption,
+고정 Validation·Test입니다. S/M/L은 같은 입력·편집 문법을 사용합니다.
+
+```bash
+export TRAIN_DATA="$PWD/data/new-css-v1/7000/css"
+export TRAIN_RUN="$PWD/runs/webui-css-mixed-v1/7000"
+
+# Detector
+CUDA_VISIBLE_DEVICES=2 STAGE=detector \
+  bash scripts/run_webui_scale.sh 7000 data/new-css-v1 runs/webui-css-mixed-v1
+
+# Stage1: Detector 없이 학습 가능
+CUDA_VISIBLE_DEVICES=0 POLICY_STAGES=1 bash scripts/train_tuide_scale.sh s
+```
+
+Stage2는 같은 데이터 버전의 Detector와 예측 target 캐시가 필요합니다.
+[학습·캐시·Stage2·S/M/L 비교](docs/tuide-scales-korean.md)를 따릅니다.
+[영문 안내](docs/tuide-scales.md)도 제공합니다.
+
+CSS 우선 적용 및 mixed/STOP 학습으로 옮길 때는 새 학습 출력 경로를 사용합니다.
+같은 데이터·설정으로 중단된 실행은 기존 `last.pt`와 검사 캐시를 재사용할 수 있습니다.
+스크린샷 및 표현 ablation은 `scripts/train_webui_color_ablation.sh`를 사용합니다.
+
+## VLM 벤치마크와 평가
+
+공식 실험 목록은 LLaVA-NeXT-7B, GLM-4.1V-9B, WebSight VLM-8B,
+UI2CodeN입니다. WebSight는 image-only 생성이며 Self Revision을 실행하지 않습니다.
+다른 모델 및 API 연동 코드는 선택 실행과 기존 결과 재현을 위해 유지합니다.
+
+| 작업 | 실행 파일 / 안내 |
+|---|---|
+| Design2Code·Hard Initial / Self Revision / UI2CodeN, TUIDE 없이 선행 실행 | `scripts/run_d2c_vlm_baselines.sh`, [실행 안내](docs/d2c-vlm-baselines.md) |
+| GPU 0,1 및 2,4의 독립 모델 큐 | `scripts/run_d2c_vlm_parallel.sh` |
+| Design2Code·Hard 소규모 BF16 실험 | `scripts/run_d2c_pilot10_bf16_2gpu.sh`, [파일럿 안내](docs/d2c-vlm-pilot.md) |
+| WebUI·Design2Code·Hard 통합 실험 | `scripts/run_paper_matrix.sh`, [실험 안내](docs/paper-experiment-suite.md) |
+| 세 데이터셋 각각 10개 파일럿 | `scripts/run_paper_pilot10_bf16_2gpu.sh` |
+| 저장된 Initial에 S/M/L 적용 | `scripts/run_tuide_scales.sh`, [설정](docs/tuide-scales.md) |
+| 품질·실패율·시간 집계 | [평가 안내](docs/paper-evaluation.md) |
+
+WebUI를 포함하는 실행에서는 `WEBUI_TEST`에 새
+`data/new-css-v1/7000/css/pages-test.jsonl`을, `TRAIN_RUN` 및 체크포인트에는
+동일 데이터 버전의 학습 결과를 명시합니다. 과거 결과 재개 시에는 기존 경로를
+그대로 지정하고, 데이터·프로토콜을 변경하면 새 출력 경로를 사용합니다.
+
+모든 복원 방법은 저장된 동일 Initial HTML에서 시작합니다. 출력 상한은
+WebUI 16,384, Design2Code·Hard 4,096 토큰이며 현재 파일럿의 Self Revision/UI2CodeN은
+2회입니다. 공통 실행 파일에는 `REVISION_ROUNDS=2`를 명시합니다. Initial 생성 실패는 품질 평균에서 제외하고 성공률을 별도
+보고합니다. 복원 실패 시 마지막 유효 결과를 유지합니다.
+
+목표는 같은 브라우저 환경에서 정답 HTML을 렌더링한 화면입니다.
+Position·CLIP·Box IoU와 생성 성공률을 구분하여 보고하며, 공식 제공 PNG를
+그대로 사용한 평가와는 `local-reference-render-v1` 프로토콜로 구분합니다.
+
+## 진단 및 비교 실험
+
+- [Detector·DOM 불일치와 실패 분석](docs/repair-diagnostics.md)
+- [정상 복원 경로 및 학습 원인 분석](docs/policy-cause-audit.md)
+- [VLM의 첫 악화 편집 분석](docs/vlm-first-edit-audit.md)
+- [동일 DOM 손상 강도 비교](docs/structure-severity-audit.md)
+- [위치·크기 기반 보호·종료](docs/geometry-preservation.md)
+- [Target 출처와 CSS 누락 분석](docs/target-provenance-audit.md)
+- [외부 CSS만 재생하는 비교](docs/webui-css-replay.md)
+
+기하 보호는 명시적인 `--preserve-matched-geometry` 옵션입니다. 기존 실험을
+재개할 때 자동으로 켜지지 않으며, 비교할 때는 별도 출력 경로를 사용합니다.
+
+## 보존된 독립 실험과 개발 검증
+
+다음은 주 WebUI 학습 경로와 별도인 실험입니다. 공통 자료구조 및 기존
+체크포인트와의 호환성 때문에 관련 CLI와 모듈을 유지합니다.
+
+- [합성 CSS 편집 조합](docs/composition-benchmark.md)
+- [수치 CSS diffusion](docs/css-diffusion.md)
+- [계획 기반 복원](docs/plan-repair.md)
+- [LayoutIR 구조](docs/ARCHITECTURE.md)
+
+```bash
 python -m pytest -q -m 'not browser'
 python -m pytest -q -m browser
+make smoke
 ```
 
-이 컴퓨터에 이미 설치된 Chromium을 쓰려면:
-
-```bash
-export PLAYWRIGHT_BROWSERS_PATH="$PWD/.cache/ms-playwright"
-```
-
-`suite`는 학습, 비교 평가, seed별 집계를 순서대로 실행합니다. `runs/smoke-suite/aggregate.json`이 최종 결과입니다. 50-step smoke 설정은 연결 검증용이지 성능 평가용이 아닙니다.
-
-## 2. RTX 4090 학습·실험
-
-Linux에서 GPU/드라이버와 호환되는 CUDA PyTorch를 먼저 설치하고 `torch.cuda.is_available()`을 확인하세요. 아래 설정의 메모리 사용량은 이 Mac에서 검증하지 않았습니다.
-
-Conda를 사용한다면:
-
-```bash
-conda env create -f environment-4090.yml
-conda activate framediff-4090
-python -m playwright install --with-deps chromium
-python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
-```
-
-마지막 값이 `True`가 아니면 학습을 시작하지 말고, 해당 서버의 NVIDIA driver에 맞는 PyTorch
-wheel을 [PyTorch 공식 설치 선택기](https://pytorch.org/get-started/locally/)로 다시 설치하세요.
-Conda 환경 자체가 CUDA driver를 설치하지는 않습니다. VLM까지 같은 환경에서 실행하려면
-`python -m pip install -e '.[vlm]'`을 추가하되 24GB VRAM에서 학습 모델과 동시에 적재하지 않습니다.
-
-```bash
-python -m pip install -e '.[browser,test]'
-python -m playwright install --with-deps chromium
-python -m framediff generate --out data/synthetic --count 10000 --seed 42
-python -m framediff suite --config configs/4090.json
-```
-
-4090 설정: hidden=512, 8 layers, 8 heads, batch=8, accumulation=4, BF16, 10,000 steps, 3 seeds. VLM은 동시에 올리지 않습니다. OOM이면 `configs/4090.json`의 batch를 4→2로 낮추고 accumulation을 올리세요. 학습 시간·VRAM 수치를 측정 전 보장하지 않습니다.
-
-단일 학습과 재개:
-
-```bash
-python -m framediff train \
-  --train data/synthetic/train.jsonl --val data/synthetic/val.jsonl \
-  --out runs/main --device cuda --bf16 --hidden 512 --layers 8 \
-  --batch-size 8 --accumulation 4 --steps 10000
-
-# 위 명령에 --resume runs/main/last.pt 를 추가하고 동일 구조 설정 유지
-```
-
-`best.pt`, `last.pt`, `train.jsonl`, `manifest.json` 저장. optimizer와 RNG를 복구합니다. 데이터 변경 후 resume하지 마세요. validation의 편집 loss로 checkpoint를 고르며 test 점수로 선택하지 않습니다.
-
-## 3. 실행 구조
-
-1. AR VLM 또는 기존 시스템이 초기 LayoutIR 생성.
-2. 목표 frame을 `(id, role, name, parent, x, y, width, height)`에 대응시킴.
-3. 트리 속성/역할/이름 hash/부모 관계와 현재·목표 box를 denoiser에 입력.
-4. 모델이 합법적인 `(node, property, new_value)` 편집 후보 제안.
-5. 경량 CPU layout executor로 후보 평가, beam search로 선택.
-6. 마지막에만 HTML로 변환하고 Chromium으로 실제 좌표 검증.
-
-모델 루프에는 이미지 인코더가 **없습니다**. 이름을 그린 frame 이미지를 매번 인코딩하지 않고 동일 정보를 구조화된 tensor로 입력합니다. 역할 embedding과 이름 hash는 학습되지만, 이름 hash가 pretrained 언어 의미를 제공하는 것은 아닙니다. 스크린샷만 주어지면 별도 frozen VLM이 frame을 한 번 추출합니다.
-
-학습은 clean tree에 1–5회의 유효 속성 mutation을 적용하고, clean 값으로 되돌리는 편집들의 확률 합을 최대화합니다. 15%는 STOP 예제입니다. 이는 multi-step corruption에서 복원 편집을 학습하는 방식이며, 원 논문의 subtree replacement 분포/역과정 likelihood 재현은 아닙니다. 탐색은 관측 frame 오차를 사용하고 STOP/value head를 종료·선택 기준으로 쓰지 않습니다.
-
-## 4. 데이터 선택
-
-### A. 합성 실행 트리 — 바로 학습 가능
-
-`generate`는 header/nav/sidebar/card/grid/footer 등의 제한된 DSL 트리를 만듭니다. 각 clean tree, 손상된 current tree, 3개 viewport 목표 box를 저장합니다. viewport는 1024×768, 768×1024, 390×844입니다. 같은 속성 코드를 여러 폭에서 실행할 뿐, 미디어 쿼리나 모바일 재배치는 아직 없습니다. 작은 화면 overflow도 데이터에 남고 metric으로 보고됩니다.
-
-현재 split은 생성 seed 단위입니다. 같은 템플릿 계열과 ID 이름이 train/test에 재사용되므로, 이 점수는 **in-distribution 복원**만 의미합니다. 논문 수준의 일반화 주장을 위해 템플릿·사이트·출처가 분리된 실데이터 테스트가 추가로 필요합니다.
-
-### B. WebUI — 관측 frame 기반 geometry 사전학습
-
-[공식 WebUI 저장소](https://github.com/js0nwu/webui)의 원본 아카이브를 사용자가 라이선스·용량을 확인하고 내려받아 압축 해제합니다. 자동으로 대규모 데이터를 다운로드하지 않습니다. `*axtree.json.gz`, 같은 접두사의 `bb.json.gz`, `url.txt`를 읽습니다. `viewport.json.gz`는 화면 크기가 아니라 노드별 visibility 정보이므로 크기로 오해하지 않습니다.
-
-```bash
-python -m framediff import-webui --root /path/to/webui-extracted \
-  --out data/webui-raw --max-nodes 127 --limit 1000
-python -m framediff fit-frames --input data/webui-raw/observations.jsonl \
-  --out data/webui-fit --max-error 0.15
-python -m framediff train --train data/webui-fit/train.jsonl \
-  --val data/webui-fit/val.jsonl --out runs/webui --device cuda --bf16
-```
-
-AX tree와 좌표는 원본 CSS 정답이 아닙니다. `fit-frames`는 absolute-layout surrogate를 만들고 양자화/재부모화 오차를 `fit-report.json`에 기록합니다. 기본적으로 평균 IoU가 0.85 미만인 샘플을 제외합니다. 입력·평가 target은 실제 관측 box이고, 편집 label은 이를 가장 가깝게 재현한 surrogate IR입니다. 이 데이터는 실제 box geometry 사전학습·held-out 평가용이지 원본 웹 CSS 복원 benchmark가 아닙니다.
-
-도메인 hostname 기준 split, 학습/검증 및 평가 시 group 중복 검사를 제공합니다. 공식 split을 보존하려면 import에 `--split train|val|test`를 지정하고 각각 따로 처리하세요. 공식 split 간에도 같은 hostname이 있으면 의도적으로 실패하므로 정리해야 합니다. 노드 초과는 조용히 자르지 않고 거절합니다.
-
-### C. 자체 AR 오류 데이터
-
-실제 목적에 가장 가까운 것은 `reference → AR initial IR → clean executable IR` 쌍입니다. corruption-only와 AR-error fine-tuning을 분리해 비교하세요.
-
-```bash
-python -m framediff make-pair --current initial.json --target target.json \
-  --clean clean.json --id page-001 --group example.org \
-  --target-kind oracle_frames --out pair.jsonl
-```
-
-여러 JSONL을 도메인별로 묶어 train/val/test를 구성합니다. `--fixed-pairs` 학습은 저장된 AR 오류를 사용하고, 기본 학습은 clean에 온라인 corruption을 적용합니다. 부모 관계나 노드 집합이 다르면 명시적으로 거절합니다. 이름만으로 객체 대응을 자동으로 추측하지 않습니다.
-
-### D. Design2Code / Design2Code-Hard — 실제 페이지 최종 평가
-
-[공식 Design2Code 저장소](https://github.com/SALT-NLP/Design2Code)의 데이터는 각각 같은 이름의
-`xx.png`와 `xx.html` 쌍입니다. 이 프로젝트가 데이터를 자동 재배포하지 않으므로 공식 배포처에서
-Design2Code(484개)와 Hard(80개)를 내려받아 압축을 풉니다.
-
-먼저 JavaScript와 네트워크를 차단한 Chromium에서 reference HTML의 visible DOM box를 추출합니다.
-동시에 reference box를 근사하는 oracle surrogate test도 만듭니다.
-
-```bash
-python -m framediff prepare-design2code \
-  --root /datasets/Design2Code/testset_final \
-  --out data/design2code --dataset design2code --max-nodes 127
-
-python -m framediff prepare-design2code \
-  --root /datasets/Design2Code-Hard \
-  --out data/design2code-hard --dataset design2code-hard --max-nodes 127
-```
-
-`prepare-report.json`에서 거절 사유, visible node 수, surrogate fit IoU를 확인하세요. `manifest.jsonl`은
-실제 DOM box 정답이고 `oracle-test.jsonl`은 동일 ID의 actual-box oracle 평가입니다.
-
-```bash
-python -m framediff evaluate --data data/design2code/oracle-test.jsonl \
-  --checkpoint runs/main/best.pt --out runs/design2code-oracle --device cuda \
-  --methods none,coordinate,random,model,copy-boxes --browser-verify
-```
-
-실제 screenshot-to-repair 평가는 Qwen을 한 번 적재한 뒤 각 페이지에서 initial LayoutIR와 그 IR ID에
-대응한 predicted target frame을 생성합니다. `--resume`은 이미 저장된 두 VLM 산출물을 재사용합니다.
-
-```bash
-python -m framediff run-design2code \
-  --manifest data/design2code/manifest.jsonl \
-  --out data/design2code-qwen --backend qwen --four-bit --resume
-
-python -m framediff evaluate --data data/design2code-qwen/test.jsonl \
-  --checkpoint runs/main/best.pt --out runs/design2code-e2e --device cuda \
-  --methods none,copy-boxes,coordinate,model --browser-verify --screenshots
-```
-
-`none`은 AR initial IR, `copy-boxes`는 VLM이 예측한 frame 자체, `model`은 FrameDiff 수정 결과입니다.
-생성 IR의 ID와 reference DOM ID가 다르므로 평가는 IoU 최대 Hungarian geometry matching을 사용합니다.
-이 값은 이 연구의 component geometry 지표이며 Design2Code 공식 CLIP/text/color/block-match 점수를
-사칭하지 않습니다. `upstream_seconds`는 두 VLM 호출, `end_to_end_seconds`는 VLM과 수정을 합친 시간입니다.
-
-WebUI와 synthetic을 함께 학습하려면 split별로 명시적으로 합칩니다.
-
-```bash
-python -m framediff combine-data --split train \
-  --input data/synthetic/train.jsonl --input data/webui-fit/train.jsonl \
-  --out data/combined/train.jsonl
-python -m framediff combine-data --split val \
-  --input data/synthetic/val.jsonl --input data/webui-fit/val.jsonl \
-  --out data/combined/val.jsonl
-```
-
-WebSight는 이 프로토콜의 필수 평가 데이터가 아니며 포함하지 않습니다.
-
-## 5. VLM 연결 (선택)
-
-기본 adapter는 [Qwen3-VL-8B-Instruct 공식 API](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct)에 맞췄습니다. RTX 4090에서는 4-bit 옵션으로 시작하세요. 모델 다운로드·CUDA VLM 추론은 이 Mac에서 실행하지 않았습니다. 정확한 재현에는 `--revision`으로 model commit을 고정하세요.
-
-```bash
-python -m pip install -e '.[vlm]'
-python -m framediff vlm --backend qwen --four-bit \
-  --task generate-ir --image reference.png --out initial.json \
-  --max-new-tokens 8192
-python -m framediff vlm --backend qwen --four-bit \
-  --task extract-frames --image reference.png --current initial.json \
-  --out estimated-target.json
-python -m framediff vlm --backend qwen --four-bit \
-  --task revise-ir --image reference.png --current initial.json \
-  --out ar-revised.json --max-new-tokens 8192
-```
-
-`generate-html` / `revise-html`도 지원하지만, 임의 HTML의 자동 CSS 역변환은 제공하지 않습니다. `extract-html`은 self-contained static HTML의 실제 frame을 추출할 뿐입니다. 네트워크와 페이지 JavaScript를 차단하므로 외부 CSS/폰트/React hydration이 필요한 페이지는 동일하게 재현되지 않습니다.
-
-UI2CodeN의 평가 경로는 예외적으로 별도의 애플리케이션 렌더러를 사용합니다.
-`web-prepare --model zai-org/UI2Code_N`과 UI2CodeN polishing은 React/JSX/Babel/Tailwind
-금지 프롬프트를 넣지 않고, 허용된 CDN 라이브러리를 캐시하여 JavaScript를 실행합니다.
-실행 후 DOM과 CSSOM을 정적 HTML로 저장하고, 같은 viewport에서 원래 실행 화면과
-비교합니다(평균 픽셀 차이 ≤ 0.001, 모든 대응 요소 박스 차이 ≤ 1 CSS px).
-검증된 정적 HTML만 TUIDE의 기존 학습 표현과 평가 렌더러에 전달합니다.
-
-TUIDE의 `visual-evaluate`는 이 정적 HTML의 크기·margin 편집을 원본 애플리케이션에
-별도 CSS 적용 스크립트로 반영합니다. React/JSX 원본을 다시 생성하거나 정적 페이지로
-대체하지 않습니다. DOM 재생성 시에도 대응 요소의 CSS를 다시 적용하며, 수정된 앱의
-실행 화면이 TUIDE의 결과와 일치해야 채택합니다. 요소 대응·화면 보존 검증 실패는
-실패로 기록하고 초기 애플리케이션을 유지합니다. 이후 VLM polishing에는 정적 캡처가
-아닌 원본 애플리케이션 코드를 전달합니다.
-
-결과의 `application_html`은 실행 가능한 원본 앱 + CSS 편집 스크립트,
-`html`은 평가용 정적 캡처입니다. `application_capture`,
-`application_patch_verification` 및 각 폴더의 `freeze.json`, `verification.json`,
-`edits.json`으로 검증 결과와 비용을 확인합니다. 라이브러리 캐시 위치는
-`TUIDE_APP_ASSET_CACHE`(기본 `.cache/app-dependencies`)입니다. 이전 정적 실행 결과와
-설정이 다르므로 UI2CodeN 실험은 새 출력 폴더에서 시작합니다.
-
-UI2CodeN의 initial/self-revision/polishing에는 데이터셋별 이미지 규칙을 공통 적용합니다.
-Design2Code/Hard는 `rick.jpg`, 색상 치환 WebUI는 빨강/초록/노랑/파랑/검정에 각각
-`rick1.jpg`~`rick5.jpg`를 사용합니다. 새 이미지·SVG 그림·base64 이미지와 추가 이미지/아이콘/폰트
-팩을 생성하거나 추가하지 않도록 요청하며, React/JSX/Babel/Tailwind는 계속 허용합니다.
-이는 모델에 주는 지시이며, 픽셀 검증이 프롬프트 준수 여부까지 판정하지는 않습니다.
-
-실행 결과의 이미지·폰트 바이너리는 HTML에 base64로 넣지 않고
-`TUIDE_LOCAL_ASSET_CACHE`(기본 `.cache/application-assets`)에 내용 해시별 파일로 저장합니다.
-같은 자원은 재사용하며, HTML에는 짧은 `https://framediff-assets.invalid/...` 참조를 기록합니다.
-이 주소는 인터넷 서버가 아니라 두 렌더러가 해당 로컬 파일만 제공하는 오프라인 전용 주소입니다.
-따라서 평가용 임시 폴더로 HTML을 복사해도 같은 자원을 사용합니다. 파일 누락·변조는 오류로 처리합니다.
-외부 폰트의 형식/charset과 이미지 원본 바이트를 보존하고, 기존 픽셀·DOM 박스 검증을 유지합니다.
-`freeze.json`에 asset 캐시 경로, 변환 전/후 HTML 문자 수, 화면 검증 결과를 남깁니다.
-HTML을 일반 브라우저로 직접 열면 이 전용 주소가 해석되지 않으므로 프로젝트 렌더러를 사용해야 합니다.
-다른 서버로 결과를 옮길 때는 위 두 asset 캐시도 함께 복사하고 환경변수로 경로를 지정해야 합니다.
-저장 방식과 프롬프트 contract가 변경되어 기존 UI2CodeN 생성/평가 결과와 혼용하지 않습니다.
-기존 데이터·체크포인트·모델 다운로드·라이브러리 캐시는 지우지 않고 새 실험 출력 폴더를 사용합니다.
-
-이 경로는 초기 viewport의 레이아웃 복원을 위한 것입니다. JSX 소스 자체를 수정하거나
-모든 상호작용 상태의 동작·화면을 검증하지 않습니다. 요소의 위치·ID·직접 텍스트가
-달라져 대응할 수 없으면 편집을 건너뛰고 런타임 오류 기록에 남깁니다.
-Shadow DOM, canvas, iframe, 임의 외부 API 등 지원하지 않는 앱은 명시적으로 거부합니다.
-학습 데이터용 렌더러와 다른 VLM의 정적 생성 경로는 변경하지 않습니다.
-
-로컬 또는 원격의 호환 API 서버:
-
-```bash
-python -m framediff vlm --backend openai-compatible \
-  --endpoint http://localhost:8000/v1/chat/completions --model YOUR_MODEL \
-  --task revise-ir --current initial.json --image reference.png --out revised.json
-```
-
-키는 선택적으로 `VLM_API_KEY` 환경변수를 읽습니다. 원격 endpoint는 이미지·코드를 전송하므로 민감 자료에 주의하세요. 기본값은 localhost이며 자동 외부 전송은 없습니다. VLM 원문, prompt, 시간, 가능한 경우 token usage를 output 옆에 저장합니다. 형식 오류는 자동으로 정답을 고치거나 버리지 않고 실패합니다.
-
-VLM을 **유일한 평가 심판으로 사용하지 않습니다**. 일차 평가는 ID 대응된 좌표와 실제 브라우저 결과입니다. 예측 frame 실험은 독립적인 실제 정답을 반드시 제공해야 합니다:
-
-```bash
-python -m framediff make-pair --current initial.json --target estimated-target.json \
-  --ground-truth actual-target.json --target-kind predicted_frames \
-  --id page-001 --group example.org --out predicted-pair.jsonl
-```
-
-`evaluation_observations`는 점수 계산에만 쓰고 모델·탐색에는 전달하지 않습니다. 입력으로 제공한 추정 좌표를 그대로 복사하는 `copy-boxes`도 이때는 독립 정답과 평가합니다.
-
-## 6. 수정과 렌더링
-
-VLM 직접 수정 baseline은 먼저 별도 프로세스에서 생성한 뒤 동일 평가기에 넣습니다.
-Qwen과 FrameDiff를 동시에 GPU에 적재할 필요가 없습니다.
-
-```bash
-python -m framediff vlm-baseline \
-  --data data/design2code-qwen/test.jsonl --out data/design2code-vlm-baseline \
-  --backend qwen --four-bit --rounds 1 --resume
-
-python -m framediff evaluate \
-  --data data/design2code-vlm-baseline/test.jsonl \
-  --checkpoint runs/main/best.pt --out runs/design2code-baselines --device cuda \
-  --methods none,vlm-revise,coordinate,model \
-  --steps 10 --beam 2 --topk 8 --budget 160 --browser-verify --screenshots
-```
-
-Hard는 경로의 `design2code`를 `design2code-hard`로 변경합니다.
-WebUI는 `--data data/webui-fit/test.jsonl --out data/webui-vlm-baseline`을 사용합니다.
-처음에는 생성 명령에 `--limit 5`를 추가해 확인하고 전체 실행 시 제거하세요.
-
-- `none`: 동일 AR 초기 IR (WebUI는 corrupted surrogate).
-- `vlm-revise`: VLM 직접 수정. 기본 1회; `--rounds 3`은 매번 현재 결과를 렌더링해 총 3회 수정.
-- `model`: 동일 초기 IR에서 FrameDiff 수정. VLM baseline의 결과로 시작하지 않습니다.
-- screenshot이 있으면 목표 screenshot + 현재 frame screenshot + 현재 IR를 입력합니다.
-  `--input-mode frames` 또는 screenshot이 없는 WebUI에서는 입력 target boxes + 현재 frame screenshot + IR를 제공합니다.
-  입력 정보가 다른 프로토콜이므로 screenshot 조건과 oracle-box 조건은 별도로 보고하세요.
-- reference HTML, clean IR, 독립 evaluation box는 VLM에 전달하지 않습니다.
-- FrameDiff와 동일하게 node ID/부모/순서는 고정합니다. 자유로운 HTML 재생성 baseline은 아닙니다.
-- `repair_seconds`에 VLM 수정 및 피드백 rendering 시간이 포함됩니다. 모델 로딩은 제외됩니다.
-- `vlm_failure_rate`와 `status.json`을 함께 보고하세요. 실패 페이지를 제외하지 않고 마지막 유효 IR를 평가합니다.
-- `--resume`은 입력/설정 hash가 같은 산출물만 재사용합니다. 실패 산출물도 재사용하므로 재시도는 새 출력 폴더를 쓰세요.
-- 새 Design2Code 생성 레코드는 initial generation/frame extraction 시간을 분리합니다.
-  이전 레코드의 `end_to_end_seconds`는 공통 upstream 비용을 포함하므로 VLM-only 시간으로 해석하지 마세요.
-  이전 데이터에서는 `repair_seconds`로 수정 비용을 비교하거나 `run-design2code --resume`으로 레코드를 재구성하세요.
-
-출력 JSON/CSV의 `browser_box_iou`가 실제 Chromium 기준 정확도입니다.
-기본 `report.md`의 IoU 열은 proxy 좌표 기준이므로 browser 검증 값과 구분하세요.
-
-```bash
-python -m framediff export-example --data data/smoke/test.jsonl --out runs/example
-python -m framediff repair --ir runs/example/current.json \
-  --target runs/example/target.json --checkpoint runs/main/best.pt \
-  --out runs/repaired --device cuda --steps 10 --budget 160
-python -m framediff render --ir runs/repaired/repaired.json \
-  --out runs/repaired/render --width 1024 --height 768 --screenshot
-```
-
-`repaired.json`, viewport별 HTML, 수정 trace가 생성됩니다. 최종 frame HTML은 디버그용 이름/테두리를 표시합니다. 실제 서비스의 디자인·텍스트·이미지까지 재생성하지 않습니다.
-
-## 7. 비교 실험
-
-```bash
-python -m framediff evaluate --data data/synthetic/test.jsonl \
-  --checkpoint runs/main/best.pt --out runs/main/eval --device cuda \
-  --methods none,coordinate,random,model,copy-boxes \
-  --steps 10 --beam 2 --topk 8 --budget 160 --browser-verify
-
-# 매 후보 Chromium 실행 비용 vs 경량 executor (별도 소규모 측정)
-python -m framediff evaluate --data data/synthetic/test.jsonl \
-  --checkpoint runs/main/best.pt --out runs/main/latency --device cuda \
-  --methods model,model-browser --limit 20 --budget 160 --browser-verify
-```
-
-| 방법 | 의미 |
-|---|---|
-| `none` | 입력 코드 그대로 실행 |
-| `coordinate` | target-directed 후보 + 유한차분 coordinate/beam search |
-| `random` | 같은 비신경 후보 집합에서 무작위 제안 + 오차 기반 선택 |
-| `model` | 학습된 편집 제안 + 경량 executor 기반 선택 |
-| `model-browser` | 같은 모델, 후보마다 실제 Chromium 좌표로 피드백 |
-| `copy-boxes` | 입력 목표 좌표 복사; 실행 코드가 없는 진단용 기준 |
-| `one-shot` | `--objective boxes`로 별도 학습한 회귀 head; 단일 viewport만 지원 |
-
-AR baseline은 `vlm --task revise-ir` 출력으로 pair를 만들고 `none`으로 평가합니다. AR 호출 시간은 VLM `.meta.json`의 wall/generation 시간을 합쳐 보고해야 하며 이 평가 러너가 자동으로 더하지는 않습니다. 초기 generation, frame extraction 비용도 end-to-end 비교에 별도로 포함하세요.
-
-`configs/4090.json`은 tree bias 제거 및 fixed-pair 학습 ablation을 포함합니다. no-tree-bias는 관계 attention bias만 제거하며 depth/parent-derived geometry까지 모두 제거하는 것은 아닙니다. one-shot은 단일 viewport 데이터로 따로 학습·평가해야 합니다.
-
-평가 산출물:
-
-- `results.jsonl`: page별 IoU, center/size error, relation, success, overflow, 실행 횟수, 지연.
-- `summary.csv/json`, `report.md`: 평균, p95 latency, group-bootstrap IoU CI.
-- `predictions/`: 수정 IR, frame, 편집 trace. `--screenshots`는 최종 검증 스크린샷.
-- suite의 `aggregate.json`: seed별 평균·표준편차. 반복 seed를 독립 페이지로 취급하지 않음.
-
-후보 budget는 모델 forward 수가 아니라 제안된 후보 수입니다. 실제 execution은 캐시, viewport 수, early stopping에 따라 달라집니다. `proxy_executions`는 탐색 scorer의 실행 횟수이며 모든 Python 보조 계산 호출의 프로파일러는 아닙니다. `repair_seconds`는 checkpoint 로딩을 제외한 수정 단계, `total_seconds`는 최종 좌표 검증·metric 계산까지 포함하되 결과 파일 쓰기는 제외합니다. browser 실행 횟수와 이미지 screenshot 횟수는 다른 비용입니다. 이 코드의 model-browser는 geometry 재실행 비교이지 매번 raster+VLM을 돌리는 비교가 아닙니다.
-
-LayoutDM, LayoutFormer++, 원 논문의 공개 결과를 이 내부 baseline 이름으로 바꾸어 비교하지 않습니다. 탑티어 논문과의 정식 비교에는 각 공식 구현, 같은 데이터·출력 제약·관측 정보·계산 예산을 맞춘 별도 재현이 필요합니다.
-
-## 8. IR 명세와 한계
-
-경량 executor의 속도 이득과 정확도 손실은 `compare-renderers`로 paired 평가합니다.
-같은 페이지·checkpoint·candidate budget에서 proxy, Chromium DOM layout, 선택적으로 PNG 렌더링을
-비교하며 **모든 최종 IoU는 Chromium 결과로 계산**합니다. Predicted-frame 실험의 독립 reference 정답은
-탐색에 전달되지 않습니다. Oracle 실험은 명시적으로 실제 target box를 탐색 입력으로 사용합니다.
-
-```bash
-python -m framediff compare-renderers \
-  --data data/synthetic/test.jsonl --checkpoint runs/main/best.pt \
-  --out runs/render-cost/synthetic --device cuda \
-  --limit 20 --repeats 3 --warmup 1 --steps 10 --beam 2 --topk 8 --budget 160 --raster
-```
-
-동일 명령의 `--data`와 `--out`을 변경하여 각 데이터셋을 별도로 평가합니다.
-
-| Dataset | `--data` | `--out` |
-|---|---|---|
-| WebUI held-out | `data/webui-fit/test.jsonl` | `runs/render-cost/webui` |
-| Design2Code screenshot 입력 | `data/design2code-qwen/test.jsonl` | `runs/render-cost/design2code` |
-| Design2Code-Hard screenshot 입력 | `data/design2code-hard-qwen/test.jsonl` | `runs/render-cost/design2code-hard` |
-| Design2Code oracle 진단 | `data/design2code/oracle-test.jsonl` | `runs/render-cost/design2code-oracle` |
-
-`--limit 0`은 전체 데이터입니다. 20개는 앞부분이 아니라 seed로 무작위 선택하며 sample ID를 저장합니다.
-Warm-up 후 각 페이지의 backend 실행 순서를 무작위화하고 각 반복에 새 탐색 캐시를 사용합니다.
-`report.md`, `summary.json`, `paired.jsonl`, `results.jsonl` 및 모든 최종 IR/trace를 저장합니다.
-
-- `repair_speedup`: Chromium 탐색 시간 / proxy 탐색 시간.
-- `pipeline_speedup`: 저장된 VLM 호출 시간과 최종 Chromium 검증까지 포함한 비율.
-- `iou_loss_pp`: 100 × (Chromium 탐색 최종 IoU − proxy 탐색 최종 IoU). 양수면 proxy 손실.
-- `iou_loss_pp_ci95`: 반복을 페이지별 평균한 뒤 도메인/페이지 cluster bootstrap 95% 구간.
-- `search_browser_calls`, `verification_browser_calls`: 탐색과 최종 검증 호출을 분리.
-- `parity_max_error_px`: 같은 최종 IR에 대한 proxy/Chromium 좌표 차이.
-- `search_screenshots`: raster 옵션에서 실제 생성한 PNG 수. PNG 인코딩 포함, 디스크 저장/VLM 호출 제외.
-
-두 방법 모두 같은 LayoutIR가 컴파일된 frame HTML을 실행합니다. 원본 웹페이지의 전체 CSS·텍스트·asset
-렌더링과의 비용 비교는 아닙니다. Design2Code 입력/reference의 재현 품질과 DOM 선택에 따른 오차도 별도입니다.
-`--budget`은 상한이므로 early stop과 후보 차이에 따라 실제 후보/호출 수는 달라질 수 있습니다.
-모델/브라우저 시작 비용은 제외하며 VLM 실행 시간이 저장되지 않은 데이터의 pipeline 시간은 수정+검증만입니다.
-
-모든 노드는 `id,parent,role,name,props`, 트리는 `version:1,nodes:[...]`입니다. root는 첫 노드이고 viewport 크기로 고정됩니다.
-
-| 속성 | 인코딩 |
-|---|---|
-| width | 1–256, 부모 content 폭의 value/256 (grid는 cell 폭) |
-| height | 1–256, value×4 px |
-| dx,dy | 0–256, 일반 flow에서는 (value−32)×4 px 이동 |
-| flow | 0=row, 1=column, 2=grid, 3=absolute |
-| gap,padding | 0–16, value×4 px |
-| columns | 1–6 |
-| align | 0=start,1=center,2=end |
-| order | 0–31, 형제 순서 |
-
-부모가 absolute면 자식의 dx/dy는 부모 inner 크기의 value/256 위치입니다. absolute fitting의 선택은 geometry 실험 편의를 위한 것으로 반응형 CSS 설계의 정답이 아닙니다.
-
-미지원: 노드 추가/삭제/부모 변경, 임의 CSS selector cascade, auto/intrinsic text size, 글꼴·줄바꿈, assets, media queries, CSS AST source patching, 자유로운 페이지 의미 추론. 이를 감추지 않고 제한된 compiler/executor parity를 먼저 검증하는 설계입니다.
-
-## 9. 코드 위치
-
-- `framediff/ir.py`: IR 검증, 경량 executor, HTML compiler.
-- `data.py`, `adapters.py`, `benchmarks.py`: corruption, split, WebUI import/fit, Design2Code batch pipeline.
-- `model.py`, `train.py`: Transformer 편집 모델, 학습/resume.
-- `search.py`, `evaluate.py`, `suite.py`: 탐색, 비교, seed 집계.
-- `browser.py`, `vlm.py`: Chromium 검증, frozen VLM adapter.
-- `tests/`: mutation·loss·누수 방지·adapter·proxy/browser parity.
-- `environment.yml`, `environment-4090.yml`: CPU/개발 및 4090 학습용 Conda bootstrap 환경.
-
-## WebUI 색상 이미지 전처리의 최종 분할
-
-`scripts/prepare_webui_color_images.sh`는 이미지 치환·Detector 렌더링·정규화 결과를
-`data/new/master`에 캐시한 뒤, 최종 사용 가능한 고유 페이지를 seed 42로 8:1:1 분할한다.
-같은 `page_id`의 성공한 해상도는 모두 같은 split에 들어간다. 실패한 해상도만 제외하며,
-모든 해상도가 실패한 페이지는 전체에서 제외한다. N이 10의 배수가 아니면 Val/Test는
-각각 `floor(N/10)`, Train은 나머지다. 이는 페이지 단위 분할이며 도메인 독립 분할은 아니다.
-기존 도메인은 `source_group`, 원래 split은 `source_split`에 남긴다.
-
-이미 완료한 원본 렌더링·이미지 치환·정규화·후보 검사 및 호환되는 고정 손상 샘플을
-재사용한다. 새 Val/Test 페이지에 고정 손상 샘플이 없을 때만 추가 생성한다. 이때 실패한
-해상도/페이지를 제외하고 다시 할당하여 최종 사용 가능한 페이지 수에 맞춰 비율을 맞춘다.
-Train은 정규화된 clean target으로 온라인 손상을 생성한다. 과거 split 이름이 자산 폴더에
-남아 있어도 최종 manifest의 `split`이 학습·평가의 기준이다.
-
-전체 전처리 또는 중단 후 재개:
-
-```bash
-COLOR_DATA=data/new PREPARE_WORKERS=4 PREPARE_TIMEOUT=180 \
-  bash scripts/prepare_webui_color_images.sh
-```
-
-`master/labels` 정규화까지 완료됐다면 이미지 처리와 렌더링 단계를 건너뛰고 최종 분할만 실행:
-
-```bash
-python -m framediff.webui_final_split --data data/new --size 7000 --seed 42 --workers 4 --timeout 180
-```
-
-학습 입력은 `data/new/7000/rendered`와 `data/new/7000/css`에 저장한다. `7000`은 기존
-경로를 유지하는 이름이며, 실제 고유 페이지 수와 해상도별 렌더링 수는
-`data/new/split-report.json`에 기록한다. 7,000개를 자동으로 보충하지 않는다.
-기존 공개 manifest는 변경 시 `data/new/split-history`에 백업하며 master 자산은 유지한다.
-원래 단계의 탈락 기록은 master의 보고서에 보존한다. 분할이 달라졌으므로 기존 분할에서
-학습한 체크포인트를 재개하거나 새 Test의 성능으로 보고하지 말고 새 학습 출력 폴더를 사용한다.
-
-이미지 다운로드·색상 치환도 `PREPARE_WORKERS`로 병렬 처리하며, 동일 URL 다운로드는
-프로세스 간 잠금으로 공유한다. 성공 목록이 늘어도 기존 페이지 내용·설정이 같으면 후속
-렌더링/정규화 캐시를 재사용한다. 기존 ID의 내용 변경이나 삭제는 조용히 수용하지 않는다.
-`PREPARE_TIMEOUT`은 최종 Val/Test 손상 생성의 페이지별 작업 시간 제한이며,
-이미지 다운로드 자체나 전체 정규화 작업 시간 제한은 아니다. 시간 초과 worker만 교체하고
-다른 완료 결과를 보존한다. 더 큰 제한으로 재개하면 timeout 실패만 다시 시도하며,
-완료된 결과는 제한 변경과 무관하게 재사용한다.
-
-학습에서는 전체 HTML의 불필요한 worker 전송을 생략하고, 후보 검사 상세 진단은 원본을
-보존한 채 `.training` 파생 캐시로 가볍게 읽는다. 고정 검증 입력은 CPU에서 최대 128 MiB로
-캐시하며 모델 특징이나 GPU 텐서는 보관하지 않는다. Detector 체크포인트는 임시 파일 저장
-완료 후 교체한다. 검증 중 CUDA/OOM 등 실행 오류는 잘못된 예측으로 집계하지 않고 보고한다.
-이 최적화 자체는 기존 학습 체크포인트의 모델/optimizer 형식을 변경하지 않는다.
-
-배경 논문: [Diffusion On Syntax Trees For Program Synthesis, ICLR 2025](https://proceedings.iclr.cc/paper_files/paper/2025/hash/666dd0d92a64396e753c691db93493d4-Abstract-Conference.html). 이 구현의 차이와 실측 검증은 `docs/VALIDATION.md`에 기록합니다.
-
-### Evaluation timing diagnostics
-
-`web-evaluate` prints flushed JSON `evaluation_stage` events (`started`,
-`completed`, `failed`, or `cache_hit`) with page ID and method. Each newly
-computed row in `metrics.jsonl` also contains `evaluation_timing`:
-
-- `stage_seconds`: exclusive wall time (nested stages are subtracted).
-- `stage_inclusive_seconds`: wall time including nested work; do not sum these.
-- `stage_calls`: invocation counts.
-
-Stages separate `render_dom_snapshot`, `pixel_comparison`, `dom_box_matching`,
-`official_render`, `block_html_preprocess`, `block_pixel_extraction`,
-`block_matching`, `clip_image_preprocess` (masking/inpainting and resizing), and
-`clip` (remaining CLIP preprocessing, transfer, encoding and similarity).
-The inclusive `clip` duration covers the full CLIP metric. Upstream `.item()`
-waits for the resulting GPU similarity, so this is not only kernel launch time.
-`official_other` accounts for remaining upstream scoring work.
-Reference preparation and official initialization (including CLIP model loading)
-are logged separately from per-method scoring.
-
-Existing evaluation caches remain reusable and are not recomputed to obtain
-historical timings. In-memory score cache hits do not copy the original compute
-timings into the new row. Restart the evaluator with the updated code to profile
-new evaluations; an already running process does not acquire these changes.
-
-Official evaluation also uses bounded process-local caches for rendered PNGs,
-CLIP masking/resizing, CLIP image features, and ordered text-pair similarities.
-PNG/masked-image caches each retain at most 16 entries / 32 MiB; the feature
-cache retains at most 32 entries / 1 MiB. Cache hits are logged. Features are
-cloned before upstream in-place normalization, and feature reuse is disabled
-under autograd, training, or autocast. Mask cache keys include exact image bytes
-and ordered boxes, not just the page ID. Browser changes clear image/block caches.
-
-For recognized upstream OCR-free functions, exact vectorized pixel operations
-replace per-pixel Python loops and repeated PNG decoding; color tolerances,
-integer overflow behavior, coordinate order, and averaging remain unchanged.
-Unknown upstream pixel/text implementations fall back to their original code.
-`official.json` records which fast paths are enabled. Existing on-disk score
-caches and their signatures remain valid; no dataset preparation or VLM
-regeneration is needed. These optimizations do not reduce resolution, truncate
-blocks, change CLIP precision, or cap the official merging search.
-
-To aggregate actual work from a resumed evaluation log (also while it runs):
-
-```bash
-python -m framediff.evaluation_report \
-  --log log/d2c-pilot10-seed42-n2-static-v5-gpu01.log \
-  --out runs/d2c-pilot10-seed42-n2-static-v5/timing-report
-```
-
-The command prints a report and writes `evaluation-timing.json` and
-`evaluation-timing.md`. It ranks exclusive stage time and reports percentages,
-call counts, mean/max duration, failures, and CLIP's combined share. Group totals
-and detailed stage totals describe the same work, not additive totals. Initial
-CLIP/model loading is separate from per-page CLIP scoring. It reads stage events
-only: method-summary totals and historical timings in cached score files are
-never added again. Page-score, identical-HTML method-score, and internal-operation
-cache hits are reported separately as access counts (not unique page counts).
-
-Multiple distinct process logs may follow `--log`; do not supply mirrored copies
-of the same execution. Appended restarts count actual repeated work. Old logs
-without timing events cannot provide past timings. Pending/interrupted calls and
-malformed partial lines are reported; their missing durations cannot be inferred.
-The denominator is measured stage work, not full experiment elapsed time or GPU
-busy time. Report generation does not modify experiment results or caches.
+`make smoke`는 합성 LayoutIR 검증이며 TUIDE의 전체 학습·벤치마크가 아닙니다.
+`data/`, `runs/`, 다운로드/검사/평가 캐시, 체크포인트는 코드 정리 대상이 아닙니다.
+이전 데이터 폴더를 삭제하기 전에는 실제 서버 manifest와 심볼릭 링크의 참조를
+확인해야 합니다.
+
+[기여 안내](CONTRIBUTING.md) · [검증 기록](docs/VALIDATION.md) ·
+[변경 이력](CHANGELOG.md) · [보안](SECURITY.md)

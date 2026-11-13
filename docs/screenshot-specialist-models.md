@@ -1,8 +1,8 @@
 # Screenshot-specialist models in the paper matrix
 
-The default roster is LLaVA-NeXT-7B, GLM-4.1V-9B, WebSight VLM-8B,
-Design2Code-18B-v0, and UI2CodeN. Qwen, Gemma, and Pixtral loaders and individual
-runners remain available. New model combinations should use a new output root.
+The default roster is LLaVA-NeXT-7B, GLM-4.1V-9B, WebSight VLM-8B, and UI2CodeN.
+Design2Code-18B, Qwen, Gemma, and Pixtral loaders remain available through explicit
+`VLM_SPECS` selection. This document also retains the optional Design2Code setup. New model combinations should use a new output root.
 Existing source datasets, trained TUIDE weights, reference renders and prior
 model outputs are not deleted.
 
@@ -56,7 +56,7 @@ by the papers. Do not install SAT or the old Transformers into the main venv.
 ```bash
 cd /home/uisang/2027/frame-diffusion
 bash baselines/websight/setup.sh
-bash baselines/design2code/setup.sh
+bash baselines/design2code/setup.sh  # optional: only for explicit Design2Code-18B runs
 ```
 
 WebSight setup now loads its actual processor/tokenizer, checks the official
@@ -87,12 +87,12 @@ vendored CogVLM (not the generic CogVLM checkout).
 mkdir -p log
 nohup env CUDA_VISIBLE_DEVICES=0,1 PYTHONUNBUFFERED=1 \
   D2C_PILOT_PAGES=3 \
-  D2C_PILOT_OUTPUT=runs/d2c-pilot3-seed42-n2-official5-output4k-v1 \
+  D2C_PILOT_OUTPUT=runs/d2c-pilot3-seed42-n2-official4-output4k-v1 \
   bash scripts/run_d2c_pilot10_bf16_2gpu.sh \
-  > log/d2c-pilot3-seed42-n2-official5-v1.log 2>&1 < /dev/null &
+  > log/d2c-pilot3-seed42-n2-official4-v1.log 2>&1 < /dev/null &
 ```
 
-This uses three fixed pages per Design2Code dataset, all five initial models,
+This uses three fixed pages per Design2Code dataset, all four initial models,
 two supported self-revision/polishing rounds, common metrics, and table export.
 It never runs the different models concurrently on the same GPU pair.
 
@@ -104,7 +104,7 @@ CUDA_VISIBLE_DEVICES=0,1 python -m framediff vlm \
   --backend design2code-sat --model SALT-NLP/Design2Code-18B-v0 \
   --task generate-html --image data/raw/design2code/testset_final/10018.png \
   --out runs/specialist-smoke/design2code.html
-CUDA_VISIBLE_DEVICES=0 python -m framediff vlm \
+CUDA_VISIBLE_DEVICES=0,1 python -m framediff vlm \
   --backend websight --model HuggingFaceM4/VLM_WebSight_finetuned \
   --task generate-html --image data/raw/design2code/testset_final/10018.png \
   --out runs/specialist-smoke/websight.html

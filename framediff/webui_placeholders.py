@@ -57,7 +57,7 @@ def embed_placeholders(text):
     for tag in soup.find_all('style'):tag.string=css(tag.get_text())
     return str(soup)
 
-def convert_html(text,base,cache,browser,viewport):
+def convert_html(text,base,cache,browser,viewport,extra_refs=None,image_fetcher=None):
     from .image_asset_pilot import image_references,fetch_image,embed
     measure='''()=>[...document.querySelectorAll('body,body *')].filter(e=>!['STYLE','SCRIPT'].includes(e.tagName)).map(e=>{
       const r=e.getBoundingClientRect();return {box:[r.x,r.y,r.width,r.height]}})'''
@@ -67,6 +67,8 @@ def convert_html(text,base,cache,browser,viewport):
     for tag in eager.find_all('img'):tag['loading']='eager'
     text=str(eager)
     refs=image_references(text,base);replacements={};downloads={}
+    refs.update(extra_refs or {})
+    image_fetcher=image_fetcher or fetch_image
     browser.load(embed(text,refs),viewport)
     selected=browser.page.evaluate('''()=>{
       const urls=[...document.querySelectorAll('img,input[type=image]')].map(e=>e.currentSrc||e.src);
@@ -82,7 +84,7 @@ def convert_html(text,base,cache,browser,viewport):
     }''')
     for url in dict.fromkeys(refs.values()):
         if url not in selected:continue
-        result=fetch_image(url,cache,10)
+        result=image_fetcher(url,cache,10)
         if not result['ok']:raise ValueError(f'Image unavailable: {url}: {result.get("error")}')
         downloads[url]=result['uri']
     replacements={ref:downloads[url] for ref,url in refs.items() if url in downloads}

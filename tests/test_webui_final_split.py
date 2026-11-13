@@ -79,7 +79,7 @@ def test_page_split_reuses_assets_and_rebalances_failures(tmp_path,monkeypatch):
     assert calls==previous_calls  # Both success and failure checkpoints reused.
 
 
-def test_old_heldout_corruptions_reused_and_old_manifests_backed_up(tmp_path,monkeypatch):
+def test_old_heldout_corruptions_replaced_but_old_manifests_backed_up(tmp_path,monkeypatch):
     from framediff.tree_online import ONLINE_CONTRACT,asset_signatures
     import hashlib
     master=corpus(tmp_path)
@@ -96,9 +96,9 @@ def test_old_heldout_corruptions_reused_and_old_manifests_backed_up(tmp_path,mon
         write_json(folder/'record.json',dict(signature=asset_signatures([target]),rows=[saved]))
     write_jsonl(tmp_path/'7000/css/pages-test.jsonl',[{'old':True}])
     split.publish(tmp_path)
-    assert calls==[]
+    assert len(calls)==40  # Eight held-out views times five new profiles.
     assert list((tmp_path/'split-history').glob('*/7000/css/pages-test.jsonl'))
-    assert all(Path(r['current_html']).read_text()=='OLD'
+    assert all(Path(r['current_html']).read_text()=='<html>Corrupted</html>'
                for s in ('val','test') for r in read_jsonl(tmp_path/f'7000/css/policy-{s}.jsonl'))
 
 
@@ -170,3 +170,24 @@ def test_transitive_source_groups_are_deterministic():
     assert assignment['0'] == assignment['1'] == assignment['2']
     assert sum(counts.values()) == 20 and all(counts.values())
     assert split.allocate_linked(reversed(pages),42,reversed(links)) == (assignment,counts)
+
+
+def test_preserved_split_never_rebalances_after_failure(tmp_path,monkeypatch):
+    master=corpus(tmp_path)
+    original=list(read_jsonl(master/'source/manifest.jsonl'))
+    for row in original:
+        i=int(row['page_id'][1:])
+        row['split']='train' if i<16 else 'val' if i<18 else 'test'
+    write_jsonl(master/'source/manifest.jsonl',original)
+    previous=tmp_path/'previous.jsonl';write_jsonl(previous,original)
+    calls=fake_sampler(monkeypatch,fail=['p18/v0','p18/v1'])
+    report=split.publish(tmp_path,preserve_splits_from=previous)
+    assert report['sizes']['7000']==dict(train=16,val=2,test=1)
+    assert report['target_counts']==dict(train=16,val=2,test=2)
+    assert report['excluded_pages']==['p18']
+    assignment=split.preserved_assignment(original)
+    final=list(read_jsonl(tmp_path/'7000/source/manifest.jsonl'))
+    assert all(row['split']==assignment[row['page_id']] for row in final)
+    before=list(calls)
+    assert split.publish(tmp_path,preserve_splits_from=previous)==report
+    assert calls==before

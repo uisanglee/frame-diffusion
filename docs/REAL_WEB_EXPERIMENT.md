@@ -400,12 +400,12 @@ normal repeated HTML elements are not prohibited. Normal EOS stopping and the
 16384-token ceiling remain in effect. Generation metadata records the check and
 its stop reason; complete-HTML validation still runs after generation.
 
-The changed protocol is included in the preparation configuration to prevent mixing
-old and new experiment results. `run_paper_seed42.sh` now writes to
-`runs/paper-qwen3vl8b-bf16-seed42-16k-gpu-kv` or
-`runs/paper-llava-next-7b-seed42-16k-compact-v1-temp02`; shared reference renders and trained
-checkpoints are reused. Existing 16k experiment outputs are preserved. These settings
-are our adapted protocol, not an unchanged reproduction of the Design2Code prompts.
+The generation protocol is included in the preparation configuration to prevent mixing
+incompatible results. Use a new output directory when changing prompts, model
+settings, or resource policies; unchanged reference renders and trained checkpoints
+remain reusable. Optional Qwen experiments use `VLM_SPECS` with the generic paper
+runner. These settings are our adapted protocol, not an unchanged reproduction of
+the Design2Code prompts.
 
 ### Qwen BF16 memory policy
 
@@ -429,7 +429,7 @@ ceiling does not guarantee that every input fits.
 `run_paper_experiments.sh` now defaults to `INITIAL_TEMPERATURE=auto` for local
 models. The resolved numeric temperature is passed to preparation and recorded in
 its resume configuration. Explicit numeric overrides remain supported in this generic
-script; `run_paper_seed42.sh` always selects `auto`.
+script; the current pilot wrappers select `auto`.
 
 | Model | Initial temperature | Basis |
 | --- | --- | --- |

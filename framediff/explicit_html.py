@@ -54,6 +54,7 @@ def owner_size_limits(row):
 
 
 def check_record_edit(row,edit):
+    if edit is None:return
     from .tree_edits import explicit_value_valid
     minimum=owner_size_limits(row).get(edit[0],{}).get(edit[1])
     if minimum is not None and not explicit_value_valid(edit[2],minimum):

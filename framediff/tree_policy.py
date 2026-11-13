@@ -1,6 +1,6 @@
 """Image-conditioned replacement decoder and ordinary teacher-forced token CE.
 
-Ordinary token CE, no set loss, no learned STOP, no box oracle at inference.
+Ordinary token CE, no set loss, optional learned STOP, no box oracle at inference.
 Optional normalization corruption restores recorded original declarations.
 """
 import contextlib
@@ -75,6 +75,7 @@ class TreeConfig:
     # False keeps historical checkpoints loadable. New stylesheet training opts
     # in explicitly; inference then cannot add absent declarations/overrides.
     existing_values_only: bool = False
+    learn_stop: bool = False
     safe_sizes: bool = False
     abstraction_contract: str = BOUNDARY_CONTRACT
     abstraction_representation: str = 'occupancy-boundary'
@@ -112,7 +113,7 @@ class TreeConfig:
 
 class TreePolicy(nn.Module):
     def __init__(self, cfg, pretrained=True):
-        super().__init__(); self.cfg=cfg; self.tokenizer=EditTokenizer(cfg.max_nodes,cfg.fields)
+        super().__init__(); self.cfg=cfg; self.tokenizer=EditTokenizer(cfg.max_nodes,cfg.fields,allow_stop=cfg.learn_stop)
         from .visual import semantic_channels
         self.vision=SpatialEncoder(cfg.hidden,cfg.token_grid,pretrained,3*semantic_channels(cfg) if cfg.semantic else 9)
         self.token=nn.Embedding(len(self.tokenizer.tokens),cfg.hidden)
@@ -192,7 +193,7 @@ class TreePolicy(nn.Module):
                     size_limits=limits[i],preserve_priority=True)
                 if not prefixes[i] and restrictions[i] is not None:
                     permitted={self.tokenizer.ids[f'N{n}'] for n in restrictions[i]}
-                    allowed=[v for v in allowed if v in permitted]
+                    allowed=[v for v in allowed if v in permitted or (self.cfg.learn_stop and v==self.tokenizer.ids["EOS"])]
                 if not allowed:raise InvalidPrediction('No grammar-valid continuation')
                 token=allowed[int(scores[i,allowed].argmax())];prefixes[i].append(token)
                 if token==self.tokenizer.ids['EOS']:
@@ -211,7 +212,7 @@ class TreePolicy(nn.Module):
                 preserve_priority=True)
             if not prefix and allowed_owners is not None:
                 permitted={self.tokenizer.ids[f'N{i}'] for i in allowed_owners}
-                allowed=[v for v in allowed if v in permitted]
+                allowed=[v for v in allowed if v in permitted or (self.cfg.learn_stop and v==self.tokenizer.ids["EOS"])]
             if not allowed: raise InvalidPrediction('No grammar-valid continuation')
             tokens=torch.tensor([[self.tokenizer.ids['BOS'],*prefix]],device=target.device)
             scores=self.logits(memory,padding,tokens)[0,-1]
@@ -355,11 +356,19 @@ def symbolic_policy_metrics(net,rows,target_states,device,predicted,amp):
     totals={'n':0,'improving':0,'worsening':0,'no_change':0,'invalid':0,
             'target_correct':0,'gain':0.,'normalized_gain':0.,'distance':0.,'positive_actions':0.}
     fields=getattr(getattr(net,'cfg',None),'fields',FIELDS)
+    clean_n=0;clean_stops=0;clean_invalid=0
     per_property={field:{'n':0,'improving':0,'target_correct':0} for field in fields}
     if len(rows)!=len(target_states):raise ValueError('Validation rows and target states differ in length')
     for row,target in zip(rows,target_states):
         current=row['declaration_state'];faults=differing_sites(current,target,fields);before=len(faults)
-        if before<1:continue
+        if before<1:
+            if not getattr(getattr(net,"cfg",None),"learn_stop",False):continue
+            clean_n+=1
+            try:
+                with amp():action=net.predict(*batch_inputs(net,[row],device,predicted))
+                clean_stops+=int(action is None)
+            except InvalidPrediction:clean_invalid+=1
+            continue
         totals['n']+=1;totals['distance']+=before;totals['positive_actions']+=before
         # Model/data/device failures must not masquerade as invalid CSS actions.
         inputs=batch_inputs(net,[row],device,predicted)
@@ -367,6 +376,9 @@ def symbolic_policy_metrics(net,rows,target_states,device,predicted,amp):
             with amp():action=net.predict(*inputs)
         except InvalidPrediction:
             totals['invalid']+=1
+            continue
+        if action is None:
+            totals['no_change']+=1
             continue
         try:
             owner,field,value,priority=validate_edit(action,len(current),fields)
@@ -388,9 +400,10 @@ def symbolic_policy_metrics(net,rows,target_states,device,predicted,amp):
             elif gain<0:totals['worsening']+=1
             else:totals['no_change']+=1
     n=totals['n']
-    if not n:return {'symbolic_metric_n':0,'action_metric_contract':METRIC_CONTRACT,
+    stop_metrics=dict(clean_metric_n=clean_n,clean_stop_accuracy=clean_stops/clean_n if clean_n else None,clean_invalid_actions=clean_invalid)
+    if not n:return {**stop_metrics,'symbolic_metric_n':0,'action_metric_contract':METRIC_CONTRACT,
                      'action_target_accuracy':None,'exact_repair_action_rate':None}
-    return {'symbolic_metric_n':n,'action_metric_contract':METRIC_CONTRACT,
+    return {**stop_metrics,'symbolic_metric_n':n,'action_metric_contract':METRIC_CONTRACT,
             'action_target_accuracy':totals['target_correct']/n,
             'exact_repair_action_rate':totals['improving']/n,
             'symbolic_improving_action_rate':totals['improving']/n,
@@ -473,7 +486,8 @@ def train(args):
         cfg.stylesheets=True;cfg.action_contract=OWNER_CONTRACT
         cfg.__post_init__()
         cfg.existing_values_only=True
-    tok=EditTokenizer(cfg.max_nodes,cfg.fields)
+    cfg.learn_stop=getattr(args,"online_corruption",False) and getattr(args,"corruption_policy","mixed")=="mixed"
+    tok=EditTokenizer(cfg.max_nodes,cfg.fields,allow_stop=cfg.learn_stop)
     for row in training+validation:
         if row.get('lazy_contract'):
             if not (row['split']=='train' and args.online_corruption and args.stylesheets):
@@ -503,8 +517,13 @@ def train(args):
         targets=target_pool(training,args.online_targets,cache_dir=cache_root,observation_size=cfg.size,
                             workers=int(os.environ.get("TUIDE_INSPECTION_WORKERS", min(args.online_workers,4))))
         expected_corruption=cfg.action_contract if cfg.fields==('x','y','width','height') else ONLINE_CONTRACT
-        sampling_contract='box-site-uniform-px-v1' if cfg.fields==('x','y','width','height') else SAMPLING_CONTRACT
-        signatures['online']={'contract':expected_corruption,'sampling':sampling_contract,'assets':asset_signatures(targets)}
+        if getattr(args,'corruption_policy','mixed')=='mixed':
+            from .corruption_mix import CONTRACT as MIX_CONTRACT
+            if args.online_max_noise<2:raise ValueError('Mixed corruption requires online-max-noise >= 2')
+            if any(r.get('corruption_geometry',{}).get('contract')!=MIX_CONTRACT or r.get('corruption_policy')!='mixed' for r in validation):
+                raise ValueError('Mixed training requires mixed frozen validation: refresh final split or visual-tree-freeze first')
+        sampling_contract='box-site-uniform-px-v1'  if cfg.fields==('x','y','width','height') else SAMPLING_CONTRACT
+        signatures['online']={'contract':expected_corruption,'sampling':sampling_contract,'mixture':getattr(args,'corruption_policy','mixed'),'mixture_contract':MIX_CONTRACT if cfg.learn_stop else None,'assets':asset_signatures(targets)}
         if cfg.stylesheets and any(r.get('corruption_contract')!=expected_corruption for r in validation):
             raise ValueError('Validation uses old corruption; rerun prepare_stylesheet_policy.sh in a new output directory (reuse target assets/cache)')
     out=Path(args.out).resolve();settings={k:v for k,v in vars(args).items() if k not in ('out','steps','resume','init_checkpoint','policy_scale')}
@@ -571,6 +590,8 @@ def train(args):
         optimizer.load_state_dict(ck['optimizer']);rng.setstate(ck['rng']);torch.set_rng_state(ck['torch_rng'].cpu())
         if device.startswith('cuda') and ck.get('cuda_rng'): torch.cuda.set_rng_state_all(ck['cuda_rng'])
         start=ck['step'];best=ck['best'];early=ck['early_stopping']
+    from .corruption_mix import summary as corruption_summary
+    write_json(out/'corruption-validation.json',corruption_summary(validation))
     selected=validation_sample(validation,args.val_samples)
     if cfg.parent_first:
         from .parent_first import relabel_validation
@@ -585,6 +606,7 @@ def train(args):
     def amp(): return torch.autocast('cuda',dtype=torch.bfloat16) if device.startswith('cuda') and args.bf16 else contextlib.nullcontext()
     def loss(rows): return net.loss(*batch_inputs(net,rows,device,args.predicted_targets),[r['replacement_edit'] for r in rows])
     validation_inputs=ValidationInputs()
+    noise_window=[]
     def validation_loss(rows):
         return net.loss(*validation_inputs.get(net,rows,device,args.predicted_targets),
                         [r['replacement_edit'] for r in rows])
@@ -599,7 +621,7 @@ def train(args):
             if cursor is None: raise ValueError('Online resume requires a saved sample cursor')
             stream=stack.enter_context(OnlineStream(targets,cfg.mode,args.seed,args.online_max_noise,
                                                   args.online_workers,args.online_prefetch,args.online_attempts,args.online_timeout,cursor,
-                                                  parent_first=cfg.parent_first))
+                                                  parent_first=cfg.parent_first,corruption_policy=getattr(args,"corruption_policy","mixed")))
         # load_state_dict has copied/restored these tensors. Keeping the loaded
         # checkpoint retains a second CPU copy throughout resumed training.
         del ck
@@ -609,6 +631,11 @@ def train(args):
             net.train();optimizer.zero_grad(set_to_none=True);total=0.
             for _ in range(args.accumulation):
                 rows=stream.take(args.batch_size) if stream else [rng.choice(training) for _ in range(args.batch_size)]
+                noise_window.extend({'corruption_geometry':r['corruption_geometry']} for r in rows if 'corruption_geometry' in r)
+                with (out/'corruption-train.jsonl').open('a') as noise_log:
+                    for row in rows:
+                        if 'corruption_geometry' in row:
+                            noise_log.write(json.dumps(dict(step=step,id=row['id'],index=row.get('online',{}).get('index'),**row['corruption_geometry']))+'\n')
                 if lazy_detector is not None:
                     predictions=prediction_cache.predict(lazy_detector,[row['target_image'] for row in rows])
                     for row,prediction in zip(rows,predictions):row['lazy_predicted_elements']=prediction
@@ -628,6 +655,8 @@ def train(args):
                     metrics.update(online_samples=stream.cursor,online_timeout_skips=stream.timeout_skips,
                         online_generation_skips=stream.generation_skips,
                         online_timeout_retries=stream.timeout_retries)
+                metrics['corruption_geometry']=corruption_summary(noise_window)
+                noise_window.clear()
                 log('train.jsonl',metrics)
             if step%args.eval_every==0 or step==args.steps:
                 net.eval();weighted=0.;count=0
@@ -636,7 +665,8 @@ def train(args):
                     cohorts={}
                     for row in selected:
                         edit=row['replacement_edit']
-                        key=row['css_owners'][edit[0]]['kind']+'/'+('SET' if edit[2] else 'REMOVE')
+                        key=('STOP' if edit is None else row['css_owners'][edit[0]]['kind']+'/'+('SET' if edit[2] else 'REMOVE'))
+                        key=row.get('corruption_geometry',{}).get('requested_profile','legacy')+'/'+key
                         cohorts.setdefault(key,[]).append(row)
                 breakdown={}
                 with torch.no_grad():
@@ -659,6 +689,9 @@ def train(args):
                 if metric_rows:
                     metrics.update(symbolic_policy_metrics(net,metric_rows,metric_targets,device,
                                                            args.predicted_targets,amp))
+                # Describe the fixed states actually evaluated, not the train
+                # interval (which may already have been logged and cleared).
+                metrics['corruption_geometry']=corruption_summary(selected)
                 log('train.jsonl',metrics)
                 with (out/'validation.jsonl').open('a') as validation_file: validation_file.write(json.dumps(metrics)+'\n')
                 state={'kind':KIND,'config':config,'model':net.state_dict(),'optimizer':optimizer.state_dict(),

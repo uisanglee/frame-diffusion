@@ -31,6 +31,16 @@ after the first public release.
 
 ## [Unreleased]
 
+### Maintenance
+
+- Removed retired CSS-blocked/screened preprocessing launchers, procedural WebUI
+  training wrappers, and one-off benchmark rerun/API launchers. Shared modules,
+  optional model backends, data, results, checkpoints and caches are retained.
+- Consolidated current workflow documentation around CSS-first targets and mixed
+  corruption. TUIDE training/scale wrappers now default to
+  `data/new-css-v1/7000/css` and `runs/webui-css-mixed-v1/7000`; explicit paths take
+  precedence. Existing runs must continue to specify their original paths.
+
 ### Added
 
 - Batched fixed-topology VLM revision baseline, screenshot/frame input modes, multi-round feedback,

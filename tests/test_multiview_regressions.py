@@ -373,14 +373,21 @@ def test_lazy_training_cache_stage2_and_resume(tmp_path,monkeypatch):
     from framediff.lazy_webui import TrainViewCache
     from framediff.web_experiment import digest
     row=lazy_descriptor(tmp_path)
-    # Warm exactly the common detector/policy assets used by the new screening
-    # command, then check actual spawned training workers do not rebuild them.
-    from framediff.webui_screen import screen_view
-    shared=tmp_path/'screened-shared'
+    # Warm the common detector/policy caches directly, then check actual
+    # spawned training workers do not rebuild their completed assets.
+    from framediff.tree_online import OnlineSampler,target_pool
+    shared=tmp_path/'shared'
     monkeypatch.setenv('TUIDE_SHARED_CACHE',str(shared))
     monkeypatch.setenv('TUIDE_SAVE_DIAGNOSTICS','0')
-    assert screen_view(row,row,dict(shared_cache=str(shared),observation_size=64,
-                                   samples=1,max_noise=1,seed=42))['status']=='accepted'
+    warm_cache=TrainViewCache(cache_dir=shared/'lazy-train-views')
+    try:warm_cache.get(row)
+    finally:warm_cache.close()
+    targets=target_pool([row],cache_dir=shared/'inspection',observation_size=64)
+    sampler=OnlineSampler(targets,'screenshot',seed=42,max_noise=1)
+    try:
+        sample=sampler.generate(0)
+        assert sample['replacement_edit'] and sample['current_image']
+    finally:sampler.close();sampler.view_cache.close()
     def cached_assets():
         return {str(p.relative_to(shared)):(p.stat().st_mtime_ns,p.stat().st_size)
                 for p in (shared/'lazy-train-views').rglob('*') if p.is_file() and p.suffix!='.lock'}
@@ -420,6 +427,7 @@ def test_lazy_training_cache_stage2_and_resume(tmp_path,monkeypatch):
             args=['visual-tree-train','--train',str(tmp_path/('cached-train/data.jsonl' if predicted else 'policy-train.jsonl')),
                   '--val',str(tmp_path/('cached-val/data.jsonl' if predicted else 'policy-val.jsonl')),
                   '--out',str(out),'--mode',mode,'--stylesheets','--online-corruption',
+                  '--corruption-policy','legacy',
                   '--online-workers','1','--online-prefetch','1','--online-max-noise','1',
                   '--device','cpu','--no-pretrained','--size','32','--hidden','16','--layers','1',
                   '--heads','2','--token-grid','2','--max-nodes','32','--batch-size','1','--accumulation','1',

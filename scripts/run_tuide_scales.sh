@@ -5,11 +5,12 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
 [[ $# == 2 ]] || { echo 'Usage: bash scripts/run_tuide_scales.sh PREPARED_JSONL OUTPUT_ROOT' >&2; exit 2; }
 data=$1;output=$2
-detector=${DETECTOR_CHECKPOINT:-runs/webui-10k-v3-nospacing-fresh-webui/detector/best.pt}
-raw=${RAW_CHECKPOINT:-runs/tuide-targeted-inline-s-screenshot/replacement/raw-stage1/best.pt}
-s=${TUIDE_S_CHECKPOINT:-runs/tuide-targeted-inline-s-abstract/replacement/abstract-stage2/best.pt}
-m=${TUIDE_M_CHECKPOINT:-runs/tuide-targeted-inline-m-abstract/replacement/abstract-stage2/best.pt}
-l=${TUIDE_L_CHECKPOINT:-runs/tuide-targeted-inline-l-abstract/replacement/abstract-stage2/best.pt}
+train_run=${TRAIN_RUN:-runs/webui-css-mixed-v1/7000}
+detector=${DETECTOR_CHECKPOINT:-$train_run/detector/best.pt}
+raw=${RAW_CHECKPOINT:-$train_run/tuide-s-screenshot/replacement/raw-stage1/best.pt}
+s=${TUIDE_S_CHECKPOINT:-$train_run/tuide-s-abstract/replacement/abstract-stage2/best.pt}
+m=${TUIDE_M_CHECKPOINT:-$train_run/tuide-m-abstract/replacement/abstract-stage2/best.pt}
+l=${TUIDE_L_CHECKPOINT:-$train_run/tuide-l-abstract/replacement/abstract-stage2/best.pt}
 for path in "$data" "$detector" "$raw" "$s" "$m" "$l"; do
   [[ -f "$path" ]] || { echo "Missing input: $path" >&2; exit 2; }
 done
@@ -26,6 +27,6 @@ for scale in s m l; do
     --device "${DEVICE:-cuda}" --steps "${REPAIR_STEPS:-20}" --repeats "${REPEATS:-3}" \
     --limit "${PAGE_LIMIT:-0}" --seed "${SEED:-42}" --time-budget "${TIME_BUDGET:-0}" --resume
   python -m framediff web-evaluate --data "$output/$scale/repair/results.jsonl" \
-    --out "$output/$scale/evaluation" "${metrics[@]}" --resume
+    --out "$output/$scale/evaluation" ${metrics[@]+"${metrics[@]}"} --resume
 done
 python -m framediff.scale_report --root "$output"

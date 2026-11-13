@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Thirty fixed inputs, all five initial VLMs, no training or dataset changes.
+# Thirty fixed inputs, all four initial VLMs, no training or dataset changes.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 source .venv/bin/activate

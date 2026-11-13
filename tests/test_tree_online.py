@@ -286,7 +286,7 @@ def test_online_training_resume_keeps_fixed_validation(corpus,tmp_path,mode):
     validation_before=(tmp_path/'policy-val.jsonl').read_bytes()
     args=['visual-tree-train','--train',str(tmp_path/'policy-train.jsonl'),
           '--val',str(tmp_path/'policy-val.jsonl'),'--out',str(tmp_path/'run'),
-          '--mode',mode,'--online-corruption','--online-workers','1','--online-prefetch','1',
+          '--mode',mode,'--online-corruption','--corruption-policy','legacy','--online-workers','1','--online-prefetch','1',
           '--device','cpu','--no-pretrained','--size','32','--hidden','16','--layers','1',
           '--heads','2','--token-grid','2','--max-nodes','16','--batch-size','1',
           '--accumulation','1','--eval-every','1','--val-samples','1','--cpu-threads','2']

@@ -45,7 +45,8 @@ def add_parsers(sub):
     p.add_argument('--workers',type=int,default=1,help='Independent browser page workers; may change on resume')
     p.add_argument('--rendered',required=True);p.add_argument('--out',required=True)
     p.add_argument('--resume',action='store_true');p.add_argument('--seed',type=int,default=90210)
-    p.add_argument('--max-noise',type=int,default=4);p.add_argument('--samples-per-page',type=int,default=1)
+    p.add_argument('--max-noise',type=int,default=4);p.add_argument('--samples-per-page',type=int,default=5)
+    p.add_argument('--corruption-policy',choices=['legacy','mixed'],default='mixed')
     p.add_argument('--observation-size',type=int,default=384,help='Resolution for visible-corruption screening')
     p=sub.add_parser('visual-import-webui',help='Build page/domain-disjoint WebUI manifests and optional native AX detector labels')
     p.add_argument('--root',required=True);p.add_argument('--out',required=True)
@@ -96,6 +97,7 @@ def add_parsers(sub):
                 p.add_argument('--parent-first-max-probes',type=int,default=200,help='Inference proposal budget separate from accepted repair steps')
                 p.add_argument('--predicted-targets',action='store_true',help='Use frozen detector cache rather than DOM target masks')
                 p.add_argument('--online-corruption',action='store_true',help='Generate fresh CPU-browser corruption/path states during training only')
+                p.add_argument('--corruption-policy',choices=['legacy','mixed'],default='mixed')
                 p.add_argument('--online-targets',help='Training pages manifest containing clean tagged HTML; not initial_html')
                 p.add_argument('--policy-metric-samples',type=int,default=128,
                                help='Fixed validation states for symbolic one-step policy diagnostics; 0 disables')

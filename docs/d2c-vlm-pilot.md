@@ -6,16 +6,16 @@ pilot, not a representative benchmark estimate). Input manifests are frozen unde
 the output directory and shared by every model. On resume, changed selections are
 rejected. Source HTML/PNG pairs and `rick.jpg` must exist in both input directories.
 
-The official table uses five initial models, in this execution order:
-LLaVA-NeXT-7B, GLM-4.1V-9B-Thinking, WebSight VLM-8B,
-Design2Code-18B-v0, and UI2CodeN. Qwen, Gemma, and Pixtral adapters and
-individual runners remain available but are excluded from this default matrix.
+The official table uses four initial models, in this execution order:
+LLaVA-NeXT-7B, GLM-4.1V-9B-Thinking, WebSight VLM-8B, and UI2CodeN.
+Design2Code-18B, Qwen, Gemma, and Pixtral adapters remain available through
+explicit `VLM_SPECS` selection but are excluded from the default matrix.
 
 The BF16 two-GPU launcher uses GPUs 0 and 1. General Transformers models use
-layer placement; Design2Code uses a separate SAT model-parallel runtime.
-WebSight and Design2Code require their dedicated environments (`WEBSIGHT_PYTHON`
-and `DESIGN2CODE_PYTHON` may override their Python executables). Set these up before
-starting the matrix. No 4-bit quantization is enabled by this launcher. Runtime
+layer placement, including the dedicated WebSight worker. Set up the separate
+WebSight and UI2CodeN environments before starting the matrix. `WEBSIGHT_PYTHON`
+may override WebSight's Python executable. The optional Design2Code adapter uses a
+separate SAT model-parallel runtime; it is not required for this matrix. No 4-bit quantization is enabled by this launcher. Runtime
 memory depends on the model's image processing and context size; GPU execution
 must still be verified on the server.
 
@@ -31,17 +31,17 @@ echo $! > log/d2c-pilot10-seed42-n2-bf16-2gpu.pid
 
 Defaults are in the script: seed 42, model-specific initial sampling settings,
 4,096 maximum output tokens for every model and repair round, and two refinement
-rounds. WebSight and Design2Code retain their official image preprocessing and
-decoding settings, while their published total-length cap of 4096 is intentionally
+rounds. WebSight retains its official image preprocessing and decoding settings,
+while its published total-length cap of 4096 is intentionally
 replaced by an output-only cap of 4096 (input tokens are separate). Completed HTML or EOS ends generation early.
 The checkpoint's input-plus-output context limit and available GPU memory still
 apply; the output budget is not a context-length extension. WebUI experiments use
 16,384 output tokens; both Design2Code datasets use 4,096. The central paper runner
 applies this policy to Initial, supported Self Revision, and UI2CodeN polishing,
 even if the launching shell still contains an older global token-budget variable.
-They do not receive the generic text-augmented chat prompt. Their official
-protocols accept one screenshot and do not implement two-image self-revision;
-therefore their table groups contain Initial, UI2CodeN polishing, and (when
+WebSight does not receive the generic text-augmented chat prompt. Its official
+protocol accepts one screenshot and does not implement two-image self-revision;
+therefore its table group contains Initial, UI2CodeN polishing, and (when
 requested) TUIDE, with no fabricated Self Revision scores. Each ordinary VLM's Initial
 is the common starting HTML for its own RGB Self-Revision and UI2CodeN polishing.
 For UI2CodeN's own Initial, its polishing is its Self-Revision (not a duplicate

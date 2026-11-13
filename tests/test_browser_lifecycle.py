@@ -64,6 +64,22 @@ def test_shared_leases_reuse_browser_not_context(runtime):
     assert browser.close.call_count == runtime.stop.call_count == 1
 
 
+def test_inspection_thread_does_not_reuse_parent_worker_runtime(runtime):
+    from concurrent.futures import ThreadPoolExecutor
+    enable_worker_browser()
+    with Browser() as parent:
+        parent_runtime = parent._runtime
+    def inspect():
+        with Browser() as child:
+            assert not child._shared
+            assert child._runtime is not parent_runtime
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(inspect).result()
+    with Browser() as parent:
+        assert parent._shared and parent._runtime is parent_runtime
+    assert runtime.chromium.launch.call_count == 2
+
+
 def test_shared_browser_recycles_only_between_contexts(runtime, monkeypatch):
     monkeypatch.setenv('TUIDE_BROWSER_MAX_CONTEXTS', '2')
     enable_worker_browser()

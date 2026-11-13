@@ -57,6 +57,8 @@ def relabel_validation(rows,size):
     kept=[];excluded=[]
     with HtmlBrowser() as browser:
         for row in rows:
+            if row.get("replacement_edit") is None:
+                kept.append(row);continue
             browser.reset_context();browser.load(Path(row['target_html']).read_text(),row['viewport'])
             mask,_,_=abstraction(browser,row['current'],row['viewport'],size)
             clean=css_owners.read(browser,row['current'])['state']

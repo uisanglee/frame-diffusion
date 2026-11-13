@@ -277,7 +277,8 @@ def prepare(args):
 
 class EditTokenizer:
     """node → field → replacement value/absence → priority → EOS. No STOP."""
-    def __init__(self, max_nodes, fields=FIELDS):
+    def __init__(self, max_nodes, fields=FIELDS, allow_stop=False):
+        self.allow_stop=allow_stop
         self.fields=tuple(fields)
         if self.fields != FIELDS:raise ValueError('Only width/height/margin actions are supported')
         self.tokens = ['PAD','BOS','EOS','SET','REMOVE','NORMAL','IMPORTANT']
@@ -287,11 +288,13 @@ class EditTokenizer:
         self.max_nodes = max_nodes; self.max_length = MAX_VALUE + 5
 
     def encode(self, edit, node_count):
+        if edit is None and self.allow_stop:return [self.ids["EOS"]]
         node,field,value,priority = validate_edit(edit,node_count,self.fields)
         text = [f'N{node}',field] + (['SET',*value,'IMPORTANT' if priority else 'NORMAL'] if value else ['REMOVE']) + ['EOS']
         return [self.ids[t] for t in text]
 
     def allowed(self, prefix, node_count, state=None, size_limits=None, preserve_priority=True):
+        if prefix==[self.ids["EOS"]] and self.allow_stop:return []
         p = [self.tokens[i] for i in prefix]
         if not p: choices = [f'N{i}' for i in range(1,min(node_count,self.max_nodes))]
         elif len(p)==1: choices = list(self.fields)
@@ -324,9 +327,11 @@ class EditTokenizer:
                     value=''.join(p[3:])
                     choices=[c for c in choices if (explicit_value_valid(value,minimum)
                              if c in ('NORMAL','IMPORTANT') else bounded_px_prefix(value+c,minimum))]
+        if not p and self.allow_stop:choices.append("EOS")
         return [self.ids[t] for t in choices]
 
     def decode(self, tokens, node_count):
+        if tokens==[self.ids["EOS"]] and self.allow_stop:return None
         prefix=[]
         for t in tokens:
             if t not in self.allowed(prefix,node_count): raise ValueError('Invalid edit token sequence')

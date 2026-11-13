@@ -132,9 +132,9 @@ if [[ "${REBUILD_HELDOUT:-0}" == 1 ]]; then
     --rendered "$REUSE_SPLITS/master/labels" --out "$data/master/labels" \
     --clean-heldout --workers "${PREPARE_WORKERS:-4}" \
     --observation-size "${IMAGE_SIZE:-384}" --resume
-  python -m framediff visual-tree-freeze --rendered "$data/master/labels" \
+  python -m framediff visual-tree-freeze --corruption-policy "${CORRUPTION_POLICY:-mixed}" --rendered "$data/master/labels" \
     --out "$data/master/css" --workers "${PREPARE_WORKERS:-4}" \
-    --samples-per-page "${FIXED_SAMPLES_PER_PAGE:-1}" --max-noise "${ONLINE_MAX_NOISE:-4}" \
+    --samples-per-page "${FIXED_SAMPLES_PER_PAGE:-5}" --max-noise "${ONLINE_MAX_NOISE:-4}" \
     --observation-size "${IMAGE_SIZE:-384}" --seed "${TEST_SEED:-90210}" --resume
 elif [[ "${RELABEL_POLICY_ONLY:-0}" == 1 ]]; then
   [[ -n "${REUSE_SPLITS:-}" ]] || { echo 'RELABEL_POLICY_ONLY requires REUSE_SPLITS' >&2; exit 2; }
@@ -194,9 +194,9 @@ python -m framediff visual-tree-normalize --rendered "$data/master/rendered" \
   --observation-size "${IMAGE_SIZE:-384}" \
   --max-pixel-mae "${NORMALIZE_MAX_PIXEL_MAE:-0.01}" \
   --max-box-error "${NORMALIZE_MAX_BOX_ERROR:-1}" --resume
-python -m framediff visual-tree-freeze --rendered "$data/master/labels" \
+python -m framediff visual-tree-freeze --corruption-policy "${CORRUPTION_POLICY:-mixed}" --rendered "$data/master/labels" \
   --out "$data/master/css" --workers "${PREPARE_WORKERS:-4}" \
-  --samples-per-page "${FIXED_SAMPLES_PER_PAGE:-1}" --max-noise "${ONLINE_MAX_NOISE:-4}" \
+  --samples-per-page "${FIXED_SAMPLES_PER_PAGE:-5}" --max-noise "${ONLINE_MAX_NOISE:-4}" \
   --observation-size "${IMAGE_SIZE:-384}" --seed "${TEST_SEED:-90210}" --resume
 fi
 python -m framediff visual-webui-scales-subset --data "$data"

@@ -26,9 +26,9 @@ python -m framediff visual-tree-normalize --rendered "$source_corpus" \
   --observation-size "${IMAGE_SIZE:-384}" \
   --max-pixel-mae "${NORMALIZE_MAX_PIXEL_MAE:-0.01}" \
   --max-box-error "${NORMALIZE_MAX_BOX_ERROR:-1}" --resume
-python -m framediff visual-tree-freeze --rendered "$labels" \
+python -m framediff visual-tree-freeze --corruption-policy "${CORRUPTION_POLICY:-mixed}" --rendered "$labels" \
   --workers "$workers" \
-  --out "$data_out" --samples-per-page "${FIXED_SAMPLES_PER_PAGE:-1}" \
+  --out "$data_out" --samples-per-page "${FIXED_SAMPLES_PER_PAGE:-5}" \
   --max-noise "${ONLINE_MAX_NOISE:-4}" --observation-size "${IMAGE_SIZE:-384}" --resume
 for split in train val; do
   reuse=()

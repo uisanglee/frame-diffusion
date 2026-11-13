@@ -13,8 +13,8 @@ export BATCH_SIZE=${BATCH_SIZE:-2} ACCUMULATION=${ACCUMULATION:-4}
 export VAL_SAMPLES=${VAL_SAMPLES:-2000} EVAL_EVERY=${EVAL_EVERY:-500} SEED=${SEED:-42}
 export TUIDE_SAVE_DIAGNOSTICS=${TUIDE_SAVE_DIAGNOSTICS:-0}
 export TUIDE_SHARED_CACHE=${TUIDE_SHARED_CACHE:-$PWD/data/webui-shared-cache}
-run=${TRAIN_RUN:-runs/webui-color-images-v1/7000}
-data=${TRAIN_DATA:-data/new/7000/css}
+run=${TRAIN_RUN:-runs/webui-css-mixed-v1/7000}
+data=${TRAIN_DATA:-data/new-css-v1/7000/css}
 detector=${DETECTOR_CHECKPOINT:-$run/detector/best.pt}
 export POLICY_STAGE1_STEPS=15000 POLICY_STAGE2_STEPS=5000
 case "$kind" in

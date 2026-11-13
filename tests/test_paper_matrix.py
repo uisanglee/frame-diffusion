@@ -126,36 +126,6 @@ printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$1" "$VLM_MODEL" "$WEB_DATASET" "$REVI
     assert ('framediff.repair_diagnostics' in py_calls)==(run_tuide=='1')
 
 
-def test_seed42_qwen_runner_uses_bf16_and_separate_outputs(tmp_path):
-    import os
-    import subprocess
-    from pathlib import Path
-    repo = Path(__file__).resolve().parents[1]
-    script = tmp_path/'scripts/run_paper_seed42.sh'
-    script.parent.mkdir()
-    script.write_text((repo/'scripts/run_paper_seed42.sh').read_text())
-    activate = tmp_path/'.venv/bin/activate'
-    activate.parent.mkdir(parents=True)
-    activate.write_text('true\n')
-    tools = tmp_path/'bin'; tools.mkdir()
-    bash = tools/'bash'
-    bash.write_text('''#!/bin/sh
-printf '%s|%s|%s|%s|%s|%s\\n' "$VLM_SPECS" "$CUDA_VISIBLE_DEVICES" "$MAX_NEW_TOKENS" "$INITIAL_SEEDS" "$INITIAL_TEMPERATURE" "$3" >> "$CALL_LOG"
-''')
-    bash.chmod(0o755)
-    env = dict(os.environ, PATH=str(tools)+os.pathsep+os.environ['PATH'],
-               CALL_LOG=str(tmp_path/'calls'), CUDA_VISIBLE_DEVICES='0')
-    env.pop('MAX_NEW_TOKENS', None)
-    result = subprocess.run(['/bin/bash', str(script), 'qwen'], env=env, capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
-    calls = (tmp_path/'calls').read_text().splitlines()
-    assert len(calls) == 3
-    for line, dataset in zip(calls, ('webui', 'design2code', 'design2code-hard')):
-        # The multi-dataset wrapper delegates its budget to the central runner.
-        assert line == ('qwen3vl8b|qwen|Qwen/Qwen3-VL-8B-Instruct|bf16|0||42|auto|'
-                        'runs/paper-qwen3vl8b-bf16-seed42-16k-gpu-kv/' + dataset)
-
-
 def test_official_roster_contains_only_requested_models():
     from pathlib import Path
     expected = ['llava-next-7b', 'glm4v-9b-thinking', 'websight-8b', 'ui2coden']

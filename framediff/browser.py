@@ -1,9 +1,11 @@
 from pathlib import Path
 import os
+import threading
 from .ir import compile_html
 
 class _Runtime:
     def __init__(self):
+        self.owner_thread = threading.get_ident()
         self.pw = self.browser = None
         self.active = False
         self.contexts = 0
@@ -57,8 +59,11 @@ class Browser:
     def __init__(self):
         self.executions=0;self.screenshots=0
     def __enter__(self):
-        self._runtime = _worker_runtime if _worker_runtime is not None else _Runtime()
-        self._shared = _worker_runtime is not None
+        # Preparation may launch inspection threads inside a process worker.
+        # Playwright/greenlets cannot cross the worker's owning thread.
+        self._shared = (_worker_runtime is not None and
+                        _worker_runtime.owner_thread == threading.get_ident())
+        self._runtime = _worker_runtime if self._shared else _Runtime()
         if self._runtime.active:
             raise RuntimeError('Overlapping browser leases in one worker are not supported')
         self._runtime.active = True

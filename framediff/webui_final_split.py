@@ -22,6 +22,23 @@ CONTRACT = 'webui-final-success-page-source-811-v2'
 SPLITS = ('train', 'val', 'test')
 
 
+def preserved_assignment(rows):
+    """Read the final published split; never reshuffle pages after attrition."""
+    assignment = {}
+    seen = set()
+    for row in rows:
+        page = str(row.get('page_id', row['id'].split('/')[0]))
+        split = row['split']
+        if row['id'] in seen or split not in SPLITS:
+            raise ValueError('Invalid or duplicate preserved split record')
+        seen.add(row['id'])
+        if page in assignment and assignment[page] != split:
+            raise ValueError(f'Page appears in multiple preserved splits: {page}')
+        assignment[page] = split
+    if not assignment: raise ValueError('Empty preserved page split')
+    return assignment
+
+
 def allocate(pages, seed):
     ordered = sorted(set(pages), key=lambda p: hashlib.sha256(f'{seed}:{p}'.encode()).hexdigest())
     n = len(ordered)
@@ -100,7 +117,8 @@ def _heldout(task):
         args = SimpleNamespace(**settings, resume=True)
         old = master/'css'
         old_config = read_json(old/'config.json') if (old/'config.json').exists() else {}
-        compatible = (old_config.get('corruption_contract') == ONLINE_CONTRACT and
+        compatible = (old_config.get('corruption_policy','legacy') == settings.get('corruption_policy','legacy') and
+            old_config.get('corruption_contract') == ONLINE_CONTRACT and
             all(old_config.get(k) == settings[v] for k,v in
                 [('seed','seed'),('max_noise','max_noise'),('samples','samples_per_page'),
                  ('observation_size','observation_size')]))
@@ -122,12 +140,22 @@ def _rows(master, stage, kind):
     return [r for s in SPLITS for r in read_jsonl(master/stage/f'{kind}-{s}.jsonl')]
 
 
-def publish(root, size=7000, seed=42, workers=4, timeout=180):
+def publish(root, size=7000, seed=42, workers=4, timeout=180, preserve_splits_from=None):
     import math
     if workers<1 or not math.isfinite(timeout) or timeout<=0:
         raise ValueError('workers and timeout must be positive')
     root = Path(root).resolve(); master = root/'master'; base = root/str(size)
     source = {r['id']: r for r in read_jsonl(master/'source/manifest.jsonl')}
+    preserved_rows = list(read_jsonl(preserve_splits_from)) if preserve_splits_from else None
+    preserved = preserved_assignment(preserved_rows) if preserved_rows is not None else None
+    contract = 'webui-preserved-final-page-split-v1' if preserved is not None else CONTRACT
+    if preserved is not None:
+        old = {r['id']:r for r in preserved_rows}
+        for view, row in source.items():
+            page = str(row.get('page_id', view.split('/')[0]))
+            if (view not in old or page != str(old[view].get('page_id', view.split('/')[0])) or
+                    row['split'] != preserved[page]):
+                raise ValueError(f'View/page split differs from preserved input: {view}')
     tables = {stage: {kind: _rows(master,stage,kind) for kind in kinds}
               for stage,kinds in [('rendered',('pages','policy','detector')), ('labels',('pages','policy'))]}
     pages = {r['id']: r for r in tables['labels']['pages']}
@@ -150,10 +178,17 @@ def publish(root, size=7000, seed=42, workers=4, timeout=180):
                 link(row, row['id'] if kind=='pages' else row['id'].rsplit('/',1)[0])
     normalized_count = len(set(page_ids.values()))
     frozen = {}; rejected = {}
-    settings = dict(seed=90210,max_noise=4,samples_per_page=1,observation_size=384)
+    from .corruption_mix import CONTRACT as MIX_CONTRACT
+    settings = dict(seed=90210,max_noise=4,samples_per_page=5,observation_size=384,corruption_policy='mixed',mixture_contract=MIX_CONTRACT)
     round_number = 0
     while True:
-        assignment, counts = allocate_linked((page_ids[v] for v in available), seed, links)
+        if preserved is not None:
+            assignment = {page_ids[v]:preserved[page_ids[v]] for v in available}
+            counts = {s:sum(value==s for value in assignment.values()) for s in SPLITS}
+            if any(count==0 for count in counts.values()):
+                raise ValueError('A preserved split has no successful pages; inspect rejections, do not repartition')
+        else:
+            assignment, counts = allocate_linked((page_ids[v] for v in available), seed, links)
         validate_splits([{**source[v], 'group':'webui-page:'+page_ids[v],
                           'page_id':page_ids[v], 'split':assignment[page_ids[v]]} for v in available])
         pending = sorted(v for v in available if assignment[page_ids[v]]!='train' and v not in frozen)
@@ -186,7 +221,7 @@ def publish(root, size=7000, seed=42, workers=4, timeout=180):
         return {**row, 'source_group':source[view].get('source_group',source[view]['group']),
                 'source_split':source[view].get('source_split',source[view]['split']),
                 'page_id':page_ids[view], 'group':'webui-page:'+page_ids[view],
-                'split':assignment[page_ids[view]], 'split_contract':CONTRACT}
+                'split':assignment[page_ids[view]], 'split_contract':contract}
 
     outputs = {}
     selected = [move(source[v],v) for v in sorted(available)]
@@ -208,20 +243,30 @@ def publish(root, size=7000, seed=42, workers=4, timeout=180):
         if s!='train':
             for row in final_pages: row['initial_html'] = frozen[row['id']][0]['current_html']
         outputs[f'css/policy-{s}.jsonl'] = policy
+        outputs[f'css/corruption-{s}.jsonl'] = [dict(id=r['id'],**r['corruption_geometry']) for r in policy if 'corruption_geometry' in r]
         outputs[f'css/pages-{s}.jsonl'] = final_pages
         outputs[f'css/rejections-{s}.jsonl'] = []
         outputs[f'labels/rejections-{s}.jsonl'] = []
     validate_splits([r for s in SPLITS for r in outputs[f'css/policy-{s}.jsonl']])
-    report = dict(contract=CONTRACT,seed=seed,common_test_scale=size,sizes={str(size):counts},
+    from .corruption_mix import summary
+    report = dict(corruption_geometry={s:summary(outputs[f'css/policy-{s}.jsonl']) for s in SPLITS},contract=contract,seed=seed,common_test_scale=size,sizes={str(size):counts},
         unique_pages=sum(counts.values()),
         normalized_candidate_pages=normalized_count,
         image_success_pages=len({r.get('page_id',r['id']) for r in source.values()}),
         renderings={s:len(outputs[f'css/pages-{s}.jsonl']) for s in SPLITS},
         protocol='Successful unique pages, page/source-disjoint (not domain-disjoint); all usable views and source-linked pages stay together',
         rounding='Target val=test=floor(N/10); source-linked pages stay together, so actual counts may differ',
-        target_counts=allocate((page_ids[v] for v in available), seed)[1],
+        target_counts=({s:sum(v==s for v in preserved.values()) for s in SPLITS} if preserved is not None
+                       else allocate((page_ids[v] for v in available), seed)[1]),
         heldout_rejections=[rejected[v] for v in sorted(rejected)],assets_root=str(master),
         note='Train uses normalized clean targets; val/test additionally require fixed corruption. No automatic top-up to the directory size.')
+    if preserved is not None:
+        report.update(preserved_manifest=str(Path(preserve_splits_from).resolve()),
+            preserved_manifest_sha=digest(preserve_splits_from),
+            protocol='Original published page split preserved; no reassignment or top-up after failures',
+            rounding='No new 8:1:1 rounding; ratios may change after exclusions',
+            excluded_views=sorted(set(r['id'] for r in preserved_rows)-available),
+            excluded_pages=sorted(set(preserved)-set(assignment)))
     # Back up only published manifests/metadata, never images or HTML assets.
     previous = root/'split-report.json'
     changed = not previous.exists() or read_json(previous)!=report
@@ -232,7 +277,7 @@ def publish(root, size=7000, seed=42, workers=4, timeout=180):
                 dest=history/path.relative_to(root);dest.parent.mkdir(parents=True,exist_ok=True)
                 shutil.copy2(path,dest)
     for path, rows in outputs.items(): write_jsonl(base/path,rows)
-    write_json(base/'css/config.json',dict(kind=CONTRACT,data={
+    write_json(base/'css/config.json',dict(kind=contract,data={
         str(base/'labels'/f'policy-{s}.jsonl'):digest(base/'labels'/f'policy-{s}.jsonl') for s in SPLITS}))
     write_json(base/'coverage.json',dict(selected=counts,final_success=report,assets_root=str(master)))
     write_json(base/'rendered/report.json',dict(split_coverage={s:dict(usable=counts[s],
@@ -240,10 +285,10 @@ def publish(root, size=7000, seed=42, workers=4, timeout=180):
     write_json(base/'labels/prepare-report.json',{s:dict(selected_pages=counts[s],
         source_pages=counts[s],clean_pages=counts[s],kept=counts[s],rejected=0,
         clean_views=report['renderings'][s],kept_views=report['renderings'][s],rejected_views=0,
-        protocol=CONTRACT, note='Counts after final screening; original attrition remains in master reports') for s in SPLITS})
+        protocol=contract, note='Counts after final screening; original attrition remains in master reports') for s in SPLITS})
     write_json(base/'css/freeze-report.json',{s:dict(pages=counts[s],page_views=report['renderings'][s],
-        rows=len(outputs[f'css/policy-{s}.jsonl'])) for s in SPLITS})
-    write_json(root/'config.json',dict(kind=CONTRACT,sizes=[size],split_counts={str(size):counts},seed=seed))
+        rows=len(outputs[f'css/policy-{s}.jsonl']),geometry=report['corruption_geometry'][s]) for s in SPLITS})
+    write_json(root/'config.json',dict(kind=contract,sizes=[size],split_counts={str(size):counts},seed=seed))
     write_json(previous,report)
     print(json.dumps(dict(final_split_complete=True,unique_pages=counts,renderings=report['renderings'])),flush=True)
     return report
@@ -258,13 +303,14 @@ def main():
     p.add_argument('--data',required=True);p.add_argument('--size',type=int,default=7000)
     p.add_argument('--seed',type=int,default=42);p.add_argument('--workers',type=int,default=4)
     p.add_argument('--timeout',type=float,default=180,help='Active seconds per held-out view; completed caches are reused')
+    p.add_argument('--preserve-splits-from', help='Previously published source manifest: never reassign page splits')
     args=p.parse_args()
     if args.workers<1 or args.size<1: p.error('size/workers must be positive')
     import fcntl
     root=Path(args.data);root.mkdir(parents=True,exist_ok=True)
     with (root/'.final-split.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        publish(root,args.size,args.seed,args.workers,args.timeout)
+        publish(root,args.size,args.seed,args.workers,args.timeout,args.preserve_splits_from)
 
 
 if __name__=='__main__': main()

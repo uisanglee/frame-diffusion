@@ -143,4 +143,4 @@ printf '%s\\n' "$CUDA_VISIBLE_DEVICES" "$VLM_DEVICE_MAP" "$UI2CODEN_PRECISION" "
     assert lines[1:4] == ['3,4', 'balanced', 'bf16']
     assert lines[4] == 'runs/paper-pilot10-seed42-n2-bf16-2gpu-v1'
     specs = lines[5].split(',')
-    assert len(specs) == 6 and all(spec.endswith('|bf16') for spec in specs)
+    assert len(specs) == 4 and all(spec.endswith('|bf16') for spec in specs)

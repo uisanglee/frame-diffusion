@@ -24,7 +24,9 @@ case "$ABSTRACTION_REPRESENTATION" in
     suffix="$suffix-$ABSTRACTION_REPRESENTATION" ;;
   *) echo 'Invalid ABSTRACTION_REPRESENTATION' >&2; exit 2;;
 esac
-export POLICY_RUN_DIR=${5:-runs/tuide-safe-size-margin-$scale-$POLICY_MODES$suffix}
+train_run=${TRAIN_RUN:-runs/webui-css-mixed-v1/7000}
+train_data=${TRAIN_DATA:-data/new-css-v1/7000/css}
+export POLICY_RUN_DIR=${5:-${POLICY_RUN_DIR:-$train_run/tuide-$scale-$POLICY_MODES$suffix}}
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 export DEVICE=${DEVICE:-cuda}
 export PYTHONUNBUFFERED=${PYTHONUNBUFFERED:-1}
@@ -47,6 +49,6 @@ export EARLY_STOP_PATIENCE=${EARLY_STOP_PATIENCE:-10}
 export EARLY_STOP_MIN_DELTA=${EARLY_STOP_MIN_DELTA:-0}
 echo "Training TUIDE-$scale ($POLICY_MODES), visible GPU=$CUDA_VISIBLE_DEVICES -> $POLICY_RUN_DIR"
 exec bash scripts/train_numeric_policy.sh \
-  "${2:-data/webui-safe-size-margin-v1}" \
-  "${3:-runs/webui-10k-v3-nospacing-fresh-webui/detector/best.pt}" \
-  "${4:-runs/webui-safe-size-margin-v1-shared}"
+  "${2:-$train_data}" \
+  "${3:-${DETECTOR_CHECKPOINT:-$train_run/detector/best.pt}}" \
+  "${4:-$train_run/shared}"
